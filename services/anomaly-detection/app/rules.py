@@ -63,6 +63,7 @@ def apply_rules(
     vessel_meta: Dict[str, Any],
     previous_features: Optional[Dict[str, Any]] = None,
     port_nearby: bool = False,
+    weather_meta: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Apply all anomaly rules to a feature window.
@@ -84,8 +85,18 @@ def apply_rules(
     turn_reversals = features.get("turn_reversal_count", 0)
     draught_change = features.get("draught_change_m")
 
+    # Extreme weather flags
+    extreme_weather = False
+    if weather_meta:
+        w_speed = weather_meta.get("wind_speed_kmh")
+        if w_speed is not None and w_speed >= 50.0:  # > 50 km/h is rough
+            extreme_weather = True
+        c_speed = weather_meta.get("current_speed_ms")
+        if c_speed is not None and c_speed >= 1.5:  # > 1.5 m/s is very strong current
+            extreme_weather = True
+
     # Rule 1: Sudden Stop
-    if (avg_speed is not None and avg_speed < SUDDEN_STOP_CURR_SPEED_MAX_KN
+    if (not extreme_weather and avg_speed is not None and avg_speed < SUDDEN_STOP_CURR_SPEED_MAX_KN
             and not port_nearby and previous_features is not None):
         prev_speed = previous_features.get("avg_speed")
         if prev_speed is not None and prev_speed > SUDDEN_STOP_PREV_SPEED_MIN_KN:
@@ -102,7 +113,7 @@ def apply_rules(
             })
 
     # Rule 2: Erratic Course
-    if course_variance is not None and course_variance > ERRATIC_COURSE_VARIANCE:
+    if not extreme_weather and course_variance is not None and course_variance > ERRATIC_COURSE_VARIANCE:
         severity = "HIGH" if course_variance > ERRATIC_COURSE_VARIANCE * 2 else "MEDIUM"
         events.append({
             "mmsi": mmsi, "window_start": window_start,

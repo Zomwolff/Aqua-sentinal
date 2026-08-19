@@ -7,3 +7,6 @@ numpy
 scikit-learn
 python-dotenv
 tenacity
+scikit-learn
+pandas
+joblib

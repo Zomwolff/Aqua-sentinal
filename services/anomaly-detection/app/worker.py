@@ -19,6 +19,7 @@ from shared.db import get_pool
 from shared.redis_client import get_redis, ensure_consumer_group, consume_stream, publish_to_stream
 from app.rules import apply_rules, check_ais_gap, AIS_GAP_THRESHOLD_MIN
 from app.statistical import update_vessel_stats, compute_z_score_anomalies, merge_anomaly_events
+from app.ml_model import predict_anomaly, ml_training_loop
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +40,10 @@ async def run_anomaly_worker() -> None:
     redis = await get_redis()
     await ensure_consumer_group(redis, "ais.features", CONSUMER_GROUP)
     log.info("Anomaly detection worker started.")
+    
+    # Start ML training background loop
+    asyncio.create_task(ml_training_loop())
+    
     last_gap_check = 0.0
 
     while True:
@@ -113,10 +118,19 @@ async def _process_features(features: Dict[str, Any], pool, redis) -> None:
             except Exception:
                 pass
 
-        rule_events = apply_rules(features, vessel_meta, previous_features, port_nearby)
+        weather_row = await pool.fetchrow(
+            """SELECT wind_speed_kmh, wind_direction_deg, current_speed_ms, current_direction_deg
+               FROM environmental_conditions
+               ORDER BY timestamp DESC LIMIT 1"""
+        )
+        weather_meta = dict(weather_row) if weather_row else {}
+
+        rule_events = apply_rules(features, vessel_meta, previous_features, port_nearby, weather_meta)
         await update_vessel_stats(redis, mmsi, features)
         stat_events = await compute_z_score_anomalies(redis, features, vessel_type)
-        all_events = merge_anomaly_events(rule_events, stat_events)
+        ml_events = predict_anomaly(features)
+        
+        all_events = merge_anomaly_events(rule_events, stat_events) + ml_events
 
         for event in all_events:
             await _save_and_publish_event(event, pool, redis)

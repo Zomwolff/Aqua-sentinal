@@ -55,6 +55,9 @@ async def run_ingestion_worker() -> None:
     redis = await get_redis()
     deduplicator = AISDeduplicator(redis)
 
+    from app.weather import weather_polling_loop
+    asyncio.create_task(weather_polling_loop())
+
     if provider == "none":
         log.info("AIS_PROVIDER=none. Accepting only POST /ingest/ais.")
         while True:
