@@ -44,6 +44,38 @@ Open the dashboard at `http://localhost:3000`. Health checks are available at `h
 | 5433 | PostgreSQL 15 + PostGIS (mapped from container 5432) |
 | 6380 | Redis 7 (mapped from container 6379) |
 
+## Database
+
+PostgreSQL 15 + PostGIS is the central persistent store. The schema is defined in `infra/postgres/init.sql` and is initialized automatically on the first start of a fresh `pgdata` volume (9 tables, PostGIS `GEOMETRY(...,4326)` columns, GIST/b-tree indexes).
+
+Connection details come from the `.env` file (`POSTGRES_*` variables). Inside the Docker network the hostname is `postgres` on port `5432`; from your machine it's `localhost:5433`.
+
+```bash
+# Inspect via psql inside the container
+docker compose exec postgres psql -U aqua_sentinel -d aqua_sentinel
+
+# Verify the schema (9 tables, columns, PKs, FKs, spatial types, indexes)
+python scripts/verify_db.py              # needs: pip install -r scripts/requirements.txt
+
+# Optional demo data (a few vessels, positions, one spill, attribution, forecasts,
+# severity, recommendations, protected area, environmental observations)
+python scripts/seed_demo_data.py
+```
+
+> **Spatial rule:** columns are stored as `GEOMETRY(...,4326)` (degrees). For real-world distances use a geography cast — e.g. `ST_Distance(a.geom::geography, b.geom::geography)` returns meters, `ST_DWithin(a.geom::geography, b.geom::geography, radius_meters)`. Topology ops (`ST_Intersects`, `ST_Contains`, `ST_Within`) stay geometry-based. See `docs/spatial.md` and the `shared/spatial` helpers.
+
+## Tests
+
+```bash
+docker run --rm --network aqua-sentinal_aqua-net \
+  -e POSTGRES_HOST=postgres -e POSTGRES_DB=aqua_sentinel \
+  -e POSTGRES_USER=aqua_sentinel -e POSTGRES_PASSWORD=change_me \
+  -v "$PWD":/work -w /work python:3.11-slim \
+  sh -c "pip install -q -r tests/requirements.txt && python -m pytest tests/ -v"
+```
+
+Spatial regression tests verify meter-vs-degree distance, `ST_DWithin` radius semantics, geometry-based topology, and longitude/latitude order.
+
 ## Service ports
 
 Each service runs uvicorn on port 8000 inside its container and is exposed on a unique host port:
@@ -84,5 +116,10 @@ Each service runs uvicorn on port 8000 inside its container and is exposed on a 
 │   └── <service>/            # Dockerfile, requirements.txt, app/main.py
 ├── dashboard/                # React + Vite + Leaflet frontend
 ├── simulator/                # Data replay simulator (script, not a server)
-└── docs/                     # architecture.md, api-contracts.md
+├── shared/                   # Shared Python modules (mounted into all services)
+│   ├── db/                   # asyncpg pool (connection.py) + pydantic models
+│   └── spatial/              # geography-cast distance helpers + constants
+├── scripts/                  # verify_db.py, seed_demo_data.py
+├── tests/                    # pytest regression tests (spatial)
+└── docs/                     # architecture.md, api-contracts.md, spatial.md
 ```
