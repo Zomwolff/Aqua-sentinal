@@ -1,1 +1,88 @@
-# Aqua-sentinal
+# Aqua Sentinel — Maritime Oil-Spill Detection & Attribution
+
+A real-time maritime intelligence system for the Smart India Hackathon that detects oil spills from SAR imagery and AIS vessel data, fuses the evidence, attributes spills to source vessels, and recommends response actions. A pipeline of Python/FastAPI microservices exchanges events over Redis Streams, persists spatio-temporal data in PostGIS, and serves a live Leaflet-based dashboard through an API gateway.
+
+## Prerequisites
+
+- Docker (with Docker Compose v2, i.e. `docker compose`, or the standalone `docker-compose`)
+- A working `.env` file (see Setup)
+
+## Setup
+
+```bash
+# 1. Clone or enter the project root
+cd <project-root>
+
+# 2. Create the .env file from the template and edit values if needed
+cp .env.example .env
+
+# 3. (Optional) Validate the compose file before building
+docker-compose config
+
+# 4. Build and start the full stack (first build pulls base images, takes a few minutes)
+docker-compose up --build
+
+# 5. Verify everything is healthy
+docker-compose ps
+docker-compose logs -f            # watch all service logs
+
+# 6. Check service health endpoints (example: api-gateway)
+curl http://localhost:8015/health
+
+# 7. Stop the stack
+docker-compose down               # stop containers (named volume `pgdata` is kept)
+docker-compose down -v            # stop AND delete the Postgres data volume
+```
+
+Open the dashboard at `http://localhost:3000`. Health checks are available at `http://localhost:<port>/health` for every service.
+
+> **Port note:** host ports 5433 and 6380 are used instead of the default 5432/6379 so the stack can coexist with native PostgreSQL/Redis services already running on this machine. If you don't have local services on 5432/6379, you can set `ports` back to `5432:5432` and `6379:6379` in `docker-compose.yml`.
+
+| Port | Service |
+|------|---------|
+| 3000 | Dashboard (React/Vite, served by nginx) |
+| 5433 | PostgreSQL 15 + PostGIS (mapped from container 5432) |
+| 6380 | Redis 7 (mapped from container 6379) |
+
+## Service ports
+
+Each service runs uvicorn on port 8000 inside its container and is exposed on a unique host port:
+
+| Port | Service | Purpose |
+|------|---------|---------|
+| 8001 | data-ingestion | Ingests AIS/SAR feeds and publishes raw events to Redis Streams |
+| 8002 | ais-analytics | Computes per-vessel behavioral features (speed/course statistics) |
+| 8003 | anomaly-detection | Flags AIS behavioral anomalies (stoppages, deviations, loitering) |
+| 8004 | dark-vessel-detection | Detects dark (non-transmitting) vessels from SAR imagery |
+| 8005 | ais-spoof-detection | Detects spoofed or inconsistent AIS signals |
+| 8006 | sts-detection | Detects ship-to-ship (STS) transfer events |
+| 8007 | vessel-risk-engine | Ranks vessels by risk from features and history |
+| 8008 | sar-spill-intelligence | Extracts oil-spill candidates from SAR tiles |
+| 8009 | lookalike-engine | Retrieves historical lookalike spill events |
+| 8010 | evidence-fusion | Fuses SAR, AIS, and environmental evidence into incidents |
+| 8011 | source-attribution | Attributes incidents to likely source vessels |
+| 8012 | drift-forecast | Forecasts spill drift under met-ocean forcing |
+| 8013 | severity-impact | Assesses severity and environmental/coastal impact |
+| 8014 | response-decision | Recommends priority response actions |
+| 8015 | api-gateway | Public REST API + live WebSocket relay to the dashboard |
+
+## Project structure
+
+```
+.
+├── docker-compose.yml        # Full stack orchestration
+├── .env.example              # Environment variable template
+├── infra/                    # postgres init schema + redis config
+│   ├── postgres/init.sql     # PostGIS extension, tables, indexes
+│   └── redis/redis.conf
+├── data/                     # Mounted (read-only) into the simulator
+│   ├── sample_sar/           # SAR imagery samples
+│   ├── sample_ais/           # AIS message samples
+│   ├── env_layers/           # Environmental grids (wind, currents)
+│   └── geo_layers/           # Coastlines, EEZ, protected areas
+├── services/                 # 15 FastAPI microservices, one container each
+│   └── <service>/            # Dockerfile, requirements.txt, app/main.py
+├── dashboard/                # React + Vite + Leaflet frontend
+├── simulator/                # Data replay simulator (script, not a server)
+└── docs/                     # architecture.md, api-contracts.md
+```

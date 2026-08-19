@@ -1,0 +1,222 @@
+x-backend-defaults: &backend-defaults
+  restart: unless-stopped
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  networks:
+    - aqua-net
+  environment: &backend-env
+    POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+    POSTGRES_PORT: 5432
+    POSTGRES_USER: ${POSTGRES_USER:-postgres}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    POSTGRES_DB: ${POSTGRES_DB:-maritime_oilspill}
+    REDIS_HOST: ${REDIS_HOST:-redis}
+    REDIS_PORT: ${REDIS_PORT:-6379}
+    PORT: ${PORT:-8000}
+
+services:
+
+  postgres:
+    image: postgis/postgis:15-3.4
+    platform: linux/amd64
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-maritime_oilspill}
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-maritime_oilspill}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - aqua-net
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    ports:
+      - "6380:6379"
+    volumes:
+      - ./infra/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - aqua-net
+
+  data-ingestion:
+    <<: *backend-defaults
+    build: ./services/data-ingestion
+    environment:
+      <<: *backend-env
+      SERVICE_NAME: data-ingestion
+    ports:
+      - "8001:8000"
+
+  ais-analytics:
+    <<: *backend-defaults
+    build: ./services/ais-analytics
+    environment:
+      <<: *backend-env
+      SERVICE_NAME: ais-analytics
+    ports:
+      - "8002:8000"
+
+  anomaly-detection:
+    <<: *backend-defaults
+    build: ./services/anomaly-detection
+    environment:
+      <<: *backend-env
+      SERVICE_NAME: anomaly-detection
+    ports:
+      - "8003:8000"
+
+  dark-vessel-detection:
+    <<: *backend-defaults
+    build: ./services/dark-vessel-detection
+    environment:
+      <<: *backend-env
+      SERVICE_NAME: dark-vessel-detection
+    ports:
+      - "8004:8000"
+
+  ais-spoof-detection:
+    <<: *backend-defaults
+    build: ./services/ais-spoof-detection
+    environment:
+      <<: *backend-env
+      SERVICE_NAME: ais-spoof-detection
+    ports:
+      - "8005:8000"
+
+  sts-detection:
+    <<: *backend-defaults
+    build: ./services/sts-detection
+    environment:
+      <<: *backend-env
+      SERVICE_NAME: sts-detection
+    ports:
+      - "8006:8000"
+
+  vessel-risk-engine:
+    <<: *backend-defaults
+    build: ./services/vessel-risk-engine
+    environment:
+      <<: *backend-env
+      SERVICE_NAME: vessel-risk-engine
+    ports:
+      - "8007:8000"
+
+  sar-spill-intelligence:
+    <<: *backend-defaults
+    build: ./services/sar-spill-intelligence
+    environment:
+      <<: *backend-env
+      SERVICE_NAME: sar-spill-intelligence
+    ports:
+      - "8008:8000"
+
+  lookalike-engine:
+    <<: *backend-defaults
+    build: ./services/lookalike-engine
+    environment:
+      <<: *backend-env
+      SERVICE_NAME: lookalike-engine
+    ports:
+      - "8009:8000"
+
+  evidence-fusion:
+    <<: *backend-defaults
+    build: ./services/evidence-fusion
+    environment:
+      <<: *backend-env
+      SERVICE_NAME: evidence-fusion
+    ports:
+      - "8010:8000"
+
+  source-attribution:
+    <<: *backend-defaults
+    build: ./services/source-attribution
+    environment:
+      <<: *backend-env
+      SERVICE_NAME: source-attribution
+    ports:
+      - "8011:8000"
+
+  drift-forecast:
+    <<: *backend-defaults
+    build: ./services/drift-forecast
+    environment:
+      <<: *backend-env
+      SERVICE_NAME: drift-forecast
+    ports:
+      - "8012:8000"
+
+  severity-impact:
+    <<: *backend-defaults
+    build: ./services/severity-impact
+    environment:
+      <<: *backend-env
+      SERVICE_NAME: severity-impact
+    ports:
+      - "8013:8000"
+
+  response-decision:
+    <<: *backend-defaults
+    build: ./services/response-decision
+    environment:
+      <<: *backend-env
+      SERVICE_NAME: response-decision
+    ports:
+      - "8014:8000"
+
+  api-gateway:
+    <<: *backend-defaults
+    build: ./services/api-gateway
+    environment:
+      <<: *backend-env
+      SERVICE_NAME: api-gateway
+    ports:
+      - "8015:8000"
+
+  dashboard:
+    build: ./dashboard
+    restart: unless-stopped
+    depends_on:
+      api-gateway:
+        condition: service_started
+    ports:
+      - "3000:3000"
+    networks:
+      - aqua-net
+
+  simulator:
+    build: ./simulator
+    restart: unless-stopped
+    depends_on:
+      data-ingestion:
+        condition: service_started
+    volumes:
+      - ./data:/data:ro
+    networks:
+      - aqua-net
+
+volumes:
+  pgdata:
+
+networks:
+  aqua-net:
+    driver: bridge
