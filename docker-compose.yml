@@ -7,12 +7,14 @@ x-backend-defaults: &backend-defaults
       condition: service_healthy
   networks:
     - aqua-net
+  volumes:
+    - ./shared:/app/shared:ro
   environment: &backend-env
     POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
     POSTGRES_PORT: 5432
-    POSTGRES_USER: ${POSTGRES_USER:-postgres}
-    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-    POSTGRES_DB: ${POSTGRES_DB:-maritime_oilspill}
+    POSTGRES_USER: ${POSTGRES_USER:-aqua_sentinel}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me}
+    POSTGRES_DB: ${POSTGRES_DB:-aqua_sentinel}
     REDIS_HOST: ${REDIS_HOST:-redis}
     REDIS_PORT: ${REDIS_PORT:-6379}
     PORT: ${PORT:-8000}
@@ -24,16 +26,16 @@ services:
     platform: linux/amd64
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      POSTGRES_DB: ${POSTGRES_DB:-maritime_oilspill}
+      POSTGRES_USER: ${POSTGRES_USER:-aqua_sentinel}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me}
+      POSTGRES_DB: ${POSTGRES_DB:-aqua_sentinel}
     ports:
       - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-maritime_oilspill}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aqua_sentinel} -d ${POSTGRES_DB:-aqua_sentinel}"]
       interval: 5s
       timeout: 5s
       retries: 10

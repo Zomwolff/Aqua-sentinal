@@ -1,238 +1,204 @@
 CREATE EXTENSION IF NOT EXISTS postgis;
 
 -- ============================================================
--- Vessels & AIS position feeds
+-- Aqua-Sentinel database schema (final 9-table contract)
 -- ============================================================
 
+-- ------------------------------------------------------------
+-- Table 1: vessels
+-- Static registry of physical vessels.
+-- mmsi is the external AIS identity; id is the internal FK target.
+-- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS vessels (
-    mmsi          BIGINT PRIMARY KEY,
-    vessel_name   TEXT,
+    id            BIGSERIAL PRIMARY KEY,
+    imo_number    VARCHAR(20) UNIQUE,
+    mmsi          VARCHAR(20) UNIQUE NOT NULL,
+    name          VARCHAR(255),
     vessel_type   TEXT,
-    first_seen    TIMESTAMPTZ,
-    last_seen     TIMESTAMPTZ
+    flag          VARCHAR(100),
+    length_m      NUMERIC,
+    width_m       NUMERIC,
+    gross_tonnage NUMERIC,
+    operator      VARCHAR(255),
+    created_at    TIMESTAMPTZ,
+    updated_at    TIMESTAMPTZ
 );
 
-CREATE INDEX IF NOT EXISTS idx_vessels_first_seen ON vessels (first_seen);
-CREATE INDEX IF NOT EXISTS idx_vessels_last_seen ON vessels (last_seen);
-
+-- ------------------------------------------------------------
+-- Table 2: vessel_positions
+-- High-volume AIS position history. One row = one AIS report.
+-- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS vessel_positions (
-    id           BIGSERIAL PRIMARY KEY,
-    mmsi         BIGINT NOT NULL REFERENCES vessels (mmsi),
-    lat          DOUBLE PRECISION NOT NULL,
-    lon          DOUBLE PRECISION NOT NULL,
-    speed_knots  DOUBLE PRECISION,
-    course       DOUBLE PRECISION,
-    heading      DOUBLE PRECISION,
-    timestamp    TIMESTAMPTZ NOT NULL,
-    geom         geography(Point, 4326)
+    id          BIGSERIAL PRIMARY KEY,
+    vessel_id   BIGINT NOT NULL REFERENCES vessels (id),
+    timestamp   TIMESTAMPTZ,
+    latitude    DOUBLE PRECISION,
+    longitude   DOUBLE PRECISION,
+    geom        GEOMETRY(Point, 4326),
+    speed_knots NUMERIC,
+    course_deg  NUMERIC,
+    heading_deg NUMERIC,
+    nav_status  VARCHAR,
+    source      VARCHAR
 );
 
-CREATE INDEX IF NOT EXISTS idx_vessel_positions_geom ON vessel_positions USING GIST (geom);
-CREATE INDEX IF NOT EXISTS idx_vessel_positions_mmsi ON vessel_positions (mmsi);
-CREATE INDEX IF NOT EXISTS idx_vessel_positions_timestamp ON vessel_positions (timestamp);
-
--- ============================================================
--- Behavioral analytics
--- ============================================================
-
-CREATE TABLE IF NOT EXISTS vessel_features (
-    id                   BIGSERIAL PRIMARY KEY,
-    mmsi                 BIGINT NOT NULL REFERENCES vessels (mmsi),
-    window_start         TIMESTAMPTZ NOT NULL,
-    window_end           TIMESTAMPTZ NOT NULL,
-    avg_speed            DOUBLE PRECISION,
-    speed_variance       DOUBLE PRECISION,
-    course_variance      DOUBLE PRECISION,
-    loitering_score      DOUBLE PRECISION,
-    distance_traveled_km DOUBLE PRECISION
+-- ------------------------------------------------------------
+-- Table 3: spill_incidents
+-- Detected oil-spill incidents. id is a UUID shared across services.
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS spill_incidents (
+    id              UUID PRIMARY KEY,
+    detected_at     TIMESTAMPTZ,
+    latitude        DOUBLE PRECISION,
+    longitude       DOUBLE PRECISION,
+    geom            GEOMETRY(Polygon, 4326),
+    centroid        GEOMETRY(Point, 4326) NOT NULL,
+    area_km2        NUMERIC,
+    confidence      NUMERIC,
+    source          TEXT,
+    source_image_id VARCHAR,
+    status          TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_vessel_features_mmsi ON vessel_features (mmsi);
-CREATE INDEX IF NOT EXISTS idx_vessel_features_window_start ON vessel_features (window_start);
-CREATE INDEX IF NOT EXISTS idx_vessel_features_window_end ON vessel_features (window_end);
-
--- ============================================================
--- Anomaly & dark vessel events
--- ============================================================
-
-CREATE TABLE IF NOT EXISTS anomaly_events (
-    id           BIGSERIAL PRIMARY KEY,
-    mmsi         BIGINT NOT NULL REFERENCES vessels (mmsi),
-    window_start TIMESTAMPTZ NOT NULL,
-    anomaly_type TEXT,
-    severity     TEXT,
-    evidence     JSONB
-);
-
-CREATE INDEX IF NOT EXISTS idx_anomaly_events_mmsi ON anomaly_events (mmsi);
-CREATE INDEX IF NOT EXISTS idx_anomaly_events_window_start ON anomaly_events (window_start);
-
-CREATE TABLE IF NOT EXISTS dark_vessel_events (
-    id           BIGSERIAL PRIMARY KEY,
-    lat          DOUBLE PRECISION NOT NULL,
-    lon          DOUBLE PRECISION NOT NULL,
-    timestamp    TIMESTAMPTZ NOT NULL,
-    image_source TEXT,
-    sensor       TEXT,
-    confidence   DOUBLE PRECISION,
-    geom         geography(Point, 4326)
-);
-
-CREATE INDEX IF NOT EXISTS idx_dark_vessel_events_geom ON dark_vessel_events USING GIST (geom);
-CREATE INDEX IF NOT EXISTS idx_dark_vessel_events_timestamp ON dark_vessel_events (timestamp);
-
--- ============================================================
--- AIS trust / spoofing
--- ============================================================
-
-CREATE TABLE IF NOT EXISTS ais_trust_scores (
-    id                       BIGSERIAL PRIMARY KEY,
-    mmsi                     BIGINT NOT NULL REFERENCES vessels (mmsi),
-    timestamp                TIMESTAMPTZ NOT NULL,
-    discrepancy_distance_m   DOUBLE PRECISION,
-    trust_score              DOUBLE PRECISION,
-    flag                     TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_ais_trust_scores_mmsi ON ais_trust_scores (mmsi);
-CREATE INDEX IF NOT EXISTS idx_ais_trust_scores_timestamp ON ais_trust_scores (timestamp);
-
--- ============================================================
--- STS (ship-to-ship) transfers
--- ============================================================
-
-CREATE TABLE IF NOT EXISTS sts_events (
-    id               BIGSERIAL PRIMARY KEY,
-    vessel_a         BIGINT NOT NULL REFERENCES vessels (mmsi),
-    vessel_b         BIGINT NOT NULL REFERENCES vessels (mmsi),
-    start_time       TIMESTAMPTZ NOT NULL,
-    end_time         TIMESTAMPTZ,
-    duration_minutes DOUBLE PRECISION,
-    avg_distance_m   DOUBLE PRECISION,
-    confidence       DOUBLE PRECISION
-);
-
-CREATE INDEX IF NOT EXISTS idx_sts_events_vessel_a ON sts_events (vessel_a);
-CREATE INDEX IF NOT EXISTS idx_sts_events_vessel_b ON sts_events (vessel_b);
-CREATE INDEX IF NOT EXISTS idx_sts_events_start_time ON sts_events (start_time);
-CREATE INDEX IF NOT EXISTS idx_sts_events_end_time ON sts_events (end_time);
-
--- ============================================================
--- Risk scoring
--- ============================================================
-
-CREATE TABLE IF NOT EXISTS vessel_risk_scores (
-    mmsi                 BIGINT PRIMARY KEY REFERENCES vessels (mmsi),
-    risk_score           DOUBLE PRECISION,
-    tier                 TEXT,
-    contributing_factors JSONB,
-    recommended_action   TEXT,
-    updated_at           TIMESTAMPTZ
-);
-
-CREATE INDEX IF NOT EXISTS idx_vessel_risk_scores_updated_at ON vessel_risk_scores (updated_at);
-
--- ============================================================
--- SAR spill candidates & classification
--- ============================================================
-
-CREATE TABLE IF NOT EXISTS spill_candidates (
-    id               BIGSERIAL PRIMARY KEY,
-    tile_id          TEXT,
-    timestamp        TIMESTAMPTZ NOT NULL,
-    polygon          geography(Polygon, 4326),
-    area_km2         DOUBLE PRECISION,
-    texture_features JSONB,
-    mean_backscatter DOUBLE PRECISION
-);
-
-CREATE INDEX IF NOT EXISTS idx_spill_candidates_polygon ON spill_candidates USING GIST (polygon);
-CREATE INDEX IF NOT EXISTS idx_spill_candidates_timestamp ON spill_candidates (timestamp);
-
-CREATE TABLE IF NOT EXISTS classified_spills (
-    candidate_id           BIGINT PRIMARY KEY REFERENCES spill_candidates (id),
-    oil_prob               DOUBLE PRECISION,
-    biogenic_prob          DOUBLE PRECISION,
-    low_wind_prob          DOUBLE PRECISION,
-    other_prob             DOUBLE PRECISION,
-    final_class            TEXT,
-    classifier_confidence  DOUBLE PRECISION
-);
-
--- ============================================================
--- Incident fusion, attribution, drift, severity, response
--- ============================================================
-
-CREATE TABLE IF NOT EXISTS fused_incidents (
-    id                 BIGSERIAL PRIMARY KEY,
-    spill_polygon      geography(Polygon, 4326),
-    timestamp          TIMESTAMPTZ NOT NULL,
-    evidence_vector    JSONB,
-    overall_confidence DOUBLE PRECISION
-);
-
-CREATE INDEX IF NOT EXISTS idx_fused_incidents_spill_polygon ON fused_incidents USING GIST (spill_polygon);
-CREATE INDEX IF NOT EXISTS idx_fused_incidents_timestamp ON fused_incidents (timestamp);
-
+-- ------------------------------------------------------------
+-- Table 4: attribution_results
+-- Candidate source vessels for a spill. One row per candidate.
+-- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS attribution_results (
-    id                            BIGSERIAL PRIMARY KEY,
-    incident_id                   BIGINT NOT NULL REFERENCES fused_incidents (id),
-    mmsi                          BIGINT REFERENCES vessels (mmsi),
-    ais_behavior_score            DOUBLE PRECISION,
-    spatial_match                 DOUBLE PRECISION,
-    temporal_match                DOUBLE PRECISION,
-    drift_compatibility           DOUBLE PRECISION,
-    vessel_type_score             DOUBLE PRECISION,
-    ais_reliability               DOUBLE PRECISION,
-    final_attribution_probability DOUBLE PRECISION
+    id                BIGSERIAL PRIMARY KEY,
+    spill_id          UUID NOT NULL REFERENCES spill_incidents (id),
+    vessel_id         BIGINT NOT NULL REFERENCES vessels (id),
+    distance_score    NUMERIC,
+    trajectory_score  NUMERIC,
+    wind_score        NUMERIC,
+    time_score        NUMERIC,
+    behavior_score    NUMERIC,
+    final_score       NUMERIC NOT NULL,
+    model_version     VARCHAR,
+    computed_at       TIMESTAMPTZ
 );
 
-CREATE INDEX IF NOT EXISTS idx_attribution_results_incident_id ON attribution_results (incident_id);
-CREATE INDEX IF NOT EXISTS idx_attribution_results_mmsi ON attribution_results (mmsi);
+-- ------------------------------------------------------------
+-- Table 5: forecasts
+-- Predicted future spill movement. One row per forecast horizon.
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS forecasts (
+    id             BIGSERIAL PRIMARY KEY,
+    spill_id       UUID NOT NULL REFERENCES spill_incidents (id),
+    forecast_time  TIMESTAMPTZ,
+    generated_at   TIMESTAMPTZ,
+    horizon_hours  NUMERIC,
+    geom           GEOMETRY(Polygon, 4326) NOT NULL,
+    model_version  VARCHAR,
+    confidence     NUMERIC
+);
 
-CREATE TABLE IF NOT EXISTS drift_forecasts (
+-- ------------------------------------------------------------
+-- Table 6: severity
+-- Risk/impact assessment for a spill.
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS severity (
     id                   BIGSERIAL PRIMARY KEY,
-    incident_id          BIGINT NOT NULL REFERENCES fused_incidents (id),
-    horizon              INTERVAL,
-    predicted_polygon    geography(Polygon, 4326),
-    centroid_distance_km DOUBLE PRECISION,
-    confidence           DOUBLE PRECISION
+    spill_id             UUID NOT NULL REFERENCES spill_incidents (id),
+    severity_level       TEXT,
+    score                NUMERIC NOT NULL,
+    environmental_risk   NUMERIC,
+    population_risk      NUMERIC,
+    economic_risk        NUMERIC,
+    protected_area_risk  NUMERIC,
+    computed_at          TIMESTAMPTZ
 );
 
-CREATE INDEX IF NOT EXISTS idx_drift_forecasts_incident_id ON drift_forecasts (incident_id);
-CREATE INDEX IF NOT EXISTS idx_drift_forecasts_predicted_polygon ON drift_forecasts USING GIST (predicted_polygon);
-
-CREATE TABLE IF NOT EXISTS severity_assessments (
-    incident_id              BIGINT PRIMARY KEY REFERENCES fused_incidents (id),
-    severity                 TEXT,
-    estimated_area_km2       DOUBLE PRECISION,
-    estimated_volume_low     DOUBLE PRECISION,
-    estimated_volume_high    DOUBLE PRECISION,
-    growth_rate_pct_per_hr   DOUBLE PRECISION,
-    coastline_distance_km    DOUBLE PRECISION,
-    ecological_exposure      JSONB
-);
-
+-- ------------------------------------------------------------
+-- Table 7: response_recommendations
+-- Recommended actions for authorities.
+-- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS response_recommendations (
-    id              BIGSERIAL PRIMARY KEY,
-    incident_id     BIGINT NOT NULL REFERENCES fused_incidents (id),
-    priority_actions JSONB,
-    generated_at    TIMESTAMPTZ NOT NULL
+    id               BIGSERIAL PRIMARY KEY,
+    spill_id         UUID NOT NULL REFERENCES spill_incidents (id),
+    recommendation   TEXT,
+    priority         TEXT,
+    status           TEXT,
+    generated_at     TIMESTAMPTZ,
+    acknowledged_at  TIMESTAMPTZ,
+    acknowledged_by  VARCHAR
 );
 
-CREATE INDEX IF NOT EXISTS idx_response_recommendations_incident_id ON response_recommendations (incident_id);
-CREATE INDEX IF NOT EXISTS idx_response_recommendations_generated_at ON response_recommendations (generated_at);
-
--- ============================================================
--- Reference layers (coastlines, protected areas, env grids)
--- ============================================================
-
-CREATE TABLE IF NOT EXISTS reference_layers (
+-- ------------------------------------------------------------
+-- Table 8: protected_areas
+-- Geographic contextual areas (MPAs, mangroves, ports, zones).
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS protected_areas (
     id         BIGSERIAL PRIMARY KEY,
-    layer_type TEXT,
-    name       TEXT,
-    geom       geography(Geometry, 4326)
+    name       VARCHAR,
+    area_type  VARCHAR,
+    geom       GEOMETRY(MultiPolygon, 4326) NOT NULL,
+    metadata   JSONB
 );
 
-CREATE INDEX IF NOT EXISTS idx_reference_layers_geom ON reference_layers USING GIST (geom);
-CREATE INDEX IF NOT EXISTS idx_reference_layers_layer_type ON reference_layers (layer_type);
+-- ------------------------------------------------------------
+-- Table 9: environmental_conditions
+-- Wind/current observations at a location + time.
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS environmental_conditions (
+    id                    BIGSERIAL PRIMARY KEY,
+    timestamp             TIMESTAMPTZ,
+    latitude              DOUBLE PRECISION,
+    longitude             DOUBLE PRECISION,
+    geom                  GEOMETRY(Point, 4326),
+    wind_speed_kmh        NUMERIC,
+    wind_direction_deg    NUMERIC,
+    current_speed_ms      NUMERIC,
+    current_direction_deg NUMERIC,
+    source                VARCHAR
+);
+
+-- ============================================================
+-- Spatial (GIST) indexes
+-- ============================================================
+
+CREATE INDEX IF NOT EXISTS idx_vessel_positions_geom
+    ON vessel_positions USING GIST (geom);
+
+CREATE INDEX IF NOT EXISTS idx_spill_incidents_geom
+    ON spill_incidents USING GIST (geom);
+
+CREATE INDEX IF NOT EXISTS idx_spill_incidents_centroid
+    ON spill_incidents USING GIST (centroid);
+
+CREATE INDEX IF NOT EXISTS idx_forecasts_geom
+    ON forecasts USING GIST (geom);
+
+CREATE INDEX IF NOT EXISTS idx_protected_areas_geom
+    ON protected_areas USING GIST (geom);
+
+CREATE INDEX IF NOT EXISTS idx_environmental_conditions_geom
+    ON environmental_conditions USING GIST (geom);
+
+-- ============================================================
+-- B-tree indexes on FK and time-range access columns
+-- ============================================================
+
+CREATE INDEX IF NOT EXISTS idx_vessel_positions_vessel_id
+    ON vessel_positions (vessel_id);
+
+CREATE INDEX IF NOT EXISTS idx_vessel_positions_timestamp
+    ON vessel_positions (timestamp);
+
+CREATE INDEX IF NOT EXISTS idx_attribution_results_spill_id
+    ON attribution_results (spill_id);
+
+CREATE INDEX IF NOT EXISTS idx_attribution_results_vessel_id
+    ON attribution_results (vessel_id);
+
+CREATE INDEX IF NOT EXISTS idx_forecasts_spill_id
+    ON forecasts (spill_id);
+
+CREATE INDEX IF NOT EXISTS idx_severity_spill_id
+    ON severity (spill_id);
+
+CREATE INDEX IF NOT EXISTS idx_response_recommendations_spill_id
+    ON response_recommendations (spill_id);
+
+CREATE INDEX IF NOT EXISTS idx_environmental_conditions_timestamp
+    ON environmental_conditions (timestamp);
