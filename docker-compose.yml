@@ -18,6 +18,30 @@ x-backend-defaults: &backend-defaults
     REDIS_HOST: ${REDIS_HOST:-redis}
     REDIS_PORT: ${REDIS_PORT:-6379}
     PORT: ${PORT:-8000}
+    # AIS bounding box (Mumbai offshore)
+    AIS_BBOX_MIN_LAT: ${AIS_BBOX_MIN_LAT:-14.0}
+    AIS_BBOX_MIN_LON: ${AIS_BBOX_MIN_LON:-68.0}
+    AIS_BBOX_MAX_LAT: ${AIS_BBOX_MAX_LAT:-25.0}
+    AIS_BBOX_MAX_LON: ${AIS_BBOX_MAX_LON:-77.5}
+    # Analytics tuning
+    WINDOW_MINUTES: ${WINDOW_MINUTES:-15}
+    PROXIMITY_RADIUS_M: ${PROXIMITY_RADIUS_M:-1000}
+    # Anomaly detection
+    AIS_GAP_THRESHOLD_MINUTES: ${AIS_GAP_THRESHOLD_MINUTES:-30}
+    ERRATIC_COURSE_VARIANCE: ${ERRATIC_COURSE_VARIANCE:-2500}
+    LOITERING_THRESHOLD: ${LOITERING_THRESHOLD:-0.8}
+    # STS detection
+    STS_DISTANCE_THRESHOLD_M: ${STS_DISTANCE_THRESHOLD_M:-500}
+    STS_SPEED_THRESHOLD_KN: ${STS_SPEED_THRESHOLD_KN:-2.0}
+    STS_MIN_DURATION_MIN: ${STS_MIN_DURATION_MIN:-30}
+    # Spoof detection
+    MAX_PLAUSIBLE_AIS_ERROR_M: ${MAX_PLAUSIBLE_AIS_ERROR_M:-500}
+    MAX_PHYSICAL_SPEED_MS: ${MAX_PHYSICAL_SPEED_MS:-25.7}
+    # Risk engine
+    RISK_DECAY_RATE: ${RISK_DECAY_RATE:-0.05}
+    RISK_TIER_MEDIUM: ${RISK_TIER_MEDIUM:-20}
+    RISK_TIER_HIGH: ${RISK_TIER_HIGH:-50}
+    RISK_TIER_CRITICAL: ${RISK_TIER_CRITICAL:-75}
 
 services:
 
@@ -61,16 +85,40 @@ services:
 
   data-ingestion:
     <<: *backend-defaults
-    build: ./services/data-ingestion
+    build:
+      context: .
+      dockerfile: services/data-ingestion/Dockerfile
     environment:
       <<: *backend-env
       SERVICE_NAME: data-ingestion
+      AIS_PROVIDER: none          # HTTP-only; actual AIS reading is done by ais-reader
+      AISSTREAM_API_KEY: ${AISSTREAM_API_KEY:-}
     ports:
       - "8001:8000"
 
+  ais-reader:
+    <<: *backend-defaults
+    build:
+      context: .
+      dockerfile: services/ais-reader/Dockerfile
+    environment:
+      <<: *backend-env
+      SERVICE_NAME: ais-reader
+      AIS_PROVIDER: ${AIS_PROVIDER:-aisstream}
+      AISSTREAM_API_KEY: ${AISSTREAM_API_KEY:-8b2b46c7433daad5830de215061d33ca1a792f1a}
+      VESSELAPI_API_KEY: ${VESSELAPI_API_KEY:-}
+      VESSELAPI_BBOX_MIN_LAT: ${VESSELAPI_BBOX_MIN_LAT:-18.4}
+      VESSELAPI_BBOX_MIN_LON: ${VESSELAPI_BBOX_MIN_LON:-71.5}
+      VESSELAPI_BBOX_MAX_LAT: ${VESSELAPI_BBOX_MAX_LAT:-19.8}
+      VESSELAPI_BBOX_MAX_LON: ${VESSELAPI_BBOX_MAX_LON:-73.0}
+      VESSELAPI_POLL_INTERVAL_SECONDS: ${VESSELAPI_POLL_INTERVAL_SECONDS:-60}
+    restart: unless-stopped
+
   ais-analytics:
     <<: *backend-defaults
-    build: ./services/ais-analytics
+    build:
+      context: .
+      dockerfile: services/ais-analytics/Dockerfile
     environment:
       <<: *backend-env
       SERVICE_NAME: ais-analytics
@@ -79,7 +127,9 @@ services:
 
   anomaly-detection:
     <<: *backend-defaults
-    build: ./services/anomaly-detection
+    build:
+      context: .
+      dockerfile: services/anomaly-detection/Dockerfile
     environment:
       <<: *backend-env
       SERVICE_NAME: anomaly-detection
@@ -88,7 +138,9 @@ services:
 
   dark-vessel-detection:
     <<: *backend-defaults
-    build: ./services/dark-vessel-detection
+    build:
+      context: .
+      dockerfile: services/dark-vessel-detection/Dockerfile
     environment:
       <<: *backend-env
       SERVICE_NAME: dark-vessel-detection
@@ -97,7 +149,9 @@ services:
 
   ais-spoof-detection:
     <<: *backend-defaults
-    build: ./services/ais-spoof-detection
+    build:
+      context: .
+      dockerfile: services/ais-spoof-detection/Dockerfile
     environment:
       <<: *backend-env
       SERVICE_NAME: ais-spoof-detection
@@ -106,7 +160,9 @@ services:
 
   sts-detection:
     <<: *backend-defaults
-    build: ./services/sts-detection
+    build:
+      context: .
+      dockerfile: services/sts-detection/Dockerfile
     environment:
       <<: *backend-env
       SERVICE_NAME: sts-detection
@@ -115,7 +171,9 @@ services:
 
   vessel-risk-engine:
     <<: *backend-defaults
-    build: ./services/vessel-risk-engine
+    build:
+      context: .
+      dockerfile: services/vessel-risk-engine/Dockerfile
     environment:
       <<: *backend-env
       SERVICE_NAME: vessel-risk-engine
@@ -124,7 +182,9 @@ services:
 
   sar-spill-intelligence:
     <<: *backend-defaults
-    build: ./services/sar-spill-intelligence
+    build:
+      context: .
+      dockerfile: services/sar-spill-intelligence/Dockerfile
     environment:
       <<: *backend-env
       SERVICE_NAME: sar-spill-intelligence
@@ -133,7 +193,9 @@ services:
 
   lookalike-engine:
     <<: *backend-defaults
-    build: ./services/lookalike-engine
+    build:
+      context: .
+      dockerfile: services/lookalike-engine/Dockerfile
     environment:
       <<: *backend-env
       SERVICE_NAME: lookalike-engine
@@ -142,7 +204,9 @@ services:
 
   evidence-fusion:
     <<: *backend-defaults
-    build: ./services/evidence-fusion
+    build:
+      context: .
+      dockerfile: services/evidence-fusion/Dockerfile
     environment:
       <<: *backend-env
       SERVICE_NAME: evidence-fusion
@@ -151,7 +215,9 @@ services:
 
   source-attribution:
     <<: *backend-defaults
-    build: ./services/source-attribution
+    build:
+      context: .
+      dockerfile: services/source-attribution/Dockerfile
     environment:
       <<: *backend-env
       SERVICE_NAME: source-attribution
@@ -160,7 +226,9 @@ services:
 
   drift-forecast:
     <<: *backend-defaults
-    build: ./services/drift-forecast
+    build:
+      context: .
+      dockerfile: services/drift-forecast/Dockerfile
     environment:
       <<: *backend-env
       SERVICE_NAME: drift-forecast
@@ -169,7 +237,9 @@ services:
 
   severity-impact:
     <<: *backend-defaults
-    build: ./services/severity-impact
+    build:
+      context: .
+      dockerfile: services/severity-impact/Dockerfile
     environment:
       <<: *backend-env
       SERVICE_NAME: severity-impact
@@ -178,7 +248,9 @@ services:
 
   response-decision:
     <<: *backend-defaults
-    build: ./services/response-decision
+    build:
+      context: .
+      dockerfile: services/response-decision/Dockerfile
     environment:
       <<: *backend-env
       SERVICE_NAME: response-decision
@@ -187,7 +259,9 @@ services:
 
   api-gateway:
     <<: *backend-defaults
-    build: ./services/api-gateway
+    build:
+      context: .
+      dockerfile: services/api-gateway/Dockerfile
     environment:
       <<: *backend-env
       SERVICE_NAME: api-gateway

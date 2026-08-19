@@ -1,5 +1,9 @@
 fastapi
 uvicorn[standard]
-redis
+redis[hiredis]
 asyncpg
-pydantic
+pydantic>=2.0
+numpy
+scipy
+python-dotenv
+tenacity
