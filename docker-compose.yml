@@ -8,7 +8,7 @@ x-backend-defaults: &backend-defaults
   networks:
     - aqua-net
   volumes:
-    - ./shared:/app/shared:ro
+    - ./services/shared:/app/shared:ro
   environment: &backend-env
     POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
     POSTGRES_PORT: 5432
