@@ -145,6 +145,13 @@ services:
     environment:
       <<: *backend-env
       SERVICE_NAME: anomaly-detection
+      ML_MODEL_DIR: /data/models
+      ML_TRAIN_INTERVAL_S: ${ML_TRAIN_INTERVAL_S:-3600}
+      ML_MAX_MODEL_AGE_H: ${ML_MAX_MODEL_AGE_H:-25}
+      ML_MIN_SAMPLES: ${ML_MIN_SAMPLES:-100}
+    volumes:
+      - ./services/shared:/app/shared:ro
+      - ml-models:/data/models
     ports:
       - "8003:8000"
 
@@ -156,6 +163,10 @@ services:
     environment:
       <<: *backend-env
       SERVICE_NAME: dark-vessel-detection
+      DARK_VESSEL_GAP_MINUTES: ${DARK_VESSEL_GAP_MINUTES:-90}
+      DARK_VESSEL_SCAN_INTERVAL_S: ${DARK_VESSEL_SCAN_INTERVAL_S:-300}
+      DARK_VESSEL_MAX_MATCH_DISTANCE_M: ${DARK_VESSEL_MAX_MATCH_DISTANCE_M:-5000}
+      DARK_VESSEL_MAX_MATCH_TIME_S: ${DARK_VESSEL_MAX_MATCH_TIME_S:-1800}
     ports:
       - "8004:8000"
 
@@ -346,6 +357,7 @@ services:
 volumes:
   pgdata:
   sar-scene-artifacts:
+  ml-models:
 
 networks:
   aqua-net:

@@ -119,24 +119,41 @@ async def _process_features(features: Dict[str, Any], pool, redis) -> None:
 
 async def _save_sts_event(event: Dict[str, Any], pool) -> None:
     try:
+        vessel_a_mmsi = str(event["vessel_a"])
+        vessel_b_mmsi = str(event["vessel_b"])
+
         start_dt = datetime.fromisoformat(event["start_time"].replace("Z", "+00:00"))
         end_dt = (datetime.fromisoformat(event["end_time"].replace("Z", "+00:00"))
                   if event.get("end_time") else None)
+
+        # Use proper PostGIS geometry (not geography) to match schema GEOMETRY(Point,4326)
         loc_wkt = (f"POINT({event['centroid_lon']} {event['centroid_lat']})"
                    if event.get("centroid_lat") else None)
 
+        # Look up vessel DB IDs for FK integrity
+        row_a = await pool.fetchrow("SELECT id FROM vessels WHERE mmsi=$1", vessel_a_mmsi)
+        row_b = await pool.fetchrow("SELECT id FROM vessels WHERE mmsi=$1", vessel_b_mmsi)
+        vessel_a_id = row_a["id"] if row_a else None
+        vessel_b_id = row_b["id"] if row_b else None
+
         await pool.execute(
             """INSERT INTO sts_events
-               (vessel_a, vessel_b, start_time, end_time, duration_minutes,
+               (vessel_a_id, vessel_b_id, vessel_a_mmsi, vessel_b_mmsi,
+                start_time, end_time, duration_minutes,
                 avg_distance_m, min_distance_m, avg_combined_speed_knots, confidence, location)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,
-                       CASE WHEN $10 IS NOT NULL
-                            THEN ST_SetSRID(ST_GeomFromText($10),4326)::geography
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                       CASE WHEN $12 IS NOT NULL
+                            THEN ST_SetSRID(ST_GeomFromText($12), 4326)
                             ELSE NULL END)
                ON CONFLICT DO NOTHING""",
-            event["vessel_a"], event["vessel_b"], start_dt, end_dt,
+            vessel_a_id, vessel_b_id, vessel_a_mmsi, vessel_b_mmsi,
+            start_dt, end_dt,
             event["duration_minutes"], event["avg_distance_m"], event["min_distance_m"],
             event["avg_combined_speed_knots"], event["confidence"], loc_wkt,
+        )
+        log.info(
+            "Saved STS event: MMSI %s <-> %s | dur=%.1fmin conf=%.2f",
+            vessel_a_mmsi, vessel_b_mmsi, event["duration_minutes"], event["confidence"],
         )
     except Exception as e:
         log.error("DB insert sts_events failed: %s | event=%r", e, event)
