@@ -9,12 +9,16 @@ import pytest
 from shared.db.connection import close_pool, create_pool
 from shared.spatial import (
     METERS_PER_KM,
+    MUMBAI_AOI_BOUNDS,
+    SENTINEL1_PIXEL_SIZE_M,
+    area_m2_from_geometry,
     distance_km_sql,
     distance_m_sql,
     dwithin_sql,
     km_to_m,
     m_to_km,
     make_point_sql,
+    mumbai_aoi_geometry,
 )
 
 LON_A, LAT_A = 73.0000, 15.0000
@@ -141,3 +145,49 @@ def test_sql_helpers_use_geography_cast():
         "ST_DWithin(v.geom::geography, s.centroid::geography, 10000)"
     )
     assert make_point_sql(73.92, 15.20) == "ST_SetSRID(ST_MakePoint(73.92, 15.2), 4326)"
+
+
+def test_mumbai_aoi_geometry_returns_correct_bounds():
+    min_lon, min_lat, max_lon, max_lat = MUMBAI_AOI_BOUNDS
+    assert MUMBAI_AOI_BOUNDS == (72.75, 18.85, 73.05, 19.15)
+    assert mumbai_aoi_geometry() == (
+        f"POLYGON(({min_lon:g} {min_lat:g}, {max_lon:g} {min_lat:g}, "
+        f"{max_lon:g} {max_lat:g}, {min_lon:g} {max_lat:g}, "
+        f"{min_lon:g} {min_lat:g}))"
+    )
+    assert mumbai_aoi_geometry().startswith("POLYGON((")
+
+
+def test_sentinel1_pixel_size_constant():
+    assert SENTINEL1_PIXEL_SIZE_M == 10.0
+
+
+def test_area_sql_uses_geography_cast_and_preserves_srid():
+    assert area_m2_from_geometry("x.geom") == (
+        "ST_Area(ST_SetSRID(x.geom, 4326)::geography)"
+    )
+    assert area_m2_from_geometry("x.geom", srid=4326) == (
+        "ST_Area(ST_SetSRID(x.geom, 4326)::geography)"
+    )
+    assert "::geography" in area_m2_from_geometry("x.geom")
+
+
+def test_area_m2_from_geometry_is_square_meters_not_degrees_sq():
+    box = "POLYGON((72.80 18.90, 72.81 18.90, 72.81 18.91, 72.80 18.91, 72.80 18.90))"
+    meters = _run(_scalar(f"SELECT {area_m2_from_geometry(box)}"))
+    # Hand-computed geodesic approx: 0.01deg lat (~1113.2 m) x 0.01deg lon
+    # (~1053.2 m at cos(18.9deg)) ~= 1.172M m^2.
+    assert 1.05e6 < meters < 1.30e6, f"expected ~1.17M m^2, got {meters}"
+    raw = _run(
+        _scalar(
+            f"SELECT ST_Area(ST_GeomFromText('{box}', 4326))"
+        )
+    )
+    assert raw < 0.001, "raw geometry area must be degrees^2, not m^2"
+
+
+def test_mumbai_aoi_area_is_sane():
+    sql = area_m2_from_geometry(mumbai_aoi_geometry())
+    meters = _run(_scalar(f"SELECT {sql}"))
+    # 0.3deg x 0.3deg near lat 19: approx 1.05e9 m^2.
+    assert 0.9e9 < meters < 1.2e9, f"unexpected AOI area {meters}"

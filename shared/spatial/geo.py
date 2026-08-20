@@ -1,4 +1,33 @@
-from shared.spatial.constants import METERS_PER_KM, SRID
+from shared.spatial.constants import MUMBAI_AOI_BOUNDS, METERS_PER_KM, SRID
+
+
+def mumbai_aoi_geometry() -> str:
+    """WKT POLYGON (EPSG:4326) for the SIH260361 Option 1 study area.
+
+    Built from MUMBAI_AOI_BOUNDS in lon/lat order (never reversed, per
+    docs/spatial.md). Returns WKT so it drops straight into PostGIS.
+    """
+    min_lon, min_lat, max_lon, max_lat = MUMBAI_AOI_BOUNDS
+    return (
+        f"POLYGON(({_fmt(min_lon)} {_fmt(min_lat)}, "
+        f"{_fmt(max_lon)} {_fmt(min_lat)}, "
+        f"{_fmt(max_lon)} {_fmt(max_lat)}, "
+        f"{_fmt(min_lon)} {_fmt(max_lat)}, "
+        f"{_fmt(min_lon)} {_fmt(min_lat)}))"
+    )
+
+
+def area_m2_from_geometry(geom, srid=SRID) -> str:
+    """SQL for ST_Area via PostGIS geography semantics, returning square metres.
+
+    Per docs/spatial.md, metric math MUST go through a geography cast —
+    EPSG:4326 geometry stores degrees, not meters. This emits
+    ST_Area(ST_SetSRID(<geom>, <srid>)::geography), preserving the geometry's
+    SRID and using PostGIS geodesic area. Do NOT "simplify" this to a Shapely
+    or projected-CRS calculation; a ~0.01deg box is ~0.0001 degree^2 raw but
+    ~1.17M m^2 via geography.
+    """
+    return f"ST_Area(ST_SetSRID({geom}, {srid})::geography)"
 
 
 def _fmt(value) -> str:
