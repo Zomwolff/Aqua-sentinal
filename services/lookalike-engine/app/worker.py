@@ -85,7 +85,7 @@ def _candidate_ids(data: Dict[str, Any]) -> List[str]:
 
 _FETCH_CANDIDATE_SQL = """
     SELECT candidate_id, scene_id, status, pixel_count, area_m2,
-           classification_label, ST_AsGeoJSON(geom) AS geojson
+           classification_label, is_synthetic, ST_AsGeoJSON(geom) AS geojson
     FROM spill_candidates
     WHERE candidate_id = $1
 """
@@ -153,6 +153,14 @@ async def _resolve_candidate(
     }
 
 
+def _as_bool(value, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
 def _filtered_event(data: Dict[str, Any], result) -> Dict[str, Any]:
     """One message per scored candidate published to spill.candidates.filtered."""
     event: Dict[str, Any] = {
@@ -160,6 +168,7 @@ def _filtered_event(data: Dict[str, Any], result) -> Dict[str, Any]:
         "scene_id": result["scene_id"],
         "confidence": result["confidence"],
         "classification_label": result["classification_label"],
+        "is_synthetic": _as_bool(data.get("is_synthetic"), default=False),
     }
     for key in ("acquisition_time", "orbit", "polarization", "resolution"):
         if key in data:

@@ -135,6 +135,18 @@ def _acquisition_datetime(scene_metadata: Dict[str, Any]) -> datetime:
     return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
 
 
+def _is_synthetic(scene_metadata: Dict[str, Any]) -> bool:
+    """Return the candidate provenance flag from the ingestion message.
+
+    The source of truth is the ``is_synthetic`` field in the ingestion
+    metadata; it is NEVER inferred from scene_id or filenames.
+    """
+    value = scene_metadata.get("is_synthetic", False)
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
 def _candidates_raw_event(
     scene_metadata: Dict[str, Any],
     candidates: List[Dict[str, Any]],
@@ -144,6 +156,7 @@ def _candidates_raw_event(
         "scene_id": scene_metadata["scene_id"],
         "acquisition_time": scene_metadata.get("acquisition_time"),
         "candidate_ids": [str(c["candidate_id"]) for c in candidates],
+        "is_synthetic": _is_synthetic(scene_metadata),
     }
     for key in ("orbit", "polarization", "resolution"):
         if key in scene_metadata:
@@ -154,10 +167,10 @@ def _candidates_raw_event(
 _INSERT_CANDIDATE_SQL = """
     INSERT INTO spill_candidates
         (candidate_id, scene_id, acquisition_time, geom, area_m2, pixel_count,
-         status, created_at)
+         status, created_at, is_synthetic)
     VALUES ($1, $2, $3,
             ST_SetSRID(ST_GeomFromGeoJSON($4), 4326),
-            $5, $6, $7::spill_candidate_status_enum, NOW())
+            $5, $6, $7::spill_candidate_status_enum, NOW(), $8)
 """
 
 
@@ -166,6 +179,7 @@ async def _persist_candidates(
     scene_id: str,
     acquisition_time: datetime,
     candidates: List[Dict[str, Any]],
+    is_synthetic: bool = False,
 ) -> None:
     """Write all candidates for one scene in a single transaction.
 
@@ -185,6 +199,7 @@ async def _persist_candidates(
                     candidate["area_m2"],
                     candidate["pixel_count"],
                     "raw",
+                    is_synthetic,
                 )
 
 
@@ -351,6 +366,7 @@ async def _process_sar_message(
             scene_id,
             acquisition_time,
             candidates,
+            is_synthetic=_is_synthetic(scene_metadata),
         )
 
         # Step 3 Step 8 — one event per scene, only after the DB write

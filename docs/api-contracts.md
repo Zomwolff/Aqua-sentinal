@@ -103,8 +103,8 @@ New labels (added idempotently to `spill_candidate_status_enum`):
 |---|---|
 | Stream | `spill.candidates.filtered` |
 | Producer | lookalike-engine worker (Step 5) |
-| Consumer group | none assigned yet (Step 6 evidence fusion to follow) |
-| Purpose | Announces candidates whose Step 5 classification is `possible_oil_spill`. |
+| Consumer group | `evidence-fusion` (Step 6) |
+| Purpose | Announces candidates whose Step 5 classification is `possible_oil_spill`; consumed by evidence-fusion to build `incident.fused` events. |
 
 One message per scored candidate (only for `possible_oil_spill`; `low_confidence`
 and lookalike-rejected candidates are retained in PostGIS but not published here).
@@ -125,3 +125,86 @@ and lookalike-rejected candidates are retained in PostGIS but not published here
 ```
 
 Required fields: `candidate_id`, `scene_id`, `confidence`, `classification_label`. Scene metadata (`acquisition_time`, `orbit`, `polarization`, `resolution`) is forwarded from the consuming `spill.candidates.raw` message when present.
+
+### `incident.fused`
+
+| Field | Value |
+|---|---|
+| Stream | `incident.fused` |
+| Producer | evidence-fusion worker (Step 6) |
+| Consumer group | none assigned yet (Step 7 source attribution / downstream to follow) |
+| Purpose | Fused SAR evidence + nearby vessel-risk context for a `possible_oil_spill` candidate. Fusion only — never source attribution. |
+
+One message per fused SAR candidate. **Inputs:** `spill.candidates.filtered`
+(SAR evidence) + high-risk vessels (tier `HIGH`/`CRITICAL` from
+`vessel_risk_scores`) that are geographically and temporally correlated with the
+candidate.
+
+**Correlation semantics**
+
+- Spatial: PostGIS geography `ST_DWithin(candidate_centroid, vessel_position, spatial_window_m)` — metres, never degree differences.
+- Temporal: vessel position within `[acquisition_time - window, acquisition_time + window]`.
+- Windows (tunable, not validated): `EVIDENCE_SPATIAL_WINDOW_M` default `5000` (5 km), `EVIDENCE_TEMPORAL_WINDOW_HOURS` default `6` (6 hours).
+- Selection when multiple vessels qualify: nearest geographic distance; ties broken by lowest mmsi (deterministic).
+- **`correlated_vessel_id` is contextual evidence** that a vessel-risk record was spatially/temporally correlated with the candidate. It does **not** mean the vessel caused the spill.
+
+**Message structure (flat fields, JSON-encoded values):**
+
+```json
+{
+  "candidate_id": "<uuid>",
+  "scene_id": "COPERNICUS/S1_GRD/...",
+  "confidence": 0.73,
+  "classification_label": "possible_oil_spill",
+  "acquisition_time": "...",
+  "orbit": "...",
+  "polarization": "...",
+  "resolution": "...",
+  "correlated_vessel_id": 42,
+  "correlated_vessel": {
+    "mmsi": "123456789",
+    "risk_score": 80.0,
+    "tier": "HIGH",
+    "recommended_action": "satellite_task",
+    "distance_m": 800.0,
+    "position_timestamp": "..."
+  }
+}
+```
+
+`correlated_vessel` and `correlated_vessel_id` are `null` when no qualifying
+vessel is found; the SAR candidate is still published. No field in this event
+represents source attribution (`caused_by` / `responsible_vessel` /
+`source_vessel` / `attribution` are never emitted).
+
+## Synthetic demo provenance (Step 7)
+
+`is_synthetic` is an explicit boolean provenance flag that identifies candidates
+injected from synthetic/demo data. It is carried unchanged through the entire
+pipeline and is never inferred from `scene_id`, filenames, or test metadata.
+
+> `is_synthetic=true` identifies provenance only and does not imply a different
+> classification or confidence calculation. Synthetic candidates flow through
+> the exact same segmentation, lookalike filtering, GLCM, confidence scoring, and
+> evidence-fusion paths as real data.
+
+**How it is set**
+
+- data-ingestion SAR trigger: `inject_synthetic` (explicit field/argument) takes
+  precedence over the `INJECT_SYNTHETIC` environment variable; disabled by
+  default. Injection writes a new `<stem>_synthetic.tif` (the original raster is
+  never overwritten) and stamps `is_synthetic=true` in `sar.clean` metadata.
+- Every downstream stage carries the boolean: `spill_candidates.is_synthetic`
+  (column, `BOOLEAN NOT NULL DEFAULT FALSE`), `spill.candidates.raw`,
+  `spill.candidates.filtered`, and `incident.fused` all include `is_synthetic`.
+
+**Propagation contract**
+
+```text
+data-ingestion → sar.clean → spill_candidates → spill.candidates.raw
+              → spill.candidates.filtered → incident.fused
+```
+
+The value is preserved at every boundary; stages that update rows must not
+overwrite it, and evidence-fusion inherits it from the SAR candidate (never from
+the vessel-risk record).

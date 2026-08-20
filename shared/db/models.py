@@ -73,6 +73,10 @@ class SpillCandidate(BaseModel):
     pixel_count: Optional[int] = None
     status: Optional[str] = None
     created_at: Optional[datetime] = None
+    confidence: Optional[Decimal] = None
+    classification_label: Optional[str] = None
+    texture_features: Optional[dict] = None
+    is_synthetic: bool = False
 
 
 class AttributionResult(BaseModel):

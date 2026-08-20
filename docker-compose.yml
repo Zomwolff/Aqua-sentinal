@@ -93,6 +93,18 @@ services:
       SERVICE_NAME: data-ingestion
       AIS_PROVIDER: none          # HTTP-only; actual AIS reading is done by ais-reader
       AISSTREAM_API_KEY: ${AISSTREAM_API_KEY:-}
+      INJECT_SYNTHETIC: ${INJECT_SYNTHETIC:-false}
+    # Override the default ./services/shared: mount: data-ingestion needs the
+    # canonical shared/spatial plus shared.db as a MODULE (services/shared/
+    # db.py). The db/ package is intentionally not mounted to avoid a
+    # module/package collision with the services/shared/db.py module.
+    volumes:
+      - ./shared/spatial:/app/shared/spatial:ro
+      - ./shared/__init__.py:/app/shared/__init__.py:ro
+      - ./services/shared/redis_client.py:/app/shared/redis_client.py:ro
+      - ./services/shared/db.py:/app/shared/db.py:ro
+      - ./services/shared/geo_utils.py:/app/shared/geo_utils.py:ro
+      - ./services/shared/models.py:/app/shared/models.py:ro
     ports:
       - "8001:8000"
 
@@ -238,6 +250,19 @@ services:
     environment:
       <<: *backend-env
       SERVICE_NAME: evidence-fusion
+      EVIDENCE_SPATIAL_WINDOW_M: ${EVIDENCE_SPATIAL_WINDOW_M:-5000}
+      EVIDENCE_TEMPORAL_WINDOW_HOURS: ${EVIDENCE_TEMPORAL_WINDOW_HOURS:-6}
+    # Override the default ./services/shared:/app/shared mount: this service
+    # needs the canonical top-level shared package (shared/spatial, shared/db)
+    # together with the AIS-pipeline shared modules, merged into one /app/shared.
+    volumes:
+      - ./shared/spatial:/app/shared/spatial:ro
+      - ./shared/db:/app/shared/db:ro
+      - ./shared/__init__.py:/app/shared/__init__.py:ro
+      - ./services/shared/redis_client.py:/app/shared/redis_client.py:ro
+      - ./services/shared/geo_utils.py:/app/shared/geo_utils.py:ro
+      - ./services/shared/models.py:/app/shared/models.py:ro
+      - ./services/shared/artifacts.py:/app/shared/artifacts.py:ro
     ports:
       - "8010:8000"
 

@@ -10,3 +10,6 @@ geopandas
 python-dotenv
 tenacity
 earthengine-api
+numpy
+scipy
+rasterio

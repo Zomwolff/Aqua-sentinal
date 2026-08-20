@@ -193,7 +193,8 @@ CREATE TABLE IF NOT EXISTS spill_candidates (
     created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     confidence           DOUBLE PRECISION CHECK (confidence IS NULL OR confidence BETWEEN 0 AND 1),  -- Step 5 heuristic confidence
     classification_label spill_candidate_status_enum,        -- Step 4/5 classification label
-    texture_features     JSONB                               -- Step 5 GLCM texture features
+    texture_features     JSONB,                              -- Step 5 GLCM texture features
+    is_synthetic         BOOLEAN NOT NULL DEFAULT FALSE      -- provenance: synthetic demo injection
 );
 
 CREATE INDEX IF NOT EXISTS idx_spill_candidates_geom       ON spill_candidates USING GIST (geom);

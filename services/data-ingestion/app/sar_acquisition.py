@@ -160,8 +160,17 @@ def _download_exported_file(task: Any, folder: str, file_prefix: str) -> str:
 # Export a scene to the shared SAR volume
 # ---------------------------------------------------------------------------
 
-def export_scene_metadata(scene: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def export_scene_metadata(
+    scene: Dict[str, Any],
+    *,
+    inject_synthetic: Optional[bool] = None,
+) -> Tuple[str, Dict[str, Any]]:
     """Export the scene via ``Export.image.toDrive`` and return local raster path.
+
+    ``inject_synthetic`` is an explicit opt-in override for synthetic demo
+    injection (see ``synthetic_injection``); when omitted the
+    ``INJECT_SYNTHETIC`` environment configuration decides. Synthetic injection
+    is disabled by default and never overwrites the original raster.
     """
     scene_id = scene["id"].replace("/", "_")
     image = scene["image"]
@@ -182,6 +191,14 @@ def export_scene_metadata(scene: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
 
     raster_path = _download_exported_file(task, export_folder, file_prefix)
 
+    from app.synthetic_injection import inject_geotiff_if_enabled
+
+    raster_path, synthetic_meta = inject_geotiff_if_enabled(
+        raster_path,
+        scene_id,
+        explicit=inject_synthetic,
+    )
+
     metadata = {
         "scene_id": scene["id"],
         "acquisition_time": datetime.utcfromtimestamp(
@@ -192,6 +209,7 @@ def export_scene_metadata(scene: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
         "polarization": scene["properties"].get("polarization"),
         "resolution": scene["properties"].get("resolution"),
     }
+    metadata.update(synthetic_meta)
     return raster_path, metadata
 
 # ---------------------------------------------------------------------------
@@ -219,12 +237,21 @@ def publish_sar_scene(raster_path: str, metadata: Dict[str, Any]) -> None:
 # High‑level entry point used by the periodic worker
 # ---------------------------------------------------------------------------
 
-def run_sar_acquisition(start_date: str, end_date: str) -> None:
-    """Execute the full acquisition pipeline for a date range."""
+def run_sar_acquisition(
+    start_date: str,
+    end_date: str,
+    *,
+    inject_synthetic: Optional[bool] = None,
+) -> None:
+    """Execute the full acquisition pipeline for a date range.
+
+    ``inject_synthetic`` is an explicit opt-in override; when omitted the
+    ``INJECT_SYNTHETIC`` environment variable decides (disabled by default).
+    """
     init_gee()
     scenes = get_sentinel1_scenes(start_date, end_date)
     best = select_best_scene(scenes)
-    raster_path, meta = export_scene_metadata(best)
+    raster_path, meta = export_scene_metadata(best, inject_synthetic=inject_synthetic)
     publish_sar_scene(raster_path, meta)
 
 __all__ = [

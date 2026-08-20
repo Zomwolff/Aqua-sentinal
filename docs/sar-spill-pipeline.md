@@ -1,4 +1,4 @@
-# SAR Spill Intelligence Pipeline (Steps 1–5)
+# SAR Spill Intelligence Pipeline (Steps 1–7)
 
 Implementation notes for the SAR spill-detection pipeline as built in this
 repository. This describes what exists today and how the pieces connect.
@@ -21,8 +21,14 @@ An event-driven SAR oil-spill candidate pipeline:
 SAR GeoTIFF
    │  (sar.clean, produced upstream by data-ingestion)
    ▼
+data-ingestion  (Step 7, opt-in)
+   ├── inject_synthetic_slick (smooth elliptical dark region; disabled by default)
+   ├── writes <stem>_synthetic.tif (original never overwritten)
+   ├── is_synthetic flagged in scene_metadata
+   ▼
 sar-spill-intelligence  (Steps 1–3)
-   ├── Lee despeckle  -> LE    CFAR (small dark targets)
+   ├── Lee despeckle
+   ├── CFAR (small dark targets)
    ├── Otsu dark-region segmentation (large slicks/calm water)
    ├── mask = segmentation ∪ CFAR
    ├── morphology (open 3 / close 5)
@@ -36,7 +42,20 @@ lookalike-engine  (Steps 4–5)
    ├── store confidence / classification_label / texture_features (PostGIS)
    ▼
 spill.candidates.filtered (Redis, only possible_oil_spill)
+   ▼
+evidence-fusion  (Step 6)
+   ├── resolve candidate centroid + acquisition time
+   ├── geography ST_DWithin vs high-risk vessels (tier HIGH/CRITICAL)
+   ├── temporal window around acquisition time
+   ├── nearest correlated vessel (nullable)
+   ▼
+incident.fused (Redis, one message per fused candidate)
 ```
+
+`is_synthetic` provenance is carried unchanged through every stage:
+`sar.clean → spill_candidates → spill.candidates.raw → spill.candidates.filtered
+→ incident.fused`. It is provenance only — synthetic candidates flow through the
+same detection/scoring/fusion code paths as real data.
 
 **Design constraints that hold throughout**
 
@@ -183,7 +202,107 @@ All were applied to the compose developer Postgres. Always show the migration +
 
 ---
 
-## 6. Step 5 scoring constants (`app/scoring.py`)
+## 6. Service: evidence-fusion (Step 6)
+
+Located at `services/evidence-fusion/`.
+
+Fuses SAR evidence (Step 5 `possible_oil_spill` candidates) with nearby
+vessel-risk context. This is **evidence fusion only** — never source
+attribution. `correlated_vessel_id` means a vessel-risk record was
+geographically/temporally correlated with the candidate; it does **not** mean
+the vessel caused the spill.
+
+Previously a skeleton (no worker existed), the service now:
+
+- consumes `spill.candidates.filtered` (the fusion input) and `vessel.risk`
+  (drained/counted — risk evidence is resolved from PostGIS at correlation time)
+- resolves the candidate centroid + acquisition time from `spill_candidates`
+- queries high-risk vessels (tier `HIGH`/`CRITICAL`) within the correlation
+  windows using PostGIS geography `ST_DWithin`
+- selects the deterministically nearest correlated vessel (nullable)
+- publishes one `incident.fused` event per candidate
+
+| File | Purpose |
+|---|---|
+| `app/evidence.py` | Pure fusion/correlation logic: query builders (geography SQL), deterministic vessel selection, `fuse_evidence` payload. No DB/Redis access. |
+| `app/worker.py` | Consumes the two streams; candidate lookup → correlation → fusion → publish `incident.fused`. |
+| `app/main.py` | FastAPI shell starting the worker; `/health`, `/status`. |
+
+**Correlation**
+
+- Spatial: PostGIS geography `ST_DWithin(candidate_centroid, vessel_position,
+  window_m)` — metres, never longitude/latitude differences (see
+  `docs/spatial.md`). Reuses `shared/spatial/geo.py` helpers
+  (`dwithin_sql` / `make_point_sql` / `distance_m_sql`).
+- Temporal: vessel position within
+  `[acquisition_time − window, acquisition_time + window]`.
+- Multi-vessel selection: nearest geographic distance; ties broken by lowest
+  mmsi (deterministic).
+- Windows — **tunable assumptions, NOT validated scientific constants**:
+  `EVIDENCE_SPATIAL_WINDOW_M` default `5000` (5 km),
+  `EVIDENCE_TEMPORAL_WINDOW_HOURS` default `6` (6 h).
+- High-risk definition: reused the existing representation — `tier IN
+  ('HIGH','CRITICAL')` on `vessel_risk_scores.risk_tier_enum`, the same tiers
+  vessel-risk-engine tasks and api-gateway counts as high-risk.
+
+**No nearby vessel →** `correlated_vessel_id = null`; the SAR candidate is
+still fused and published (absence of vessel context is itself useful
+evidence). No candidate is rejected for lacking vessel context.
+
+**Payload / contract** — see `incident.fused` in `docs/api-contracts.md`.
+Fields: `candidate_id`, `scene_id`, `confidence`, `classification_label`,
+`acquisition_time`, scene metadata, `correlated_vessel_id` (nullable),
+`correlated_vessel` (mmsi/risk_score/tier/recommended_action/distance_m/
+position_timestamp). It never contains attribution fields (`caused_by`,
+`responsible_vessel`, `source_vessel`, `attribution`).
+
+**Database** — no model/table/migration changes. `SpillIncident` (a read-only
+Pydantic model) is untouched; no service imports it (only
+`scripts/verify_db.py` schema checks and `seed_demo_data.py` inserts).
+
+## 7. Synthetic demo injection & provenance (Step 7)
+
+Located at `services/data-ingestion/` (`app/synthetic_injection.py` + the SAR
+trigger in `app/sar_acquisition.py`).
+
+An **explicitly opt-in** mechanism for demo/pipeline validation: inject a
+clearly-marked synthetic dark slick into raw SAR and carry the provenance
+(`is_synthetic`) through the entire pipeline. Synthetic provenance must never be
+confused with real SAR evidence, and it never changes classification or
+confidence semantics.
+
+| Function | Purpose |
+|---|---|
+| `inject_synthetic_slick(image, center, length_px=40, width_px=8, angle_deg=30.0, darkness_db=-6.0)` | Works on a copy (input never mutated); Gaussian-blurred, rotated elliptical dark region `darkness_db` below the local background; grid shape not a hard rectangle; dtype preserved. |
+| `resolve_synthetic_enabled(explicit, env_value)` | Explicit argument > `INJECT_SYNTHETIC` env; disabled by default (no silent enabling). |
+| `inject_geotiff_if_enabled(raster_path, scene_id, explicit=None, ...)` | rasterio read → inject → write a NEW `<stem>_synthetic.tif`; original never overwritten; returns path + metadata incl. `is_synthetic` and injection parameters. |
+
+Wired into the existing SAR trigger: `export_scene_metadata(..., inject_synthetic=None)`
+and `run_sar_acquisition(..., inject_synthetic=None)`. The `sar.clean` message
+metadata carries `is_synthetic`.
+
+**Injection default parameters (`length_px=40`, `width_px=8`, `angle_deg=30`,
+`darkness_db=-6`) are demo parameters, NOT validated oil-spill physics.**
+
+```text
+raw SAR → inject_synthetic_slick() → <stem>_synthetic.tif + is_synthetic metadata → sar.clean
+```
+
+**Provenance propagation**
+
+| Boundary | Field |
+|---|---|
+| `sar.clean` | `is_synthetic` in `scene_metadata` |
+| `spill_candidates` | `is_synthetic BOOLEAN NOT NULL DEFAULT FALSE` (insert reads the ingestion flag, never hardcoded) |
+| `spill.candidates.raw` | `is_synthetic` |
+| `spill.candidates.filtered` | `is_synthetic` |
+| `incident.fused` | `is_synthetic` inherited from the SAR candidate (never the vessel-risk record) |
+
+Synthetic status is provenance metadata only: GLCM, shape filters, lookalike
+heuristics, confidence scoring, and evidence correlation treat synthetic and
+real inputs identically. Existing rows are never rewritten as synthetic.
+
+## 8. Step 5 scoring constants (`app/scoring.py`)
 
 ```python
 DARKNESS_WEIGHT      = 0.30
@@ -202,36 +321,40 @@ Confidence = weighted component sum (+ ship-shadow penalty) clipped to
 
 ---
 
-## 7. Redis contracts
+## 9. Redis contracts
 
 See `docs/api-contracts.md` for the full contracts.
 
 | Stream | Producer | Contents |
 |---|---|---|
-| `spill.candidates.raw` | sar-spill-intelligence | one message/scene: `scene_id`, `acquisition_time`, `candidate_ids[]`, scene metadata |
-| `spill.candidates.filtered` | lookalike-engine | one message/candidate with `classification_label = possible_oil_spill`: `candidate_id`, `scene_id`, `confidence`, `classification_label`, scene metadata |
+| `spill.candidates.raw` | sar-spill-intelligence | one message/scene: `scene_id`, `acquisition_time`, `candidate_ids[]`, scene metadata, `is_synthetic` |
+| `spill.candidates.filtered` | lookalike-engine | one message/candidate with `classification_label = possible_oil_spill`: `candidate_id`, `scene_id`, `confidence`, `classification_label`, scene metadata, `is_synthetic` |
+| `incident.fused` | evidence-fusion | one message/fused candidate: SAR evidence, `correlated_vessel_id` (nullable), `is_synthetic` |
 
 Both use the shared `publish_to_stream` helper (flat fields, JSON-encoded
 values).
 
 ---
 
-## 8. Configuration
+## 10. Configuration
 
 | Variable | Meaning | Status |
 |---|---|---|
 | `SAR_MIN_AREA_M2` | Minimum spill area (m²), required by Step 3. | Must come from validation data — **NOT YET VALIDATED** |
 | `SAR_BRIGHT_TARGET_THRESHOLD` | High-backscatter threshold for the bright-target mask. | Must come from validation data — **NOT YET VALIDATED** |
 | `SAR_ARTIFACT_ROOT` | Artifact volume root (default `/data/artifacts`). | Deployed default |
+| `INJECT_SYNTHETIC` | Opt-in synthetic injection for data-ingestion SAR trigger (default `false`). | Demo/validation only — disabled by default |
 
 Unset/invalid `SAR_MIN_AREA_M2` or `SAR_BRIGHT_TARGET_THRESHOLD` fails SAR
 processing with a clear configuration error (no silent persistence-free
 success). Test fixtures used `SAR_MIN_AREA_M2=20000` / threshold `1.0` and are
-**fixture values only**, never committed as production defaults.
+**fixture values only**, never committed as production defaults. Synthetic
+injection demo parameters (`length_px=40`, `width_px=8`, `angle_deg=30`,
+`darkness_db=-6`) are not validated and must be explicitly enabled.
 
 ---
 
-## 9. Container wiring
+## 11. Container wiring
 
 - Both services' Dockerfiles merge the canonical top-level `shared/`
   (`spatial/`, `db/`) with the AIS-pipeline shared modules
@@ -247,24 +370,28 @@ success). Test fixtures used `SAR_MIN_AREA_M2=20000` / threshold `1.0` and are
 
 ---
 
-## 10. Tests
+## 12. Tests
 
 | Suite | Items | Notes |
 |---|---|---|
-| SAR (`services/sar-spill-intelligence/test_*`) | CFAR, despeckle, morphology/polygonize, segmentation | `24/24` |
-| Lookalike (`services/lookalike-engine/test_*`) | shape filters, artifact mapping, texture, scoring | `35/35` |
+| Data ingestion (`services/data-ingestion/test_synthetic_injection.py`) | injection, opt-in precedence, GeoTIFF path | `10/10` |
+| SAR (`services/sar-spill-intelligence/test_*`) | CFAR, despeckle, morphology/polygonize, segmentation, provenance | `28/28` |
+| Lookalike (`services/lookalike-engine/test_*`) | shape filters, artifact mapping, texture, scoring, provenance | `37/37` |
+| Evidence fusion (`services/evidence-fusion/test_*`) | correlation, fusion, provenance | `19/19` |
 
 Guidelines inherited from the work:
 
 - Tests run in-process; a DB-backed geography-area test skips when PostGIS is
   unreachable (reuse the `tests/test_spatial.py` pattern).
-- The two service test dirs both use a package named `app`, so run the suites
-  separately: `pytest services/sar-spill-intelligence/` and
-  `pytest services/lookalike-engine/`.
+- Service test dirs each use a package named `app`, so run the suites
+  separately: `pytest services/<service>/`.
+- Provenance tests stub the shared infra (`sys.modules` stubs for
+  `shared.redis_client` / `shared.db.connection` / `shared.artifacts` /
+  `rasterio`) so worker builders are tested without live Redis/PostGIS.
 
 ---
 
-## 11. End-to-end validation
+## 13. End-to-end validation
 
 A deterministic fixture (`scripts/generate_synthetic_sar_fixture.py`, values
 are TEST fixtures, not scientific) drives the real Docker pipeline. It produces:
@@ -281,14 +408,26 @@ raw-crop GLCM (not the filtered-crop); `confidence`/`classification_label`/
 `possible_oil_spill`; rejected candidates retained; no rows deleted; later
 statuses never overwritten; no `confirmed` label anywhere.
 
+A Step 7 synthetic-injection E2E (inject → `sar.clean` → `spill_candidates` →
+`spill.candidates.raw` → `spill.candidates.filtered` → `incident.fused`,
+verifying `is_synthetic=true` survives every stage and the candidate is
+processed normally) is prepared but pending database migration approval.
+
 ---
 
-## 12. Open / decisions still required
+## 14. Open / decisions still required
 
 1. **Validated thresholds** — `SAR_MIN_AREA_M2` and `SAR_BRIGHT_TARGET_THRESHOLD`
    need values from validation data before production use.
 2. **Raw-SAR availability for older scenes** — scenes processed before Step 5
    have no `raw_image.npy`; the lookalike worker skips scoring those (retains
    the row) with a clear log.
-3. **Step 6 evidence fusion** — `context_score` is the reserved input; the
-   `spill.candidates.filtered` consumer group is unassigned.
+3. **Step 6 evidence fusion** — `context_score` is the reserved input for the
+   AIS/context stage; `incident.fused` has no consumer group assigned yet
+   (source attribution, Step 8011, to follow).
+4. **Synthetic injection validation** — the Step 7 demo parameters
+   (`length_px=40`, `width_px=8`, `angle_deg=30`, `darkness_db=-6`) are fixtures,
+   not validated oil-spill characteristics; `INJECT_SYNTHETIC` stays disabled
+   unless explicitly enabled.
+5. **`migrate_stage5.sql`** — `is_synthetic` column prepared but not yet applied
+   to the database (pending approval).
