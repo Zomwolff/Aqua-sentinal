@@ -11,7 +11,7 @@ Key points:
   ``GEE_PRIVATE_KEY_PATH`` environment variables.
 * AOI geometry is imported from ``shared.spatial.geo.mumbai_aoi_geometry``.
 * Export uses ``Export.image.toDrive``; after completion the GeoTIFF is downloaded
-  into the shared container mount ``/data/sar`` (the ``sar-raster-data`` Docker
+  into the shared container mount ``/data/artifacts/sar`` (the ``sar-scene-artifacts`` Docker
   volume).
 * Redis message follows the flat‑field JSON convention used for ``ais.clean`` and
   contains ``scene_metadata`` (JSON‑encoded) and ``raster_path`` (container‑visible
@@ -23,10 +23,16 @@ Key points:
 import os
 import json
 import logging
+import time
 from datetime import datetime
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Optional
 
 import ee
+import rasterio
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
+import io
 
 from shared.spatial.geo import mumbai_aoi_geometry
 from shared.redis_client import get_redis, publish_to_stream
@@ -52,12 +58,10 @@ def init_gee() -> None:
             "GEE_SERVICE_ACCOUNT and GEE_PRIVATE_KEY_PATH must be set for SAR acquisition"
         )
 
-    cred_json = json.load(open(service_account))
-    credentials = ee.ServiceAccountCredentials(
-        service_account, private_key_path, private_key_json=cred_json
-    )
+    credentials = ee.ServiceAccountCredentials(service_account, private_key_path)
     ee.Initialize(credentials)
     log.info("Earth Engine initialised with service account %s", service_account)
+
 
 # ---------------------------------------------------------------------------
 # Helper: coverage fraction (geodesic area)
@@ -69,6 +73,7 @@ def _coverage_fraction(scene_geom: ee.Geometry, aoi_geom: ee.Geometry) -> float:
     intersect_area = intersect.area(ee.ErrorMargin(1))
     aoi_area = aoi_geom.area(ee.ErrorMargin(1))
     return float(intersect_area.divide(aoi_area).getInfo())
+
 
 # ---------------------------------------------------------------------------
 # Query Sentinel‑1 collection
@@ -104,6 +109,7 @@ def get_sentinel1_scenes(start_date: str, end_date: str) -> List[Dict[str, Any]]
     log.info("Found %d Sentinel‑1 scenes between %s and %s", len(scenes), start_date, end_date)
     return scenes
 
+
 # ---------------------------------------------------------------------------
 # Ranking – pick the best scene
 # ---------------------------------------------------------------------------
@@ -126,20 +132,58 @@ def select_best_scene(scenes: List[Dict[str, Any]]) -> Dict[str, Any]:
             return cand
     raise RuntimeError("No suitable Sentinel‑1 scene found for the AOI")
 
+
+# ---------------------------------------------------------------------------
+# Google Drive download helper
+# ---------------------------------------------------------------------------
+
+def _build_drive_service(key_path: str):
+    """Build a Google Drive API service using the service account credentials."""
+    scopes = ["https://www.googleapis.com/auth/drive.readonly"]
+    credentials = service_account.Credentials.from_service_account_file(
+        key_path, scopes=scopes
+    )
+    return build("drive", "v3", credentials=credentials, cache_discovery=False)
+
+
+def _download_from_drive(drive_service, file_id: str, dest_path: str) -> None:
+    """Download a file from Google Drive by file ID."""
+    request = drive_service.files().get_media(fileId=file_id)
+    fh = io.FileIO(dest_path, "wb")
+    downloader = MediaIoBaseDownload(fh, request)
+    done = False
+    while not done:
+        status, done = downloader.next_chunk()
+        if status:
+            log.info("Download progress: %d%%", int(status.progress() * 100))
+    fh.close()
+    log.info("Downloaded file to %s", dest_path)
+
+
+def _validate_geotiff(path: str) -> None:
+    """Validate that the GeoTIFF is readable and has expected structure."""
+    with rasterio.open(path) as ds:
+        if ds.width == 0 or ds.height == 0:
+            raise ValueError(f"GeoTIFF has zero dimensions: {ds.width}x{ds.height}")
+        if ds.count == 0:
+            raise ValueError("GeoTIFF has no bands")
+        log.info("GeoTIFF validation passed: %dx%d, %d band(s), CRS=%s",
+                 ds.width, ds.height, ds.count, ds.crs)
+        # Read a small sample to verify data integrity
+        _ = ds.read(1, window=rasterio.windows.Window(0, 0, min(10, ds.width), min(10, ds.height)))
+
+
 # ---------------------------------------------------------------------------
 # Export and download helpers
 # ---------------------------------------------------------------------------
 
 def _download_exported_file(task: Any, folder: str, file_prefix: str) -> str:
-    """Poll the EE export task until completion and return the local path.
+    """Poll the EE export task until completion, then download from Google Drive.
 
-    In production this would download the file from Google Drive (or GCS) into
-    ``/data/sar``. For the purpose of this repository the function simply waits
-    for the task to reach ``COMPLETED`` and constructs the expected destination
-    path. Unit tests mock this function.
+    Waits for the Earth Engine export task to reach COMPLETED state, extracts
+    the Google Drive file ID from the task status, downloads the GeoTIFF via
+    the Drive API, validates it with rasterio, and returns the local path.
     """
-    import time
-
     max_wait = 600  # seconds
     elapsed = 0
     while elapsed < max_wait:
@@ -151,10 +195,67 @@ def _download_exported_file(task: Any, folder: str, file_prefix: str) -> str:
             raise RuntimeError(f"EE export task failed with state {state}")
         time.sleep(5)
         elapsed += 5
+    else:
+        raise TimeoutError(f"EE export task did not complete within {max_wait}s")
 
-    dest_dir = "/data/sar"
+    # Extract Google Drive file ID from task status
+    # EE task status for Drive exports includes 'destination_uris' with the file ID
+    destination_uris = status.get("destination_uris", [])
+    if not destination_uris:
+        # Fallback: try to find the file by name in the export folder
+        log.warning("No destination_uris in task status, attempting to find file by name")
+        file_id = _find_file_in_drive_folder(folder, file_prefix)
+    else:
+        # destination_uris format: ["https://drive.google.com/file/d/<FILE_ID>/view"]
+        uri = destination_uris[0]
+        if "/file/d/" in uri:
+            file_id = uri.split("/file/d/")[1].split("/")[0]
+        else:
+            raise RuntimeError(f"Unexpected destination_uri format: {uri}")
+
+    log.info("EE export completed, downloading file ID: %s", file_id)
+
+    # Build Drive service and download
+    key_path = os.getenv("GEE_PRIVATE_KEY_PATH")
+    if not key_path:
+        raise RuntimeError("GEE_PRIVATE_KEY_PATH not set for Drive download")
+    drive_service = _build_drive_service(key_path)
+
+    dest_dir = "/data/artifacts/sar"
     os.makedirs(dest_dir, exist_ok=True)
-    return os.path.join(dest_dir, f"{file_prefix}.tif")
+    dest_path = os.path.join(dest_dir, f"{file_prefix}.tif")
+
+    _download_from_drive(drive_service, file_id, dest_path)
+
+    # Validate the downloaded GeoTIFF
+    _validate_geotiff(dest_path)
+
+    log.info("SAR raster downloaded and validated: %s", dest_path)
+    return dest_path
+
+
+def _find_file_in_drive_folder(folder_name: str, file_prefix: str) -> str:
+    """Fallback: search for the exported file in the Drive folder by name."""
+    key_path = os.getenv("GEE_PRIVATE_KEY_PATH")
+    if not key_path:
+        raise RuntimeError("GEE_PRIVATE_KEY_PATH not set for Drive search")
+    drive_service = _build_drive_service(key_path)
+
+    # Find folder ID
+    folder_query = f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+    folder_results = drive_service.files().list(q=folder_query, fields="files(id)").execute()
+    folders = folder_results.get("files", [])
+    if not folders:
+        raise RuntimeError(f"Drive folder '{folder_name}' not found")
+    folder_id = folders[0]["id"]
+
+    # Find file in folder
+    file_query = f"name='{file_prefix}.tif' and '{folder_id}' in parents and trashed=false"
+    file_results = drive_service.files().list(q=file_query, fields="files(id)").execute()
+    files = file_results.get("files", [])
+    if not files:
+        raise RuntimeError(f"File '{file_prefix}.tif' not found in Drive folder '{folder_name}'")
+    return files[0]["id"]
 
 # ---------------------------------------------------------------------------
 # Export a scene to the shared SAR volume

@@ -13,3 +13,5 @@ earthengine-api
 numpy
 scipy
 rasterio
+google-api-python-client
+google-auth

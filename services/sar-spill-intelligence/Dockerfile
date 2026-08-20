@@ -3,7 +3,10 @@ WORKDIR /app
 
 # rasterio wheels need GDAL runtime libraries that the slim image omits
 # (libexpat, curl, png/jpeg, openjpeg). shapely wheels need the GEOS C library.
+# libgdal-dev is required so rasterio (imported at module top in worker.py)
+# can load libgdal.so at runtime; it also pulls in the libgdal runtime.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgdal-dev \
     libexpat1 libcurl4 libpng16-16 libjpeg62-turbo libopenjp2-7 libgeos-c1v5 \
     && rm -rf /var/lib/apt/lists/*
 

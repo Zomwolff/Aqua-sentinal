@@ -94,10 +94,16 @@ services:
       AIS_PROVIDER: none          # HTTP-only; actual AIS reading is done by ais-reader
       AISSTREAM_API_KEY: ${AISSTREAM_API_KEY:-}
       INJECT_SYNTHETIC: ${INJECT_SYNTHETIC:-false}
+      # Earth Engine service-account credentials (GEE). The secret value is read
+      # from .env (git-ignored); the key file is mounted read-only at runtime.
+      GEE_SERVICE_ACCOUNT: ${GEE_SERVICE_ACCOUNT:-}
+      GEE_PRIVATE_KEY_PATH: ${GEE_PRIVATE_KEY_PATH:-/run/secrets/gee-key.json}
     # Override the default ./services/shared: mount: data-ingestion needs the
     # canonical shared/spatial plus shared.db as a MODULE (services/shared/
     # db.py). The db/ package is intentionally not mounted to avoid a
     # module/package collision with the services/shared/db.py module.
+    # Mount sar-scene-artifacts so downloaded SAR rasters are visible to
+    # sar-spill-intelligence and lookalike-engine.
     volumes:
       - ./shared/spatial:/app/shared/spatial:ro
       - ./shared/__init__.py:/app/shared/__init__.py:ro
@@ -105,6 +111,8 @@ services:
       - ./services/shared/db.py:/app/shared/db.py:ro
       - ./services/shared/geo_utils.py:/app/shared/geo_utils.py:ro
       - ./services/shared/models.py:/app/shared/models.py:ro
+      - ./secrets/gee-key.json:/run/secrets/gee-key.json:ro
+      - sar-scene-artifacts:/data/artifacts
     ports:
       - "8001:8000"
 
