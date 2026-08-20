@@ -126,6 +126,13 @@ and lookalike-rejected candidates are retained in PostGIS but not published here
 
 Required fields: `candidate_id`, `scene_id`, `confidence`, `classification_label`. Scene metadata (`acquisition_time`, `orbit`, `polarization`, `resolution`) is forwarded from the consuming `spill.candidates.raw` message when present.
 
+**No polygon geometry in the WS envelope.** These events carry only scalar
+metadata (ids, confidence, labels, `is_synthetic`, and `correlated_vessel_id`
+for `incident.fused`). The dashboard resolves the candidate polygon, `area_m2`,
+and `texture_features` via the existing api-gateway endpoint
+`GET /spill/candidates/{candidate_id}` (returns GeoJSON `geometry` + full
+record), keyed by `candidate_id`. The dashboard never fabricates geometry.
+
 ### `incident.fused`
 
 | Field | Value |

@@ -130,6 +130,8 @@ async def _alert_pusher():
         "anomaly.events": "$",
         "vessel.risk": "$",
         "sts.events": "$",
+        "spill.candidates.filtered": "$",
+        "incident.fused": "$",
     }
     log.info("Alert pusher started.")
     while True:
@@ -148,7 +150,9 @@ async def _alert_pusher():
                         event_type = (
                             "anomaly" if stream_name == "anomaly.events"
                             else "sts" if stream_name == "sts.events"
-                            else "risk"
+                            else "risk" if stream_name == "vessel.risk"
+                            else "spill_candidate" if stream_name == "spill.candidates.filtered"
+                            else "incident_fused"
                         )
                         await ws_manager.broadcast({
                             "type": event_type,
@@ -869,6 +873,50 @@ async def list_features(
                 pass
         result.append(row)
     return {"count": len(result), "features": result}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SPILL CANDIDATES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/spill/candidates/{candidate_id}")
+async def get_spill_candidate(candidate_id: str):
+    """
+    Full details for one spill candidate, including its GeoJSON geometry.
+
+    WS events (spill.candidates.filtered / incident.fused) do not carry polygon
+    geometry; the dashboard resolves it here by candidate_id.
+    """
+    pool = await _get_pool()
+    row = await pool.fetchrow(
+        """
+        SELECT candidate_id, scene_id, acquisition_time,
+               classification_label, confidence, area_m2, pixel_count,
+               is_synthetic, texture_features,
+               ST_AsGeoJSON(geom) AS geometry
+        FROM spill_candidates
+        WHERE candidate_id = $1
+        """,
+        candidate_id,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="candidate not found")
+
+    result = {k: v for k, v in dict(row).items()}
+    if isinstance(result.get("geometry"), str):
+        result["geometry"] = json.loads(result["geometry"])
+    if isinstance(result.get("texture_features"), str):
+        try:
+            result["texture_features"] = json.loads(result["texture_features"])
+        except json.JSONDecodeError:
+            result["texture_features"] = None
+    if isinstance(result.get("acquisition_time"), datetime):
+        result["acquisition_time"] = result["acquisition_time"].isoformat()
+    if result.get("confidence") is not None:
+        result["confidence"] = float(result["confidence"])
+    if result.get("area_m2") is not None:
+        result["area_m2"] = float(result["area_m2"])
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -71,3 +71,60 @@ body {
   color: #374151;
   margin-bottom: 8px;
 }
+
+/* ── Spill candidate popups ─────────────────────────────────────────── */
+.spill-popup {
+  min-width: 220px;
+}
+
+.popup-synthetic {
+  background: #7c2d12;
+  color: #fff;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  padding: 4px 8px;
+  border-radius: 4px;
+  margin-bottom: 6px;
+}
+
+.popup-header {
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.popup-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  padding: 2px 0;
+}
+
+.popup-label {
+  color: #6b7280;
+}
+
+.popup-value {
+  font-weight: 500;
+  text-align: right;
+}
+
+.popup-texture {
+  margin-top: 6px;
+  max-height: 120px;
+  overflow: auto;
+  font-size: 10px;
+  background: #f6f8fa;
+  border: 1px solid #e2e8f0;
+  border-radius: 4px;
+  padding: 4px;
+}
+
+/* ── Vessel popups ──────────────────────────────────────────────────── */
+.vessel-popup {
+  font-size: 12px;
+}
+.vessel-popup strong {
+  display: block;
+  margin-bottom: 4px;
+}
