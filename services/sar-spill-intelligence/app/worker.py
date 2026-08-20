@@ -1,0 +1,409 @@
+"""SAR worker: GeoTIFF -> Lee filter -> dark segmentation + CFAR -> morphology -> polygonize."""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any, Dict, List
+
+import numpy as np
+import rasterio
+
+from shared.artifacts import save_scene_artifact
+from shared.db.connection import create_pool
+from shared.redis_client import (
+    consume_stream,
+    ensure_consumer_group,
+    get_redis,
+    publish_to_stream,
+)
+from shared.spatial.constants import SENTINEL1_PIXEL_SIZE_M
+from shared.spatial.geo import area_m2_from_geometry
+from app.cfar import cfar_detect
+from app.despeckle import lee_filter
+from app.morphology import clean_mask
+from app.polygonize import extract_candidates
+from app.segmentation import dark_region_mask
+
+
+log = logging.getLogger(__name__)
+
+SERVICE_NAME = "sar-spill-intelligence"
+CONSUMER_GROUP = "sar-spill-intelligence"
+CONSUMER_NAME = "sar-spill-worker"
+
+CANDIDATES_RAW_STREAM = "spill.candidates.raw"
+
+STATE: Dict[str, Any] = {
+    "heartbeat": None,
+    "messages_consumed": 0,
+    "scenes_processed": 0,
+    "scenes_failed": 0,
+    "last_scene_id": None,
+    "last_processed_at": None,
+    "last_raster_metadata": None,
+    "last_artifact_path": None,
+}
+
+
+@dataclass
+class ProcessedSarScene:
+    """In-memory handoff point for STEP 3 morphology and polygonization."""
+
+    scene_metadata: Dict[str, Any]
+    raster_metadata: Dict[str, Any]
+    raw_image: np.ndarray
+    filtered_image: np.ndarray
+    binary_mask: np.ndarray
+
+
+def _parse_scene_metadata(raw_metadata: Any) -> Dict[str, Any]:
+    if isinstance(raw_metadata, dict):
+        return raw_metadata
+    if not isinstance(raw_metadata, str) or not raw_metadata:
+        raise ValueError("sar.clean message is missing scene_metadata.")
+    decoded = json.loads(raw_metadata)
+    if not isinstance(decoded, dict):
+        raise ValueError("sar.clean scene_metadata must decode to an object.")
+    return decoded
+
+
+def _load_and_detect(
+    raster_path: str,
+    scene_metadata: Dict[str, Any],
+) -> ProcessedSarScene:
+    """Load VV data and retain its georeferencing for the next pipeline step."""
+    with rasterio.open(raster_path) as dataset:
+        if dataset.count < 1:
+            raise ValueError("GeoTIFF has no raster bands.")
+
+        masked = dataset.read(1, masked=True)
+        values = np.asarray(masked.filled(np.nan), dtype=np.float64)
+        finite = np.isfinite(values)
+        if not finite.any():
+            raise ValueError("GeoTIFF contains no finite VV pixels.")
+
+        # The filters require finite values. Nodata pixels are restored as
+        # false in the final mask rather than allowing NaN/Inf propagation.
+        fill_value = float(np.median(values[finite]))
+        working_image = np.where(finite, values, fill_value)
+        filtered_image = lee_filter(working_image)
+
+        # Candidate mask = dark-region segmentation (Otsu, per the design spec
+        # module B1) UNION CFAR small-target anomalies (ship shadows and other
+        # small dark features). CFAR alone behaves as a local small-target
+        # detector and does not retain large smooth dark regions (slicks,
+        # calm water); Otsu segmentation recovers those. Neither detector is
+        # deleted: they are complementary inputs to the same candidate mask.
+        dark_mask = dark_region_mask(filtered_image)
+        anomaly_mask = cfar_detect(filtered_image)
+        binary_mask = (dark_mask | anomaly_mask) & finite
+
+        # working_image is the pre-despeckle backscatter array; it is persisted
+        # as raw_image.npy (Step 5 GLCM texture needs the unfiltered values —
+        # the Lee filter partially removes local texture detail).
+        raw_image = working_image
+
+        raster_metadata = {
+            "crs": dataset.crs.to_string() if dataset.crs else None,
+            "transform": tuple(dataset.transform),
+            "width": dataset.width,
+            "height": dataset.height,
+            "bounds": tuple(dataset.bounds),
+            "resolution": tuple(dataset.res),
+        }
+
+    return ProcessedSarScene(
+        scene_metadata=scene_metadata,
+        raster_metadata=raster_metadata,
+        raw_image=raw_image,
+        filtered_image=filtered_image,
+        binary_mask=binary_mask,
+    )
+
+
+def _acquisition_datetime(scene_metadata: Dict[str, Any]) -> datetime:
+    raw = scene_metadata.get("acquisition_time")
+    if not raw:
+        raise ValueError("scene_metadata is missing acquisition_time.")
+    if isinstance(raw, datetime):
+        return raw
+    return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+
+
+def _candidates_raw_event(
+    scene_metadata: Dict[str, Any],
+    candidates: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """One message per scene: candidate IDs plus existing scene metadata."""
+    event: Dict[str, Any] = {
+        "scene_id": scene_metadata["scene_id"],
+        "acquisition_time": scene_metadata.get("acquisition_time"),
+        "candidate_ids": [str(c["candidate_id"]) for c in candidates],
+    }
+    for key in ("orbit", "polarization", "resolution"):
+        if key in scene_metadata:
+            event[key] = scene_metadata[key]
+    return event
+
+
+_INSERT_CANDIDATE_SQL = """
+    INSERT INTO spill_candidates
+        (candidate_id, scene_id, acquisition_time, geom, area_m2, pixel_count,
+         status, created_at)
+    VALUES ($1, $2, $3,
+            ST_SetSRID(ST_GeomFromGeoJSON($4), 4326),
+            $5, $6, $7::spill_candidate_status_enum, NOW())
+"""
+
+
+async def _persist_candidates(
+    pool,
+    scene_id: str,
+    acquisition_time: datetime,
+    candidates: List[Dict[str, Any]],
+) -> None:
+    """Write all candidates for one scene in a single transaction.
+
+    Errors propagate to the caller so a failed DB write is never hidden.
+    """
+    if not candidates:
+        return
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            for candidate in candidates:
+                await conn.execute(
+                    _INSERT_CANDIDATE_SQL,
+                    candidate["candidate_id"],
+                    scene_id,
+                    acquisition_time,
+                    json.dumps(candidate["geometry"]),
+                    candidate["area_m2"],
+                    candidate["pixel_count"],
+                    "raw",
+                )
+
+
+def _min_area_m2_config() -> float:
+    """Return the explicit minimum spill area (m²) from configuration.
+
+    Read from the ``SAR_MIN_AREA_M2`` environment variable at the worker/config
+    layer. There is no hardcoded default: the threshold must come from
+    validation data. Raises ``ValueError`` (a configuration error) when the
+    variable is missing, empty, or not a positive finite number, which fails the
+    Step 3 processing path rather than hiding it.
+    """
+    raw = os.environ.get("SAR_MIN_AREA_M2")
+    if not raw or raw.strip() == "":
+        raise ValueError(
+            "SAR_MIN_AREA_M2 is not configured. Set it from validation data "
+            "before spill-candidate persistence; no default noise-area "
+            "threshold may be invented."
+        )
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"SAR_MIN_AREA_M2 is invalid: {raw!r}. It must be configured as a "
+            "positive number of square metres (float)."
+        )
+    if not np.isfinite(value) or value <= 0:
+        raise ValueError(
+            f"SAR_MIN_AREA_M2 must be a positive finite number, got {value!r}."
+        )
+    return value
+
+
+def _bright_target_threshold_config() -> float:
+    """Return the explicit high-backscatter threshold for bright-target masks.
+
+    Read from ``SAR_BRIGHT_TARGET_THRESHOLD`` at the worker/config layer. There
+    is no hardcoded scientific value: the threshold must come from
+    validation/configuration. Missing/invalid configuration raises a clear
+    error that fails the Step 3 path.
+    """
+    raw = os.environ.get("SAR_BRIGHT_TARGET_THRESHOLD")
+    if not raw or raw.strip() == "":
+        raise ValueError(
+            "SAR_BRIGHT_TARGET_THRESHOLD is not configured. Set it from "
+            "validation data before generating scene artifacts; no bright-target "
+            "threshold may be invented."
+        )
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"SAR_BRIGHT_TARGET_THRESHOLD is invalid: {raw!r}. It must be "
+            "configured as a positive finite number (float)."
+        )
+    if not np.isfinite(value) or value <= 0:
+        raise ValueError(
+            f"SAR_BRIGHT_TARGET_THRESHOLD must be a positive finite number, got {value!r}."
+        )
+    return value
+
+
+def _artifact_root() -> str:
+    return os.environ.get("SAR_ARTIFACT_ROOT", "/data/artifacts")
+
+
+# Candidate physical area is computed with the shared geography-cast SQL helper.
+# ST_GeomFromGeoJSON($1) carries SRID 4326; ST_SetSRID(..., 4326) + ::geography
+# then yields the geodesic area in m². Never degree² (see docs/spatial.md).
+_AREA_M2_SQL = "SELECT " + area_m2_from_geometry("ST_GeomFromGeoJSON($1)")
+
+
+async def _resolve_candidate_areas(pool, candidates) -> None:
+    """Stamp each candidate's ``area_m2`` via PostGIS geography.
+
+    Uses the existing ``area_m2_from_geometry`` geography-cast path for every
+    m² value. Errors propagate so a failed area computation is never hidden.
+    Polygon extraction stays DB-free (see ``extract_candidates``).
+    """
+    for candidate in candidates:
+        area_m2 = await pool.fetchval(
+            _AREA_M2_SQL,
+            json.dumps(candidate["geometry"]),
+        )
+        candidate["area_m2"] = float(area_m2)
+
+
+async def _process_sar_message(
+    data: Dict[str, Any],
+    pool,
+    redis,
+) -> None:
+    """Process one sar.clean message through STEP 3 (morphology + polygonize)."""
+    raster_path = data.get("raster_path")
+    scene_id = None
+    try:
+        if not isinstance(raster_path, str) or not raster_path:
+            raise ValueError("sar.clean message is missing raster_path.")
+
+        scene_metadata = _parse_scene_metadata(data.get("scene_metadata"))
+        scene_id = scene_metadata.get("scene_id")
+
+        # Step 3 gates: the physical minimum spill area and the bright-target
+        # backscatter threshold must be explicitly configured from validation
+        # data. Missing/invalid configuration raises and fails the Step 3 path
+        # below (scenes_failed), never silently processing without persistence
+        # or artifact generation.
+        min_area_m2 = _min_area_m2_config()
+        bright_threshold = _bright_target_threshold_config()
+
+        processed = await asyncio.to_thread(
+            _load_and_detect,
+            raster_path,
+            scene_metadata,
+        )
+
+        # STEP 3 Step A — morphological cleaning. Explicit structural
+        # parameters only; no hidden physical-area threshold here.
+        cleaned_mask = clean_mask(
+            processed.binary_mask,
+            open_size=3,
+            close_size=5,
+        )
+
+        # STEP 3 Step B — connected-component polygonization (pure geometry;
+        # no DB access inside extract_candidates).
+        candidates = await asyncio.to_thread(
+            extract_candidates,
+            mask=cleaned_mask,
+            transform=processed.raster_metadata["transform"],
+            min_area_m2=min_area_m2,
+            pixel_size_m=SENTINEL1_PIXEL_SIZE_M,
+        )
+
+        # Scene-level artifact (step 4 dependency): filtered intensity, cleaned
+        # mask, and bright-target mask, retrievable by scene_id. Raster pixels
+        # are never written to PostgreSQL; one artifact bundle per processed
+        # scene on the shared artifact volume. Fail fast so we never persist
+        # candidates or publish candidate IDs without a retrievable artifact.
+        affine = tuple(processed.raster_metadata["transform"])
+        if len(affine) == 9:
+            affine = affine[:6]
+        bright_target_mask = processed.filtered_image > bright_threshold
+        artifact_path = save_scene_artifact(
+            _artifact_root(),
+            scene_id,
+            raw_image=processed.raw_image,
+            filtered_image=processed.filtered_image,
+            cleaned_mask=cleaned_mask,
+            bright_target_mask=bright_target_mask,
+            affine=list(affine),
+            shape=processed.binary_mask.shape,
+            crs=processed.raster_metadata.get("crs"),
+        )
+
+        # STEP 3 Step C — resolve physical area via the shared PostGIS
+        # geography path, then persist all candidate rows for this scene in a
+        # single transaction before emitting any Redis event, so downstream
+        # consumers never see candidate IDs that were not stored.
+        await _resolve_candidate_areas(pool, candidates)
+        acquisition_time = _acquisition_datetime(scene_metadata)
+        await _persist_candidates(
+            pool,
+            scene_id,
+            acquisition_time,
+            candidates,
+        )
+
+        # Step 3 Step 8 — one event per scene, only after the DB write
+        # succeeds. Follows the existing event semantics: events are emitted
+        # when there is output (a scene with zero candidates produces no event).
+        if candidates:
+            await publish_to_stream(
+                redis,
+                CANDIDATES_RAW_STREAM,
+                _candidates_raw_event(scene_metadata, candidates),
+            )
+
+        STATE["scenes_processed"] += 1
+        STATE["last_scene_id"] = scene_id
+        STATE["last_processed_at"] = datetime.now(timezone.utc).isoformat()
+        STATE["last_raster_metadata"] = processed.raster_metadata
+        STATE["last_artifact_path"] = artifact_path
+        log.info(
+            "Processed SAR scene id=%s path=%s shape=%s dark_candidates=%d spill_candidates=%d artifact=%s",
+            scene_id,
+            raster_path,
+            processed.binary_mask.shape,
+            int(processed.binary_mask.sum()),
+            len(candidates),
+            artifact_path,
+        )
+    except Exception as exc:
+        STATE["scenes_failed"] += 1
+        log.exception(
+            "SAR scene processing failed id=%s path=%s: %s",
+            scene_id,
+            raster_path,
+            exc,
+        )
+
+
+async def run_sar_worker() -> None:
+    """Consume sar.clean with the shared Redis stream consumer convention."""
+    pool = await create_pool()
+    redis = await get_redis()
+    await ensure_consumer_group(redis, "sar.clean", CONSUMER_GROUP)
+    log.info("%s worker started.", SERVICE_NAME)
+
+    while True:
+        STATE["heartbeat"] = time.time()
+        messages = await consume_stream(
+            redis,
+            "sar.clean",
+            CONSUMER_GROUP,
+            CONSUMER_NAME,
+            count=10,
+            block_ms=2000,
+        )
+        for message in messages:
+            await _process_sar_message(message["data"], pool, redis)
+            STATE["messages_consumed"] += 1

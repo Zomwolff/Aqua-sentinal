@@ -9,3 +9,4 @@ shapely
 geopandas
 python-dotenv
 tenacity
+earthengine-api

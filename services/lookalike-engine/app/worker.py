@@ -1,0 +1,316 @@
+"""Lookalike-engine worker: Step 4 shape filtering + Step 5 texture/confidence.
+
+Consumes ``spill.candidates.raw`` (one message per scene), retrieves the
+scene-level raster artifact by ``scene_id``, then per candidate:
+
+    Step 4: shape/lookalike heuristics -> status update
+    Step 5: possible_slick candidates only -> raw-SAR GLCM texture -> heuristic
+            confidence score -> confidence / classification_label /
+            texture_features storage; possible_oil_spill results are published
+            to ``spill.candidates.filtered``.
+
+Never deletes candidates, never overwrites a later status, and never claims
+confirmed oil.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import time
+from datetime import datetime, timezone
+from typing import Any, Dict, List
+
+from shared.artifacts import (
+    crop_region,
+    geometry_to_pixel_bbox,
+    load_scene_artifact,
+)
+from shared.db.connection import create_pool
+from shared.redis_client import (
+    consume_stream,
+    ensure_consumer_group,
+    get_redis,
+    publish_to_stream,
+)
+from app.shape_filters import classify_candidate
+from app.scoring import (
+    CONFIDENCE_THRESHOLD,
+    PASS_THROUGH_LABELS,
+    score_candidate,
+)
+from app.texture import compute_glcm_features
+
+log = logging.getLogger(__name__)
+
+SERVICE_NAME = "lookalike-engine"
+CONSUMER_GROUP = "lookalike-engine"
+CONSUMER_NAME = "lookalike-worker"
+
+CANDIDATES_RAW_STREAM = "spill.candidates.raw"
+CANDIDATES_FILTERED_STREAM = "spill.candidates.filtered"
+
+# Extra pixel padding around the candidate bbox so the ship-shadow heuristic can
+# see a bright target up to ``adjacency_px`` away (default 5) plus margin.
+PIXEL_PADDING = 7
+
+GLCM_LEVELS = 32
+
+STATE: Dict[str, Any] = {
+    "heartbeat": None,
+    "messages_consumed": 0,
+    "candidates_classified": 0,
+    "candidates_scored": 0,
+    "candidates_filtered_published": 0,
+    "candidates_skipped": 0,
+    "scenes_failed": 0,
+    "last_scene_id": None,
+    "last_processed_at": None,
+}
+
+
+def _artifact_root() -> str:
+    return os.environ.get("SAR_ARTIFACT_ROOT", "/data/artifacts")
+
+
+def _candidate_ids(data: Dict[str, Any]) -> List[str]:
+    raw = data.get("candidate_ids")
+    if isinstance(raw, str):
+        raw = json.loads(raw)
+    if not isinstance(raw, list):
+        raise ValueError("spill.candidates.raw message is missing candidate_ids.")
+    return [str(c) for c in raw]
+
+
+_FETCH_CANDIDATE_SQL = """
+    SELECT candidate_id, scene_id, status, pixel_count, area_m2,
+           classification_label, ST_AsGeoJSON(geom) AS geojson
+    FROM spill_candidates
+    WHERE candidate_id = $1
+"""
+
+_UPDATE_STATUS_SQL = """
+    UPDATE spill_candidates
+    SET status = $1::spill_candidate_status_enum
+    WHERE candidate_id = $2 AND status = 'raw'
+"""
+
+_UPDATE_CLASSIFICATION_SQL = """
+    UPDATE spill_candidates
+    SET classification_label = $1::spill_candidate_status_enum,
+        confidence = $2,
+        texture_features = $3::jsonb
+    WHERE candidate_id = $4
+      AND status = 'possible_slick'
+      AND classification_label IS NULL
+"""
+
+_UPDATE_PASSTHROUGH_SQL = """
+    UPDATE spill_candidates
+    SET classification_label = $1::spill_candidate_status_enum
+    WHERE candidate_id = $2
+      AND classification_label IS NULL
+"""
+
+
+async def _update_status(pool, candidate_id: str, label: str) -> bool:
+    """Update a candidate's status unless it already left ``raw``."""
+    row = await pool.execute(_UPDATE_STATUS_SQL, label, candidate_id)
+    return "UPDATE 1" in row
+
+
+async def _resolve_candidate(
+    candidate_row: Dict[str, Any],
+    artifact_root: str,
+) -> Dict[str, Any]:
+    """Load the scene artifact and crop all pixel inputs for one candidate."""
+    geometry = json.loads(candidate_row["geojson"])
+    scene_id = candidate_row["scene_id"]
+
+    artifact = load_scene_artifact(artifact_root, scene_id)
+    if artifact is None:
+        raise FileNotFoundError(
+            f"scene artifact not found for scene_id={scene_id} (candidate "
+            f"{candidate_row['candidate_id']})"
+        )
+
+    metadata = artifact["metadata"]
+    bbox = geometry_to_pixel_bbox(
+        geometry,
+        metadata["affine"],
+        padding=PIXEL_PADDING,
+        shape=metadata["shape"],
+    )
+
+    raw_image = artifact.get("raw_image")
+    return {
+        "geometry": geometry,
+        "dark_mask": crop_region(artifact["cleaned_mask"], bbox),
+        "intensity": crop_region(artifact["filtered_image"], bbox),
+        "bright_target": crop_region(artifact["bright_target_mask"], bbox),
+        "raw_image": crop_region(raw_image, bbox) if raw_image is not None else None,
+    }
+
+
+def _filtered_event(data: Dict[str, Any], result) -> Dict[str, Any]:
+    """One message per scored candidate published to spill.candidates.filtered."""
+    event: Dict[str, Any] = {
+        "candidate_id": str(result["candidate_id"]),
+        "scene_id": result["scene_id"],
+        "confidence": result["confidence"],
+        "classification_label": result["classification_label"],
+    }
+    for key in ("acquisition_time", "orbit", "polarization", "resolution"):
+        if key in data:
+            event[key] = data[key]
+    return event
+
+
+async def _process_candidates_message(data: Dict[str, Any], pool, redis) -> None:
+    """Step 4 classify + Step 5 score candidates announced in one scene message."""
+    scene_id = data.get("scene_id")
+    try:
+        candidate_ids = _candidate_ids(data)
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(f"malformed spill.candidates.raw message: {exc}")
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            for candidate_id in candidate_ids:
+                row = await conn.fetchrow(_FETCH_CANDIDATE_SQL, candidate_id)
+                if row is None:
+                    log.warning("candidate %s not found; skipping", candidate_id)
+                    STATE["candidates_skipped"] += 1
+                    continue
+
+                row = dict(row)
+                candidate_id = str(row["candidate_id"])
+
+                # Step 4: heuristic shape filtering (raw -> status).
+                if row["status"] == "raw":
+                    try:
+                        resolved = await _resolve_candidate(row, _artifact_root())
+                        label = classify_candidate(
+                            {
+                                "candidate_id": candidate_id,
+                                "geometry": resolved["geometry"],
+                                "pixel_count": int(row["pixel_count"]),
+                            },
+                            {"dark_mask": resolved["dark_mask"], "intensity": resolved["intensity"]},
+                            resolved["bright_target"],
+                        )
+                    except Exception as exc:
+                        STATE["candidates_skipped"] += 1
+                        log.exception(
+                            "Step 4 classification failed for candidate %s scene=%s: %s",
+                            candidate_id, scene_id, exc,
+                        )
+                        continue
+                    await _update_status(conn, candidate_id, label)
+                    row["status"] = label
+                    STATE["candidates_classified"] += 1
+
+                if row.get("classification_label") is not None:
+                    STATE["candidates_skipped"] += 1  # already scored / pass-through
+                    continue
+
+                # Step 5: only possible_slick candidates are scored.
+                if row["status"] in PASS_THROUGH_LABELS:
+                    await conn.execute(_UPDATE_PASSTHROUGH_SQL, row["status"], candidate_id)
+                    STATE["candidates_skipped"] += 1
+                    continue
+
+                if row["status"] == "possible_slick":
+                    try:
+                        resolved = await _resolve_candidate(row, _artifact_root())
+                        if resolved["raw_image"] is None:
+                            raise FileNotFoundError(
+                                "raw SAR artifact (raw_image.npy) missing; Step 5 scoring "
+                                "requires pre-despeckle values, not the Lee-filtered image."
+                            )
+                        candidate = {
+                            "candidate_id": candidate_id,
+                            "geometry": resolved["geometry"],
+                            "pixel_count": int(row["pixel_count"]),
+                            "area_m2": float(row["area_m2"]) if row["area_m2"] is not None else None,
+                            "classification_label": row["status"],
+                        }
+                        texture = compute_glcm_features(resolved["raw_image"], resolved["dark_mask"], levels=GLCM_LEVELS)
+                        scored = score_candidate(candidate, texture, context_score=0.5)
+                    except Exception as exc:
+                        STATE["candidates_skipped"] += 1
+                        log.exception(
+                            "Step 5 scoring failed for candidate %s scene=%s: %s",
+                            candidate_id, scene_id, exc,
+                        )
+                        continue
+
+                    updated = await conn.execute(
+                        _UPDATE_CLASSIFICATION_SQL,
+                        scored["classification_label"],
+                        scored["confidence"],
+                        json.dumps(texture),
+                        candidate_id,
+                    )
+                    if "UPDATE 1" in updated:
+                        STATE["candidates_scored"] += 1
+                        log.info(
+                            "candidate %s scene=%s confidence=%.3f label=%s",
+                            candidate_id, scene_id, scored["confidence"],
+                            scored["classification_label"],
+                        )
+                        if scored["classification_label"] == "possible_oil_spill":
+                            await publish_to_stream(
+                                redis,
+                                CANDIDATES_FILTERED_STREAM,
+                                _filtered_event(data, {
+                                    "candidate_id": candidate_id,
+                                    "scene_id": row["scene_id"],
+                                    "confidence": scored["confidence"],
+                                    "classification_label": scored["classification_label"],
+                                }),
+                            )
+                            STATE["candidates_filtered_published"] += 1
+                    else:
+                        STATE["candidates_skipped"] += 1
+                    continue
+
+                STATE["candidates_skipped"] += 1
+
+
+async def run_lookalike_worker() -> None:
+    """Consume spill.candidates.raw with the shared consumer pattern."""
+    pool = await create_pool()
+    redis = await get_redis()
+    await ensure_consumer_group(redis, CANDIDATES_RAW_STREAM, CONSUMER_GROUP)
+    log.info("%s worker started.", SERVICE_NAME)
+    log.info(
+        "Step 5 filtered stream: %s (CONFIDENCE_THRESHOLD=%s)",
+        CANDIDATES_FILTERED_STREAM,
+        CONFIDENCE_THRESHOLD,
+    )
+
+    while True:
+        STATE["heartbeat"] = time.time()
+        messages = await consume_stream(
+            redis,
+            CANDIDATES_RAW_STREAM,
+            CONSUMER_GROUP,
+            CONSUMER_NAME,
+            count=20,
+            block_ms=2000,
+        )
+        for message in messages:
+            scene_id = message["data"].get("scene_id")
+            try:
+                await _process_candidates_message(message["data"], pool, redis)
+            except Exception as exc:
+                STATE["scenes_failed"] += 1
+                log.exception(
+                    "lookalike processing failed scene=%s: %s", scene_id, exc
+                )
+            finally:
+                STATE["messages_consumed"] += 1
+                STATE["last_scene_id"] = scene_id
+                STATE["last_processed_at"] = datetime.now(timezone.utc).isoformat()

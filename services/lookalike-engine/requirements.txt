@@ -3,3 +3,7 @@ uvicorn[standard]
 redis
 asyncpg
 pydantic
+numpy
+scipy
+scikit-image
+affine

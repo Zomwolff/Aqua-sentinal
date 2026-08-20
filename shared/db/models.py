@@ -55,6 +55,26 @@ class SpillIncident(BaseModel):
     status: Optional[str] = None
 
 
+class SpillCandidate(BaseModel):
+    """Raw SAR detection candidate from Step 3, before look-alike classification.
+
+    Mirrors the ``spill_candidates`` PostGIS table. Distinct from
+    ``SpillIncident``: candidates are the un-validated earlier-stage outputs of
+    the SAR morphology/polygonization step and start with status ``raw``.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    candidate_id: UUID
+    scene_id: str
+    acquisition_time: Optional[datetime] = None
+    geom: str
+    area_m2: Optional[Decimal] = None
+    pixel_count: Optional[int] = None
+    status: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+
 class AttributionResult(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

@@ -51,6 +51,13 @@ DO $$ BEGIN
     CREATE TYPE risk_tier_enum AS ENUM ('LOW', 'MEDIUM', 'HIGH', 'CRITICAL');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+DO $$ BEGIN
+    CREATE TYPE spill_candidate_status_enum AS ENUM (
+        'raw', 'likely_ship_shadow', 'likely_calm_water', 'possible_slick',
+        'possible_oil_spill', 'low_confidence'
+    );
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
 -- ============================================================
 -- 1. vessels — static registry, one row per physical ship
 -- ============================================================
@@ -170,6 +177,29 @@ CREATE INDEX IF NOT EXISTS idx_spill_incidents_centroid    ON spill_incidents US
 CREATE INDEX IF NOT EXISTS idx_spill_incidents_geom        ON spill_incidents USING GIST (geom);
 CREATE INDEX IF NOT EXISTS idx_spill_incidents_detected_at ON spill_incidents (detected_at);
 CREATE INDEX IF NOT EXISTS idx_spill_incidents_status      ON spill_incidents (status);
+
+-- ============================================================
+-- 3b. spill_candidates — raw SAR detections before classification
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS spill_candidates (
+    candidate_id         UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    scene_id             VARCHAR(255) NOT NULL,               -- SAR scene id (e.g. COPERNICUS/S1_GRD/...)
+    acquisition_time     TIMESTAMPTZ NOT NULL,                -- SAR acquisition time
+    geom                 GEOMETRY(Polygon, 4326) NOT NULL,    -- candidate spill boundary (EPSG:4326, lon/lat)
+    area_m2              NUMERIC(14,2) NOT NULL CHECK (area_m2 >= 0),  -- geography-cast area in m²
+    pixel_count          INTEGER NOT NULL CHECK (pixel_count > 0),
+    status               spill_candidate_status_enum NOT NULL DEFAULT 'raw',
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    confidence           DOUBLE PRECISION CHECK (confidence IS NULL OR confidence BETWEEN 0 AND 1),  -- Step 5 heuristic confidence
+    classification_label spill_candidate_status_enum,        -- Step 4/5 classification label
+    texture_features     JSONB                               -- Step 5 GLCM texture features
+);
+
+CREATE INDEX IF NOT EXISTS idx_spill_candidates_geom       ON spill_candidates USING GIST (geom);
+CREATE INDEX IF NOT EXISTS idx_spill_candidates_scene_id   ON spill_candidates (scene_id);
+CREATE INDEX IF NOT EXISTS idx_spill_candidates_acquisition ON spill_candidates (acquisition_time);
+CREATE INDEX IF NOT EXISTS idx_spill_candidates_status     ON spill_candidates (status);
 
 -- ============================================================
 -- 4. attribution_results — candidate vessels per spill, scored

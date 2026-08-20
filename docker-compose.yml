@@ -188,6 +188,21 @@ services:
     environment:
       <<: *backend-env
       SERVICE_NAME: sar-spill-intelligence
+      SAR_MIN_AREA_M2: ${SAR_MIN_AREA_M2:-}
+      SAR_BRIGHT_TARGET_THRESHOLD: ${SAR_BRIGHT_TARGET_THRESHOLD:-}
+      SAR_ARTIFACT_ROOT: ${SAR_ARTIFACT_ROOT:-/data/artifacts}
+    # Override the default ./services/shared:/app/shared mount: the SAR service
+    # needs the canonical top-level shared package (shared/spatial, shared/db)
+    # together with the AIS-pipeline shared modules, merged into one /app/shared.
+    volumes:
+      - ./shared/spatial:/app/shared/spatial:ro
+      - ./shared/db:/app/shared/db:ro
+      - ./shared/__init__.py:/app/shared/__init__.py:ro
+      - ./services/shared/redis_client.py:/app/shared/redis_client.py:ro
+      - ./services/shared/geo_utils.py:/app/shared/geo_utils.py:ro
+      - ./services/shared/models.py:/app/shared/models.py:ro
+      - ./services/shared/artifacts.py:/app/shared/artifacts.py:ro
+      - sar-scene-artifacts:/data/artifacts
     ports:
       - "8008:8000"
 
@@ -199,6 +214,19 @@ services:
     environment:
       <<: *backend-env
       SERVICE_NAME: lookalike-engine
+      SAR_ARTIFACT_ROOT: ${SAR_ARTIFACT_ROOT:-/data/artifacts}
+    # Override the default ./services/shared:/app/shared mount: this service
+    # needs the canonical top-level shared package (shared/spatial, shared/db)
+    # together with the AIS-pipeline shared modules, merged into one /app/shared.
+    volumes:
+      - ./shared/spatial:/app/shared/spatial:ro
+      - ./shared/db:/app/shared/db:ro
+      - ./shared/__init__.py:/app/shared/__init__.py:ro
+      - ./services/shared/redis_client.py:/app/shared/redis_client.py:ro
+      - ./services/shared/geo_utils.py:/app/shared/geo_utils.py:ro
+      - ./services/shared/models.py:/app/shared/models.py:ro
+      - ./services/shared/artifacts.py:/app/shared/artifacts.py:ro
+      - sar-scene-artifacts:/data/artifacts
     ports:
       - "8009:8000"
 
@@ -292,6 +320,7 @@ services:
 
 volumes:
   pgdata:
+  sar-scene-artifacts:
 
 networks:
   aqua-net:

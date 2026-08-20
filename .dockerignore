@@ -15,7 +15,6 @@ dashboard
 docs
 infra
 scripts
-shared
 simulator
 tests
 Makefile

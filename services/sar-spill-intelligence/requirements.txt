@@ -3,3 +3,9 @@ uvicorn[standard]
 redis
 asyncpg
 pydantic
+numpy
+scipy
+rasterio
+scikit-image
+shapely
+affine
