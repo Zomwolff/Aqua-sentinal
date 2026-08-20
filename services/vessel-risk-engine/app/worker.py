@@ -56,7 +56,7 @@ async def run_risk_worker() -> None:
 async def _recompute_risk(mmsi: int, pool, redis) -> None:
     """Full risk score recomputation for one vessel from current DB state."""
     vessel_row = await pool.fetchrow(
-        "SELECT vessel_type, last_seen FROM vessels WHERE mmsi=$1", mmsi
+        "SELECT id, vessel_type, last_seen, last_lat, last_lon FROM vessels WHERE mmsi=$1", str(mmsi)
     )
     if not vessel_row:
         return
@@ -74,7 +74,7 @@ async def _recompute_risk(mmsi: int, pool, redis) -> None:
     anomaly_rows = await pool.fetch(
         "SELECT anomaly_type, severity FROM anomaly_events "
         "WHERE mmsi=$1 AND window_start >= NOW() - INTERVAL '6 hours'",
-        mmsi,
+        str(mmsi),
     )
     anomaly_events = [dict(r) for r in anomaly_rows]
 
@@ -82,7 +82,7 @@ async def _recompute_risk(mmsi: int, pool, redis) -> None:
     trust_row = await pool.fetchrow(
         "SELECT rolling_trust_score FROM ais_trust_scores "
         "WHERE mmsi=$1 ORDER BY timestamp DESC LIMIT 1",
-        mmsi,
+        str(mmsi),
     )
     trust_score = float(trust_row["rolling_trust_score"]) if trust_row and trust_row["rolling_trust_score"] else 1.0
 
@@ -98,7 +98,7 @@ async def _recompute_risk(mmsi: int, pool, redis) -> None:
                       FROM vessels WHERE mmsi=$1 AND last_lat IS NOT NULL LIMIT 1),
                      10000
                  ) LIMIT 1""",
-            mmsi,
+            str(mmsi),
         )
         dark_flag = dark_row is not None
     except Exception:
@@ -106,9 +106,9 @@ async def _recompute_risk(mmsi: int, pool, redis) -> None:
 
     # STS events (last 48h)
     sts_rows = await pool.fetch(
-        "SELECT vessel_a, vessel_b, start_time, end_time FROM sts_events "
-        "WHERE (vessel_a=$1 OR vessel_b=$1) AND start_time >= NOW() - INTERVAL '48 hours'",
-        mmsi,
+        "SELECT vessel_a_mmsi AS vessel_a, vessel_b_mmsi AS vessel_b, start_time, end_time FROM sts_events "
+        "WHERE (vessel_a_mmsi=$1 OR vessel_b_mmsi=$1) AND start_time >= NOW() - INTERVAL '48 hours'",
+        str(mmsi),
     )
     sts_events = [
         {
@@ -120,27 +120,45 @@ async def _recompute_risk(mmsi: int, pool, redis) -> None:
     ]
 
     # Previous risk score for decay
-    prev_row = await pool.fetchrow("SELECT risk_score, tier FROM vessel_risk_scores WHERE mmsi=$1", mmsi)
+    prev_row = await pool.fetchrow("SELECT risk_score, tier FROM vessel_risk_scores WHERE mmsi=$1", str(mmsi))
     prev_score = float(prev_row["risk_score"]) if prev_row and prev_row["risk_score"] is not None else None
     old_tier = prev_row["tier"] if prev_row else None
 
+    # Latest weather stats for weather forgiveness (nearest-neighbor if location known)
+    last_lat = vessel_row.get("last_lat")
+    last_lon = vessel_row.get("last_lon")
+    
+    if last_lat is not None and last_lon is not None:
+        weather_row = await pool.fetchrow(
+            """SELECT wind_speed_kmh, current_speed_ms FROM environmental_conditions 
+               WHERE timestamp >= NOW() - INTERVAL '2 hours'
+               ORDER BY geom <-> ST_SetSRID(ST_MakePoint($1, $2), 4326) LIMIT 1""",
+            last_lon, last_lat
+        )
+    else:
+        weather_row = await pool.fetchrow(
+            "SELECT wind_speed_kmh, current_speed_ms FROM environmental_conditions ORDER BY timestamp DESC LIMIT 1"
+        )
+        
+    weather_stats = dict(weather_row) if weather_row else {}
+
     result = compute_risk_score(
         mmsi, anomaly_events, trust_score, dark_flag, sts_events,
-        vessel_type, prev_score, hours_since,
+        vessel_type, prev_score, hours_since, weather_stats,
     )
 
     # Upsert risk score
     await pool.execute(
         """INSERT INTO vessel_risk_scores
-               (mmsi, risk_score, tier, contributing_factors, recommended_action, updated_at)
-           VALUES ($1,$2,$3,$4::jsonb,$5,$6)
+               (vessel_id, mmsi, risk_score, tier, contributing_factors, recommended_action, updated_at)
+           VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7)
            ON CONFLICT (mmsi) DO UPDATE SET
                risk_score=EXCLUDED.risk_score,
                tier=EXCLUDED.tier,
                contributing_factors=EXCLUDED.contributing_factors,
                recommended_action=EXCLUDED.recommended_action,
                updated_at=EXCLUDED.updated_at""",
-        mmsi, result["risk_score"], result["tier"],
+        vessel_row["id"], str(mmsi), result["risk_score"], result["tier"],
         json.dumps(result["contributing_factors"]),
         result["recommended_action"],
         datetime.now(timezone.utc),
@@ -166,7 +184,7 @@ async def _recompute_risk(mmsi: int, pool, redis) -> None:
                 """INSERT INTO satellite_tasking_requests
                        (mmsi, risk_score, risk_tier, reason)
                    VALUES ($1,$2,$3,$4::jsonb)""",
-                mmsi, result["risk_score"], result["tier"],
+                str(mmsi), result["risk_score"], result["tier"],
                 json.dumps({"contributing_factors": result["contributing_factors"]}),
             )
             log.warning(

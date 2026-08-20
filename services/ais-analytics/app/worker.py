@@ -202,7 +202,7 @@ async def _flush_window(
             features["draught_change_m"],
         )
     except Exception as e:
-        log.error("DB insert vessel_features failed for MMSI %d: %s", mmsi, e)
+        raise e # for MMSI %d: %s", mmsi, e)
 
     # ── Publish to ais.features stream ────────────────────────────────────────
     try:

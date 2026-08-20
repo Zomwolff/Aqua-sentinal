@@ -46,7 +46,7 @@ async def train_isolation_forest():
         df = pd.DataFrame([dict(r) for r in rows])
         df = _fill_na(df)
 
-        model = IsolationForest(n_estimators=100, contamination=0.01, random_state=42)
+        model = IsolationForest(n_estimators=100, contamination=0.005, random_state=42)
         model.fit(df[FEATURES])
 
         joblib.dump(model, MODEL_PATH)

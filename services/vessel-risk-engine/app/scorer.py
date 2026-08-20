@@ -24,15 +24,32 @@ RISK_TIER_CRITICAL = float(os.environ.get("RISK_TIER_CRITICAL", 75))
 RISK_DECAY_RATE    = float(os.environ.get("RISK_DECAY_RATE", 0.05))  # fraction per hour
 
 
-def _anomaly_weight(events: List[Dict[str, Any]]) -> Tuple[float, str]:
+def _anomaly_weight(events: List[Dict[str, Any]], weather_stats: Optional[Dict[str, Any]] = None) -> Tuple[float, str, float]:
     if not events:
-        return 0.0, "no_anomalies"
+        return 0.0, "no_anomalies", 1.0
+
+    raw_weight = 0.5
+    desc = f"{len(events)}_low_severity_anomaly"
     sevs = [e.get("severity", "LOW") for e in events]
     if "HIGH" in sevs:
-        return 1.0, f"{sevs.count('HIGH')}_high_severity_anomaly"
-    if "MEDIUM" in sevs:
-        return 0.8, f"{sevs.count('MEDIUM')}_medium_severity_anomaly"
-    return 0.5, f"{len(events)}_low_severity_anomaly"
+        raw_weight = 1.0
+        desc = f"{sevs.count('HIGH')}_high_severity_anomaly"
+    elif "MEDIUM" in sevs:
+        raw_weight = 0.8
+        desc = f"{sevs.count('MEDIUM')}_medium_severity_anomaly"
+
+    # Weather forgiveness: High wind speeds cause erratic navigational behaviour
+    weather_multiplier = 1.0
+    if weather_stats:
+        wind_speed = weather_stats.get("wind_speed_kmh", 0.0) or 0.0
+        if wind_speed > 40:
+            weather_multiplier = 0.4  # 60% reduction
+            desc += " (severe_weather_forgiveness)"
+        elif wind_speed > 25:
+            weather_multiplier = 0.7  # 30% reduction
+            desc += " (rough_weather_forgiveness)"
+
+    return raw_weight * weather_multiplier, desc, weather_multiplier
 
 
 def _sts_weight(events: List[Dict[str, Any]], vessel_type: str = "unknown") -> Tuple[float, str]:
@@ -68,9 +85,10 @@ def compute_risk_score(
     vessel_type: str = "unknown",
     previous_risk_score: Optional[float] = None,
     hours_since_last_signal: float = 0.0,
+    weather_stats: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Compute full risk score with factor breakdown."""
-    anomaly_w, anomaly_desc = _anomaly_weight(anomaly_events)
+    anomaly_w, anomaly_desc, weather_mult = _anomaly_weight(anomaly_events, weather_stats)
     sts_w, sts_desc = _sts_weight(sts_events, vessel_type)
 
     anomaly_c = 30.0 * anomaly_w
@@ -96,16 +114,31 @@ def compute_risk_score(
     else:
         tier, action = "LOW", "monitor"
 
+    factors = [
+        {"factor": "anomaly",      "weight": 30, "value": round(anomaly_w, 3), "contribution": round(anomaly_c, 2), "description": anomaly_desc},
+        {"factor": "trust",        "weight": 25, "value": round(1.0 - trust_score, 3), "contribution": round(trust_c, 2), "description": f"trust={trust_score:.3f}"},
+        {"factor": "dark_vessel",  "weight": 25, "value": 1.0 if dark_vessel_flag else 0.0, "contribution": round(dark_c, 2), "description": "dark_vessel" if dark_vessel_flag else "not_dark"},
+        {"factor": "sts",          "weight": 20, "value": round(sts_w, 3), "contribution": round(sts_c, 2), "description": sts_desc},
+    ]
+
+    if weather_mult < 1.0:
+        # Show exactly how much score was shaved off due to weather forgiveness
+        # raw_anomaly_c would have been 30.0 * (anomaly_w / weather_mult)
+        raw_anomaly_w = anomaly_w / weather_mult
+        discount_c = 30.0 * raw_anomaly_w - anomaly_c
+        factors.append({
+            "factor": "weather_forgiveness",
+            "weight": 0,
+            "value": round(weather_mult, 3),
+            "contribution": -round(discount_c, 2),
+            "description": "score_discounted_due_to_severe_weather"
+        })
+
     return {
         "mmsi": mmsi,
         "risk_score": risk_score,
         "tier": tier,
-        "contributing_factors": [
-            {"factor": "anomaly",      "weight": 30, "value": round(anomaly_w, 3), "contribution": round(anomaly_c, 2), "description": anomaly_desc},
-            {"factor": "trust",        "weight": 25, "value": round(1.0 - trust_score, 3), "contribution": round(trust_c, 2), "description": f"trust={trust_score:.3f}"},
-            {"factor": "dark_vessel",  "weight": 25, "value": 1.0 if dark_vessel_flag else 0.0, "contribution": round(dark_c, 2), "description": "dark_vessel" if dark_vessel_flag else "not_dark"},
-            {"factor": "sts",          "weight": 20, "value": round(sts_w, 3), "contribution": round(sts_c, 2), "description": sts_desc},
-        ],
+        "contributing_factors": factors,
         "recommended_action": action,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
