@@ -368,8 +368,8 @@ services:
     environment:
       <<: *backend-env
       SERVICE_NAME: api-gateway
-      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-*}
-      DASHBOARD_ORIGINS: ${DASHBOARD_ORIGINS:-http://localhost:3000}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:3001}
+      DASHBOARD_ORIGINS: ${DASHBOARD_ORIGINS:-http://localhost:3000,http://localhost:3001}
     volumes:
       - ./shared/spatial:/app/shared/spatial:ro
       - sar-scene-artifacts:/data/artifacts:ro
@@ -387,6 +387,18 @@ services:
         condition: service_started
     ports:
       - "3000:80"
+    networks:
+      - aqua-net
+
+  authority-command-dashboard:
+    build:
+      context: ./authority-command-dashboard
+    restart: unless-stopped
+    depends_on:
+      api-gateway:
+        condition: service_started
+    ports:
+      - "3001:80"
     networks:
       - aqua-net
 

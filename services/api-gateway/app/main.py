@@ -1271,6 +1271,37 @@ async def get_spill_recommendations(spill_id: str):
     }
 
 
+@app.patch("/spill/recommendations/{recommendation_id}/acknowledge", tags=["SpillIntelligence"])
+async def acknowledge_spill_recommendation(
+    recommendation_id: int,
+    acknowledged_by: str = Query("operator", min_length=1, max_length=255),
+):
+    """Acknowledge a Response Decision Engine recommendation through the Gateway.
+
+    This intentionally preserves the response-decision service's state model and
+    exposes the operation to browser clients without requiring them to address a
+    private microservice directly. Assignment is not exposed because the current
+    response_recommendations schema has no assignment field or endpoint.
+    """
+    pool = await _get_pool()
+    row = await pool.fetchrow(
+        """
+        UPDATE response_recommendations
+        SET status = 'acknowledged', acknowledged_at = NOW(), acknowledged_by = $2
+        WHERE id = $1
+        RETURNING id, spill_id, status, acknowledged_at, acknowledged_by
+        """,
+        recommendation_id,
+        acknowledged_by,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Recommendation not found")
+    result = dict(row)
+    result["spill_id"] = str(result["spill_id"])
+    result["acknowledged_at"] = result["acknowledged_at"].isoformat() if result.get("acknowledged_at") else None
+    return result
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # LIVE DATA TRIGGER + REFERENCE / DARK-VESSEL ENDPOINTS
 # ═══════════════════════════════════════════════════════════════════════════════

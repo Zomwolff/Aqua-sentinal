@@ -34,13 +34,14 @@ docker-compose down               # stop containers (named volume `pgdata` is ke
 docker-compose down -v            # stop AND delete the Postgres data volume
 ```
 
-Open the dashboard at `http://localhost:3000`. Health checks are available at `http://localhost:<port>/health` for every service.
+Open the operational dashboard at `http://localhost:3000` and the dedicated Authority Command Dashboard at `http://localhost:3001`. Health checks are available at `http://localhost:<port>/health` for every service. See [the authority dashboard guide](docs/authority-command-dashboard.md) for its API and operational details.
 
 > **Port note:** host ports 5433 and 6380 are used instead of the default 5432/6379 so the stack can coexist with native PostgreSQL/Redis services already running on this machine. If you don't have local services on 5432/6379, you can set `ports` back to `5432:5432` and `6379:6379` in `docker-compose.yml`.
 
 | Port | Service |
 |------|---------|
 | 3000 | Dashboard (React/Vite, served by nginx) |
+| 3001 | Authority Command Dashboard (React/MapLibre, served by nginx) |
 | 5433 | PostgreSQL 15 + PostGIS (mapped from container 5432) |
 | 6380 | Redis 7 (mapped from container 6379) |
 

@@ -1,0 +1,17 @@
+import type { ReactNode } from "react";
+import type { IncidentDetail } from "../types";
+import { km2, percent, severity, severityClass } from "../utils/format";
+
+function Value({ label, value, className = "" }: { label: string; value: ReactNode; className?: string }) { return <div className="metric"><span>{label}</span><strong className={className}>{value}</strong></div>; }
+export function IntelligencePanel({ detail, loading }: { detail: IncidentDetail | null; loading: boolean }) {
+  if (loading) return <section className="intelligence panel"><p className="empty">Loading incident intelligence…</p></section>;
+  if (!detail) return <section className="intelligence panel"><p className="empty">Select an incident to view operational intelligence.</p></section>;
+  const { incident, severity: assessment, attribution, forecasts } = detail;
+  const source = attribution[0];
+  const coast = assessment?.coastline_distance_km ?? assessment?.coast_distance_km;
+  const exposure = assessment?.ecological_exposure ?? assessment?.protected_area_risk;
+  const growth = assessment?.growth_rate_pct_per_hr;
+  const volume = assessment?.estimated_volume_range_tonnes;
+  const forecast = forecasts.length ? forecasts[forecasts.length - 1] : null;
+  return <section className="intelligence panel"><div className="eyebrow">INCIDENT INTELLIGENCE</div><div className="incident-heading"><div><span>INCIDENT ID</span><h1>{incident.id}</h1></div><span className={`severity large ${severityClass(assessment?.severity_level || incident.severity_level)}`}>{severity(assessment?.severity_level || incident.severity_level)}</span></div><div className="metrics"><Value label="CONFIDENCE" value={percent(incident.confidence)} /><Value label="SPILL AREA" value={km2(incident.area_km2)} /><Value label="PREDICTED SPREAD" value={forecast ? `+${forecast.horizon_hours}H` : "—"} /><Value label="COORDINATES" value={incident.latitude != null && incident.longitude != null ? `${Number(incident.latitude).toFixed(3)}, ${Number(incident.longitude).toFixed(3)}` : "—"} /></div><div className="risk-summary"><div className="eyebrow">RISK ASSESSMENT</div><div className="compact-grid"><Value label="ECOLOGICAL EXPOSURE" value={exposure === null || exposure === undefined ? "—" : typeof exposure === "number" ? percent(exposure) : String(exposure)} /><Value label="COASTLINE DISTANCE" value={coast == null ? "—" : `${coast} km`} /><Value label="GROWTH" value={growth == null ? "—" : `${growth}% / hr`} /><Value label="EST. VOLUME" value={volume == null ? "—" : `${volume} tonnes`} /></div></div><div className="source-block"><div className="eyebrow">PROBABLE SOURCE</div>{source ? <><strong>{source.vessel_name || `MMSI ${source.mmsi || "unknown"}`}</strong><span>{source.vessel_type || "Unknown type"} · {percent(source.final_score)} evidence score</span>{[["SPATIAL MATCH", source.distance_score], ["TRAJECTORY", source.trajectory_score], ["DRIFT COMPATIBILITY", source.wind_score], ["TEMPORAL MATCH", source.time_score]].filter(([, score]) => score != null).map(([name, score]) => <div className="evidence" key={String(name)}><span>{name}</span><i><b style={{ width: percent(score) }} /></i><em>{percent(score)}</em></div>)}</> : <p className="empty">NO SOURCE ATTRIBUTION AVAILABLE</p>}</div><div className="forecast-summary"><div className="eyebrow">SPILL FORECAST</div>{forecast ? <p>Latest available horizon <b>+{forecast.horizon_hours}H</b> · confidence {percent(forecast.confidence)}</p> : <p className="empty">NO FORECAST AVAILABLE</p>}</div></section>;
+}
