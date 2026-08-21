@@ -24,6 +24,7 @@ from typing import Any, Dict, Optional, Sequence
 
 import numpy as np
 from affine import Affine
+from skimage.io import imsave
 
 _SAFE_RE = re.compile(r"[^A-Za-z0-9_.=-]")
 
@@ -57,9 +58,25 @@ def save_scene_artifact(
 
     if raw_image is not None:
         np.save(os.path.join(path, "raw_image.npy"), np.asarray(raw_image))
+        # Save preview
+        img = np.asarray(raw_image)
+        v_min, v_max = np.nanpercentile(img, (2, 98))
+        if v_max > v_min:
+            img_norm = np.clip((img - v_min) / (v_max - v_min), 0, 1)
+            imsave(os.path.join(path, "raw_image.png"), (img_norm * 255).astype(np.uint8), check_contrast=False)
+
     np.save(os.path.join(path, "filtered_image.npy"), np.asarray(filtered_image))
+    img = np.asarray(filtered_image)
+    v_min, v_max = np.nanpercentile(img, (2, 98))
+    if v_max > v_min:
+        img_norm = np.clip((img - v_min) / (v_max - v_min), 0, 1)
+        imsave(os.path.join(path, "filtered_image.png"), (img_norm * 255).astype(np.uint8), check_contrast=False)
+
     np.save(os.path.join(path, "cleaned_mask.npy"), np.asarray(cleaned_mask))
+    imsave(os.path.join(path, "cleaned_mask.png"), (np.asarray(cleaned_mask) * 255).astype(np.uint8), check_contrast=False)
+
     np.save(os.path.join(path, "bright_target_mask.npy"), np.asarray(bright_target_mask))
+    imsave(os.path.join(path, "bright_target_mask.png"), (np.asarray(bright_target_mask) * 255).astype(np.uint8), check_contrast=False)
 
     coeffs = [float(v) for v in list(affine)[:6]]
     metadata = {

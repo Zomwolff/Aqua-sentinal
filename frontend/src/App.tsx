@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import maplibregl, { Map as MapLibreMap } from "maplibre-gl";
 import { fetchVessels, fetchIncidents, fetchIncidentDetail } from "./lib/api";
 import { useLiveFeeds } from "./hooks/useLiveFeeds";
+import { SARTaskingPipeline } from "./components/SARTaskingPipeline";
+import { IncidentDetailsPage } from "./components/IncidentDetailsPage";
 
 type Severity = "critical" | "high" | "medium" | "low";
 type Vessel = { id: string; name: string; mmsi: string; type: string; risk: Severity; score: number; coordinates: [number, number]; detail: string };
@@ -25,6 +27,8 @@ function App() {
   const [vessels, setVessels] = useState<Vessel[]>([]);
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [activeCount, setActiveCount] = useState(0);
+  const [historicalSceneId, setHistoricalSceneId] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<"map" | "incident">("map");
 
   useEffect(() => {
     let mounted = true;
@@ -163,7 +167,14 @@ function App() {
     (async () => {
       try {
         const detail = await fetchIncidentDetail(selectedIncident.rawId);
-        if (mounted) setIncidentDetail(detail);
+        if (mounted) {
+            setIncidentDetail(detail);
+            if (detail.incident?.source_image_id) {
+                setHistoricalSceneId(detail.incident.source_image_id);
+            } else {
+                setHistoricalSceneId(null);
+            }
+        }
 
         if (mapRef.current) {
           const incSource = mapRef.current.getSource("incident") as maplibregl.GeoJSONSource;
@@ -272,6 +283,7 @@ function App() {
 
   const focusIncident = (incident: Incident) => {
     setSelectedIncident(incident);
+    setViewMode("incident");
     mapRef.current?.flyTo({ center: incident.coordinates, zoom: 8.4, duration: 1000 });
   };
 
@@ -308,39 +320,15 @@ function App() {
         </aside>
       </main>
       
-      {selectedIncident && (
-      <section className="detail-panel">
-         <div className="detail-intro">
-            <div><small>SELECTED INCIDENT</small><h2>{selectedIncident.id} <span className={`severity-pill ${selectedIncident.severity}`}>{severityLabel[selectedIncident.severity]}</span></h2><p>{selectedIncident.location} · detected {selectedIncident.age}</p></div>
-            <button className="close-button" onClick={() => setSelectedIncident(null)} aria-label="Close incident details">×</button>
-         </div>
-         <div className="confidence"><div><small>FUSION CONFIDENCE</small><strong>{selectedIncident.confidence}%</strong></div><div className="confidence-bar"><span style={{ width: `${selectedIncident.confidence}%` }} /></div><p>High confidence match across SAR, AIS and drift model evidence</p></div>
-         <div className="detail-stats">
-            <div><small>EST. AREA</small><b>{selectedIncident.area}</b></div>
-            <div><small>ECOLOGICAL EXPOSURE</small><b className="exposure">{selectedIncident.exposure}</b></div>
-            <div><small>GROWTH RATE</small><b>+8.4% <small>/ HR</small></b></div>
-         </div>
-         <div className="attribution">
-            <div className="section-head"><div><small>SOURCE ATTRIBUTION</small><h3>Probable origin vessels</h3></div><span className="info-mark">i</span></div>
-            {incidentDetail?.attribution?.slice(0, 3).map((attr: any) => (
-                <div className={`attribution-row ${attr.final_score < 0.5 ? 'muted-row' : ''}`} key={attr.mmsi}>
-                   <div><span>{attr.vessel_name || `MMSI ${attr.mmsi}`}</span><b>{Math.round(attr.final_score * 100)}%</b></div>
-                   <div className="attribution-track"><span style={{ width: `${Math.round(attr.final_score * 100)}%` }} /></div>
-                </div>
-            ))}
-         </div>
-         <div className="actions">
-            <small>RECOMMENDED ACTIONS</small>
-            <ol>
-               {incidentDetail?.recommendations?.map((r: any) => (
-                  <li key={r.id}>{r.recommendation}</li>
-               ))}
-               {(!incidentDetail?.recommendations || incidentDetail.recommendations.length === 0) && (
-                  <li>Generating response rules...</li>
-               )}
-            </ol>
-         </div>
-      </section>
+      {viewMode === "incident" && (
+         <IncidentDetailsPage 
+            incidentDetail={incidentDetail} 
+            onBack={() => {
+               setViewMode("map");
+               setSelectedIncident(null);
+               setIncidentDetail(null);
+            }} 
+         />
       )}
       
       {selectedVessel && (
@@ -362,6 +350,8 @@ function App() {
          <p className="vessel-detail">{selectedVessel.detail}</p>
       </div>
       )}
+
+      <SARTaskingPipeline liveEvent={liveEvent} historicalSceneId={historicalSceneId} />
     </div>
   );
 }

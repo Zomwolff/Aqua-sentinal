@@ -140,6 +140,7 @@ async def _alert_pusher():
         "spill.attributed":         "$",
         "spill.severity":           "$",
         "spill.response":           "$",
+        "sar.tasking.events":       "$",
     }
     # Map stream name → WS event type
     _TYPE_MAP = {
@@ -152,6 +153,7 @@ async def _alert_pusher():
         "spill.attributed":          "spill_attributed",
         "spill.severity":            "spill_severity",
         "spill.response":            "spill_response",
+        "sar.tasking.events":        "sar_tasking",
     }
     log.info("Alert pusher started (watching %d streams).", len(last_ids))
     
@@ -213,6 +215,11 @@ app.add_middleware(
     allow_origins=["*"], allow_credentials=True,
     allow_methods=["*"], allow_headers=["*"],
 )
+
+from fastapi.staticfiles import StaticFiles
+import os
+if os.path.exists("/data/artifacts"):
+    app.mount("/artifacts", StaticFiles(directory="/data/artifacts"), name="artifacts")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1053,8 +1060,8 @@ async def get_spill_incident(spill_id: str):
     # Forecast polygons
     forecast_rows = await pool.fetch(
         """
-        SELECT id, horizon_hours, drift_distance_m,
-               ST_AsGeoJSON(geom) AS geometry, computed_at
+        SELECT id, horizon_hours,
+               ST_AsGeoJSON(geom) AS geometry, generated_at
         FROM forecasts WHERE spill_id = $1 ORDER BY horizon_hours ASC
         """,
         spill_id,
@@ -1064,8 +1071,8 @@ async def get_spill_incident(spill_id: str):
         fr = {k: v for k, v in dict(r).items()}
         if isinstance(fr.get("geometry"), str):
             fr["geometry"] = json.loads(fr["geometry"])
-        if isinstance(fr.get("computed_at"), datetime):
-            fr["computed_at"] = fr["computed_at"].isoformat()
+        if isinstance(fr.get("generated_at"), datetime):
+            fr["generated_at"] = fr["generated_at"].isoformat()
         forecasts.append(fr)
 
     # Recommendations
@@ -1130,8 +1137,8 @@ async def get_spill_forecast(spill_id: str):
     pool = await _get_pool()
     rows = await pool.fetch(
         """
-        SELECT id, horizon_hours, drift_distance_m,
-               ST_AsGeoJSON(geom) AS geometry, computed_at
+        SELECT id, horizon_hours,
+               ST_AsGeoJSON(geom) AS geometry, generated_at
         FROM forecasts WHERE spill_id = $1
         ORDER BY horizon_hours ASC
         """,
@@ -1144,8 +1151,8 @@ async def get_spill_forecast(spill_id: str):
         fr = {k: v for k, v in dict(r).items()}
         if isinstance(fr.get("geometry"), str):
             fr["geometry"] = json.loads(fr["geometry"])
-        if isinstance(fr.get("computed_at"), datetime):
-            fr["computed_at"] = fr["computed_at"].isoformat()
+        if isinstance(fr.get("generated_at"), datetime):
+            fr["generated_at"] = fr["generated_at"].isoformat()
         result.append(fr)
     return {"spill_id": spill_id, "horizons": result}
 

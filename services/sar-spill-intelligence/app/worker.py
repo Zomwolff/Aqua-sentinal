@@ -72,58 +72,7 @@ def _parse_scene_metadata(raw_metadata: Any) -> Dict[str, Any]:
     return decoded
 
 
-def _load_and_detect(
-    raster_path: str,
-    scene_metadata: Dict[str, Any],
-) -> ProcessedSarScene:
-    """Load VV data and retain its georeferencing for the next pipeline step."""
-    with rasterio.open(raster_path) as dataset:
-        if dataset.count < 1:
-            raise ValueError("GeoTIFF has no raster bands.")
-
-        masked = dataset.read(1, masked=True)
-        values = np.asarray(masked.filled(np.nan), dtype=np.float64)
-        finite = np.isfinite(values)
-        if not finite.any():
-            raise ValueError("GeoTIFF contains no finite VV pixels.")
-
-        # The filters require finite values. Nodata pixels are restored as
-        # false in the final mask rather than allowing NaN/Inf propagation.
-        fill_value = float(np.median(values[finite]))
-        working_image = np.where(finite, values, fill_value)
-        filtered_image = lee_filter(working_image)
-
-        # Candidate mask = dark-region segmentation (Otsu, per the design spec
-        # module B1) UNION CFAR small-target anomalies (ship shadows and other
-        # small dark features). CFAR alone behaves as a local small-target
-        # detector and does not retain large smooth dark regions (slicks,
-        # calm water); Otsu segmentation recovers those. Neither detector is
-        # deleted: they are complementary inputs to the same candidate mask.
-        dark_mask = dark_region_mask(filtered_image)
-        anomaly_mask = cfar_detect(filtered_image)
-        binary_mask = (dark_mask | anomaly_mask) & finite
-
-        # working_image is the pre-despeckle backscatter array; it is persisted
-        # as raw_image.npy (Step 5 GLCM texture needs the unfiltered values —
-        # the Lee filter partially removes local texture detail).
-        raw_image = working_image
-
-        raster_metadata = {
-            "crs": dataset.crs.to_string() if dataset.crs else None,
-            "transform": tuple(dataset.transform),
-            "width": dataset.width,
-            "height": dataset.height,
-            "bounds": tuple(dataset.bounds),
-            "resolution": tuple(dataset.res),
-        }
-
-    return ProcessedSarScene(
-        scene_metadata=scene_metadata,
-        raster_metadata=raster_metadata,
-        raw_image=raw_image,
-        filtered_image=filtered_image,
-        binary_mask=binary_mask,
-    )
+# _load_and_detect logic moved into _process_sar_message for step-by-step event emission)
 
 
 def _acquisition_datetime(scene_metadata: Dict[str, Any]) -> datetime:
@@ -310,26 +259,65 @@ async def _process_sar_message(
         min_area_m2 = _min_area_m2_config()
         bright_threshold = _bright_target_threshold_config()
 
-        processed = await asyncio.to_thread(
-            _load_and_detect,
-            raster_path,
-            scene_metadata,
-        )
+        await redis.publish("sar.tasking.events", json.dumps({"scene_id": scene_id, "step": "sar_tasking"}))
+        await asyncio.sleep(0.5)
 
-        # STEP 3 Step A — morphological cleaning. Explicit structural
-        # parameters only; no hidden physical-area threshold here.
-        cleaned_mask = clean_mask(
-            processed.binary_mask,
+        # STEP 1: Fetching / Reading
+        await redis.publish("sar.tasking.events", json.dumps({"scene_id": scene_id, "step": "sar_fetching"}))
+        
+        def _read_raster():
+            with rasterio.open(raster_path) as dataset:
+                if dataset.count < 1:
+                    raise ValueError("GeoTIFF has no raster bands.")
+                masked = dataset.read(1, masked=True)
+                values = np.asarray(masked.filled(np.nan), dtype=np.float64)
+                finite = np.isfinite(values)
+                if not finite.any():
+                    raise ValueError("GeoTIFF contains no finite VV pixels.")
+                fill_value = float(np.median(values[finite]))
+                working_image = np.where(finite, values, fill_value)
+                raster_metadata = {
+                    "crs": dataset.crs.to_string() if dataset.crs else None,
+                    "transform": tuple(dataset.transform),
+                    "width": dataset.width,
+                    "height": dataset.height,
+                    "bounds": tuple(dataset.bounds),
+                    "resolution": tuple(dataset.res),
+                }
+                return working_image, finite, raster_metadata
+        
+        working_image, finite, raster_metadata = await asyncio.to_thread(_read_raster)
+        raw_image = working_image
+        await asyncio.sleep(0.5)
+
+        # STEP 2: Despeckling
+        await redis.publish("sar.tasking.events", json.dumps({"scene_id": scene_id, "step": "sar_despeckling"}))
+        filtered_image = await asyncio.to_thread(lee_filter, working_image)
+        await asyncio.sleep(0.5)
+
+        # STEP 3: CFAR / Dark Region
+        await redis.publish("sar.tasking.events", json.dumps({"scene_id": scene_id, "step": "sar_cfar"}))
+        dark_mask = await asyncio.to_thread(dark_region_mask, filtered_image)
+        anomaly_mask = await asyncio.to_thread(cfar_detect, filtered_image)
+        binary_mask = (dark_mask | anomaly_mask) & finite
+        await asyncio.sleep(0.5)
+
+        # STEP 3 Step A — morphological cleaning
+        await redis.publish("sar.tasking.events", json.dumps({"scene_id": scene_id, "step": "sar_morphology"}))
+        cleaned_mask = await asyncio.to_thread(
+            clean_mask,
+            binary_mask,
             open_size=3,
             close_size=5,
         )
+        await asyncio.sleep(0.5)
 
-        # STEP 3 Step B — connected-component polygonization (pure geometry;
-        # no DB access inside extract_candidates).
+        # STEP 3 Step B — connected-component polygonization
+        await redis.publish("sar.tasking.events", json.dumps({"scene_id": scene_id, "step": "sar_polygonize"}))
         candidates = await asyncio.to_thread(
             extract_candidates,
             mask=cleaned_mask,
-            transform=processed.raster_metadata["transform"],
+            transform=raster_metadata["transform"],
             min_area_m2=min_area_m2,
             pixel_size_m=SENTINEL1_PIXEL_SIZE_M,
         )
@@ -339,20 +327,21 @@ async def _process_sar_message(
         # are never written to PostgreSQL; one artifact bundle per processed
         # scene on the shared artifact volume. Fail fast so we never persist
         # candidates or publish candidate IDs without a retrievable artifact.
-        affine = tuple(processed.raster_metadata["transform"])
+        affine = tuple(raster_metadata["transform"])
         if len(affine) == 9:
             affine = affine[:6]
-        bright_target_mask = processed.filtered_image > bright_threshold
-        artifact_path = save_scene_artifact(
+        bright_target_mask = filtered_image > bright_threshold
+        artifact_path = await asyncio.to_thread(
+            save_scene_artifact,
             _artifact_root(),
             scene_id,
-            raw_image=processed.raw_image,
-            filtered_image=processed.filtered_image,
+            raw_image=raw_image,
+            filtered_image=filtered_image,
             cleaned_mask=cleaned_mask,
             bright_target_mask=bright_target_mask,
             affine=list(affine),
-            shape=processed.binary_mask.shape,
-            crs=processed.raster_metadata.get("crs"),
+            shape=binary_mask.shape,
+            crs=raster_metadata.get("crs"),
         )
 
         # STEP 3 Step C — resolve physical area via the shared PostGIS
@@ -378,18 +367,20 @@ async def _process_sar_message(
                 CANDIDATES_RAW_STREAM,
                 _candidates_raw_event(scene_metadata, candidates),
             )
+            
+        await redis.publish("sar.tasking.events", json.dumps({"scene_id": scene_id, "step": "sar_complete", "candidates": len(candidates)}))
 
         STATE["scenes_processed"] += 1
         STATE["last_scene_id"] = scene_id
         STATE["last_processed_at"] = datetime.now(timezone.utc).isoformat()
-        STATE["last_raster_metadata"] = processed.raster_metadata
+        STATE["last_raster_metadata"] = raster_metadata
         STATE["last_artifact_path"] = artifact_path
         log.info(
             "Processed SAR scene id=%s path=%s shape=%s dark_candidates=%d spill_candidates=%d artifact=%s",
             scene_id,
             raster_path,
-            processed.binary_mask.shape,
-            int(processed.binary_mask.sum()),
+            binary_mask.shape,
+            int(binary_mask.sum()),
             len(candidates),
             artifact_path,
         )

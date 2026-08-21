@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-export type FeedItem = { time: string; kind: "spill" | "risk" | "dark" | "system"; title: string; body: string };
+export type FeedItem = { time: string; kind: "spill" | "risk" | "dark" | "system" | "sar"; title: string; body: string };
 
 export function useLiveFeeds(historicalFeed: FeedItem[] = []) {
   const [feed, setFeed] = useState<FeedItem[]>([]);
@@ -50,6 +50,18 @@ export function useLiveFeeds(historicalFeed: FeedItem[] = []) {
           } else if (data.type === "ais") {
              // Always show AIS telemetry in the feed
              newFeedItem = { time: timeStr, kind: "system", title: "Live AIS Ingestion", body: `Processing telemetry for MMSI ${data.data?.mmsi}` };
+          } else if (data.type === "sar_tasking") {
+             const stepMap: Record<string, string> = {
+               sar_tasking: "Acquiring SAR",
+               sar_fetching: "Downloading Scene",
+               sar_despeckling: "Despeckling Filter",
+               sar_cfar: "CFAR Object Detection",
+               sar_morphology: "Morphological Cleaning",
+               sar_polygonize: "Polygon Extraction",
+               sar_complete: "Spill Processing Complete"
+             };
+             const stepTitle = stepMap[data.data?.step] || "SAR Processing";
+             newFeedItem = { time: timeStr, kind: "sar", title: stepTitle, body: `Scene ${data.data?.scene_id?.substring(0,8)}` };
           }
 
           if (newFeedItem) {
