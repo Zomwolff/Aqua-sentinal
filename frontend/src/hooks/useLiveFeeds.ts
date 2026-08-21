@@ -48,19 +48,12 @@ export function useLiveFeeds(historicalFeed: FeedItem[] = []) {
           } else if (data.type === "incident_fused") {
             newFeedItem = { time: timeStr, kind: "spill", title: "Spill Incident Fused", body: `Spill ${data.data?.candidate_id?.substring(0,8)} detected` };
           } else if (data.type === "ais") {
-             // To prevent flooding the feed, we only create a feed item occasionally,
-             // but we always pass the liveEvent down so App.tsx can animate the map.
-             if (Math.random() < 0.05) { // roughly 1 in 20 UI-received AIS pings gets a feed item
-                 newFeedItem = { time: timeStr, kind: "system", title: "Live AIS Ingestion", body: `Processing telemetry for MMSI ${data.data?.mmsi}` };
-             }
+             // Always show AIS telemetry in the feed
+             newFeedItem = { time: timeStr, kind: "system", title: "Live AIS Ingestion", body: `Processing telemetry for MMSI ${data.data?.mmsi}` };
           }
 
           if (newFeedItem) {
             setFeed(prev => {
-              // De-duplicate "Live AIS Ingestion" messages to keep the feed clean
-              if (newFeedItem!.title === "Live AIS Ingestion" && prev.length > 0 && prev[0].title === "Live AIS Ingestion") {
-                 return prev;
-              }
               return [newFeedItem!, ...prev].slice(0, 50);
             });
           }
