@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import maplibregl, { Map as MapLibreMap } from "maplibre-gl";
 import {
   fetchVessels, fetchIncidents, fetchIncidentDetail, fetchVesselDetail,
   fetchVesselTrack, triggerLiveAisFetch, fetchProtectedAreas,
   fetchDarkVessels, fetchStsEvents, fetchSpoofingSuspects,
+  uploadSarImage,
 } from "./lib/api";
 import { useLiveFeeds } from "./hooks/useLiveFeeds";
 import { SARTaskingPipeline } from "./components/SARTaskingPipeline";
@@ -44,6 +45,11 @@ function App() {
   const [viewMode, setViewMode] = useState<"map" | "incident" | "vessel">("map");
   const [vesselDetail, setVesselDetail] = useState<any>(null);
   const [aisFetching, setAisFetching] = useState(false);
+  const [sarUploadOpen, setSarUploadOpen] = useState(false);
+  const [sarUploadMmsi, setSarUploadMmsi] = useState("");
+  const [sarUploadFile, setSarUploadFile] = useState<File | null>(null);
+  const [sarUploading, setSarUploading] = useState(false);
+  const [sarUploadError, setSarUploadError] = useState("");
   const [protectedAreas, setProtectedAreas] = useState<any[]>([]);
   const [darkVessels, setDarkVessels] = useState<any[]>([]);
   const [intelSts, setIntelSts] = useState<any[]>([]);
@@ -194,6 +200,26 @@ function App() {
         }
     }
   }, [vessels, selectedVessel]);
+
+  // Keep an uploaded SAR task visible as it advances through processing and
+  // allow downstream fusion/severity services time to attach their results.
+  useEffect(() => {
+    if (viewMode !== "vessel" || !selectedVessel || !vesselDetail?.sar_tasking) return;
+    const startedAt = Date.now();
+    const poll = async () => {
+      try {
+        const fresh = await fetchVesselDetail(selectedVessel.mmsi);
+        setVesselDetail(fresh);
+        if (fresh.verdict?.status === "spill_detected" || Date.now() - startedAt > 90_000) {
+          clearInterval(timer);
+        }
+      } catch {
+        // A transient refresh failure should not interrupt the active pipeline.
+      }
+    };
+    const timer = window.setInterval(poll, 2500);
+    return () => window.clearInterval(timer);
+  }, [viewMode, selectedVessel?.mmsi, vesselDetail?.sar_tasking?.scene_id]);
 
   useEffect(() => {
     if (!mapLoaded || !mapRef.current) return;
@@ -512,6 +538,32 @@ function App() {
     setTimeout(() => setAisFetching(false), 15000);
   };
 
+  const openSarUpload = () => {
+    setSarUploadMmsi(selectedVessel?.mmsi || vessels[0]?.mmsi || "");
+    setSarUploadFile(null);
+    setSarUploadError("");
+    setSarUploadOpen(true);
+  };
+
+  const handleSarUpload = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!sarUploadMmsi || !sarUploadFile || sarUploading) return;
+    setSarUploading(true);
+    setSarUploadError("");
+    try {
+      await uploadSarImage(sarUploadMmsi, sarUploadFile);
+      const target = vessels.find((v) => v.mmsi === sarUploadMmsi);
+      setSarUploadOpen(false);
+      if (target) {
+        await focusFlaggedVessel(target);
+      }
+    } catch (error) {
+      setSarUploadError(error instanceof Error ? error.message : "Unable to submit this SAR image.");
+    } finally {
+      setSarUploading(false);
+    }
+  };
+
   // Real model confidence for the selected forecast horizon (from the drift
   // engine's per-horizon confidence field); falls back to the legacy formula
   // only when no forecast rows exist yet.
@@ -530,7 +582,7 @@ function App() {
       <header className="topbar">
         <div className="brand"><div className="brand-mark"><span /></div><div><strong>AQUA SENTINEL</strong><small>MARITIME INTELLIGENCE NETWORK</small></div></div>
         <div className="header-center"><span className="live-dot" /> <span>LIVE OPERATIONS</span><i /> <span className="muted">{new Date().toUTCString()}</span></div>
-        <div className="header-meta"><div><small>ACTIVE INCIDENTS</small><b>{activeCount < 10 ? `0${activeCount}` : activeCount}</b></div><div><small>VESSELS TRACKED</small><b>{vessels.length}</b></div><button className={`ais-fetch-btn ${aisFetching ? "busy" : ""}`} onClick={handleFetchAis} disabled={aisFetching} title="Trigger an immediate live-AIS poll; results appear in the live signal feed">{aisFetching ? "FETCHING…" : "⟳ FETCH AIS"}</button><button className="icon-button" aria-label="Open settings">•••</button></div>
+        <div className="header-meta"><div><small>ACTIVE INCIDENTS</small><b>{activeCount < 10 ? `0${activeCount}` : activeCount}</b></div><div><small>VESSELS TRACKED</small><b>{vessels.length}</b></div><button className={`ais-fetch-btn ${aisFetching ? "busy" : ""}`} onClick={handleFetchAis} disabled={aisFetching} title="Trigger an immediate live-AIS poll; results appear in the live signal feed">{aisFetching ? "FETCHING…" : "⟳ FETCH AIS"}</button><button className="add-sar-btn" onClick={openSarUpload}>+ ADD SAR</button></div>
       </header>
       <main className="workspace">
         <section className="map-pane">
@@ -679,6 +731,35 @@ function App() {
       )}
 
       <SARTaskingPipeline liveEvent={liveEvent} historicalSceneId={historicalSceneId} tasking={vesselDetail?.sar_tasking} />
+
+      {sarUploadOpen && (
+        <div className="sar-upload-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !sarUploading) setSarUploadOpen(false); }}>
+          <form className="sar-upload-dialog" onSubmit={handleSarUpload}>
+            <div className="sar-upload-title">
+              <div><small>MANUAL INGESTION</small><h2>Add SAR Image</h2></div>
+              <button type="button" aria-label="Close SAR upload" onClick={() => setSarUploadOpen(false)} disabled={sarUploading}>×</button>
+            </div>
+            <p>The image will run through despeckling, CFAR detection, morphological cleaning, polygon extraction, evidence fusion, severity, attribution, forecasting, and response recommendations.</p>
+            <label>
+              <span>ASSOCIATE WITH VESSEL</span>
+              <select value={sarUploadMmsi} onChange={(event) => setSarUploadMmsi(event.target.value)} required>
+                <option value="" disabled>Select a tracked vessel</option>
+                {vessels.map((vessel) => <option key={vessel.mmsi} value={vessel.mmsi}>{vessel.name} · MMSI {vessel.mmsi}</option>)}
+              </select>
+            </label>
+            <label>
+              <span>SAR RASTER</span>
+              <input type="file" accept=".tif,.tiff,.png,.jpg,.jpeg,image/tiff,image/png,image/jpeg" onChange={(event) => setSarUploadFile(event.target.files?.[0] || null)} required />
+              <small>GeoTIFF (EPSG:4326) preserves embedded coordinates. PNG/JPEG is centred on the selected vessel at 10 m/pixel. Maximum 50 MB.</small>
+            </label>
+            {sarUploadError && <div className="sar-upload-error" role="alert">{sarUploadError}</div>}
+            <div className="sar-upload-actions">
+              <button type="button" onClick={() => setSarUploadOpen(false)} disabled={sarUploading}>CANCEL</button>
+              <button type="submit" disabled={!sarUploadMmsi || !sarUploadFile || sarUploading}>{sarUploading ? "SUBMITTING…" : "RUN SAR PIPELINE"}</button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   );
 }

@@ -65,6 +65,25 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .ais-fetch-btn:hover:not(:disabled) { background: rgba(38, 68, 62, .85); color: #cfe9d8; border-color: #54786c; }
 .ais-fetch-btn:disabled { cursor: wait; color: #75847b; }
 .ais-fetch-btn.busy { border-color: rgba(229, 183, 93, .5); color: #e5b75d; }
+.add-sar-btn { border: 1px solid rgba(127, 208, 232, .48); background: rgba(31, 76, 88, .35); color: #9cdceb; font: 10px 'DM Mono', monospace; letter-spacing: .08em; padding: 8px 12px; white-space: nowrap; }
+.add-sar-btn:hover { border-color: #7fd0e8; background: rgba(49, 104, 118, .45); color: #d5f5fb; }
+
+.sar-upload-backdrop { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; background: rgba(2, 8, 10, .78); backdrop-filter: blur(7px); }
+.sar-upload-dialog { width: min(520px, calc(100vw - 48px)); padding: 25px; border: 1px solid rgba(127, 208, 232, .28); background: #111d23; box-shadow: 0 28px 80px rgba(0, 0, 0, .55); }
+.sar-upload-title { display: flex; align-items: flex-start; justify-content: space-between; border-bottom: 1px solid var(--line); padding-bottom: 16px; }
+.sar-upload-title h2 { margin: 6px 0 0; font-size: 20px; }
+.sar-upload-title button { border: 0; background: transparent; color: #84918c; font-size: 25px; line-height: 1; }
+.sar-upload-dialog > p { color: #91a09a; font-size: 11px; line-height: 1.65; margin: 18px 0; }
+.sar-upload-dialog label { display: block; margin-top: 17px; }
+.sar-upload-dialog label > span { display: block; color: #9fb0aa; font: 9px 'DM Mono', monospace; letter-spacing: .12em; margin-bottom: 8px; }
+.sar-upload-dialog select, .sar-upload-dialog input[type="file"] { width: 100%; border: 1px solid #354a4c; background: #0b161a; color: #e4ece8; padding: 11px; font: 11px 'DM Mono', monospace; }
+.sar-upload-dialog input[type="file"]::file-selector-button { border: 1px solid #466469; background: #173038; color: #a9dce6; padding: 7px 9px; margin-right: 11px; font: 9px 'DM Mono', monospace; cursor: pointer; }
+.sar-upload-dialog label small { display: block; margin-top: 8px; line-height: 1.5; letter-spacing: 0; font-weight: 400; }
+.sar-upload-error { margin-top: 15px; padding: 10px; border: 1px solid rgba(237, 104, 76, .4); background: rgba(237, 104, 76, .1); color: #ffab96; font-size: 11px; }
+.sar-upload-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }
+.sar-upload-actions button { border: 1px solid #3a5051; background: transparent; padding: 10px 13px; color: #93a39c; font: 9px 'DM Mono', monospace; letter-spacing: .08em; }
+.sar-upload-actions button[type="submit"] { border-color: #508697; background: #18333b; color: #b8ebf4; }
+.sar-upload-actions button:disabled { cursor: not-allowed; opacity: .45; }
 
 /* ── Threat intelligence section (STS / spoofing) ───────────────────────── */
 .intel-list { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; overflow-y: auto; }

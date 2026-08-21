@@ -6,3 +6,4 @@ pydantic>=2.0
 httpx
 python-dotenv
 tenacity
+python-multipart

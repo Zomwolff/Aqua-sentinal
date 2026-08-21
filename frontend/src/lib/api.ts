@@ -71,6 +71,20 @@ export async function triggerLiveAisFetch() {
   return res.json();
 }
 
+export async function uploadSarImage(mmsi: string | number, image: File) {
+  const form = new FormData();
+  form.append("image", image);
+  const res = await fetch(`${API_BASE}/sar/upload/${encodeURIComponent(String(mmsi))}`, {
+    method: "POST",
+    body: form,
+  });
+  if (!res.ok) {
+    const payload = await res.json().catch(() => null);
+    throw new Error(payload?.detail || "Failed to submit the SAR image");
+  }
+  return res.json();
+}
+
 export async function fetchProtectedAreas() {
   const res = await fetch(`${API_BASE}/protected-areas`);
   if (!res.ok) throw new Error("Failed to fetch protected areas");

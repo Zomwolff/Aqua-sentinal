@@ -52,7 +52,7 @@ from typing import Any, Dict, List, Optional, Set
 import asyncpg
 import httpx
 import redis.asyncio as aioredis
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.incident_report import build_incident_report
@@ -74,6 +74,7 @@ _SERVICES = {
     "drift-forecast":       "http://drift-forecast:8000",
     "severity-impact":      "http://severity-impact:8000",
     "response-decision":    "http://response-decision:8000",
+    "sar-spill-intelligence": "http://sar-spill-intelligence:8000",
 }
 
 # ── DB / Redis helpers (direct connections for aggregation) ───────────────────
@@ -929,6 +930,37 @@ async def tasking_requests(
         result.append(row)
 
     return {"count": len(result), "requests": result}
+
+
+@app.post("/sar/upload/{mmsi}", status_code=202, tags=["SAR"])
+async def upload_sar_image(mmsi: int, image: UploadFile = File(...)):
+    """Submit a user-provided SAR raster to the normal processing pipeline."""
+    if not image.filename:
+        raise HTTPException(status_code=400, detail="Choose a SAR image to upload.")
+
+    payload = await image.read()
+    if not payload:
+        raise HTTPException(status_code=400, detail="The uploaded SAR image is empty.")
+    if len(payload) > 50 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="SAR uploads are limited to 50 MB.")
+
+    try:
+        async with httpx.AsyncClient(timeout=45.0) as client:
+            response = await client.post(
+                f"{_SERVICES['sar-spill-intelligence']}/upload/{mmsi}",
+                files={"image": (image.filename, payload, image.content_type or "application/octet-stream")},
+            )
+    except httpx.RequestError as exc:
+        log.error("SAR upload service unavailable: %s", exc)
+        raise HTTPException(status_code=503, detail="SAR processing service is unavailable.")
+
+    if response.status_code >= 400:
+        try:
+            detail = response.json().get("detail", "SAR upload was rejected.")
+        except ValueError:
+            detail = "SAR upload was rejected."
+        raise HTTPException(status_code=response.status_code, detail=detail)
+    return response.json()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

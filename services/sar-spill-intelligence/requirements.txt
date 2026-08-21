@@ -9,3 +9,4 @@ rasterio
 scikit-image
 shapely
 affine
+python-multipart
