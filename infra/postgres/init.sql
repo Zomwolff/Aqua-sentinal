@@ -496,7 +496,7 @@ CREATE TABLE IF NOT EXISTS satellite_tasking_requests (
     risk_tier    risk_tier_enum,
     reason       JSONB,
     requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    status       TEXT NOT NULL DEFAULT 'pending'        -- pending | acknowledged | fulfilled | failed
+    status       TEXT NOT NULL DEFAULT 'pending'        -- pending | processing | acknowledged | fulfilled | failed
 );
 
 -- Idempotent column additions for volumes created with older init.sql revisions

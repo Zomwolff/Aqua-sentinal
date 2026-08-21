@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { API_BASE } from "../lib/api";
 
 export type FeedItem = { time: string; kind: "spill" | "risk" | "dark" | "system" | "sar"; title: string; body: string };
 
@@ -18,7 +19,8 @@ export function useLiveFeeds(historicalFeed: FeedItem[] = []) {
     let isSubscribed = true;
 
     function connect() {
-      const wsUrl = `ws://${window.location.hostname}:8015/live`;
+      const wsUrl = new URL("/live", API_BASE);
+      wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
       ws = new WebSocket(wsUrl);
       
       ws.onmessage = (event) => {

@@ -1,4 +1,6 @@
 import React, { useEffect, useState } from "react";
+import { SAR_ARTIFACT_FILENAMES, sarArtifactUrls, type SarArtifactKey } from "../lib/api";
+import { SARArtifactPreview } from "./SARArtifactPreview";
 import "./IncidentDetailsPage.css"; 
 
 interface Props {
@@ -7,19 +9,11 @@ interface Props {
 }
 
 export function VesselDetailsPage({ vesselDetail, onBack }: Props) {
-  const [images, setImages] = useState<Record<string, string>>({});
+  const [images, setImages] = useState<Partial<Record<SarArtifactKey, string>>>({});
 
   useEffect(() => {
-    if (vesselDetail?.sar_tasking?.scene_id) {
-      const sceneId = vesselDetail.sar_tasking.scene_id;
-      const baseUrl = `http://${window.location.hostname}:8015/artifacts/` + sceneId;
-      setImages({
-        raw: baseUrl + "/raw_image.png",
-        filtered: baseUrl + "/filtered_image.png",
-        cfar: baseUrl + "/bright_target_mask.png",
-        final: baseUrl + "/cleaned_mask.png",
-      });
-    }
+    const tasking = vesselDetail?.sar_tasking;
+    setImages(tasking?.status === "fulfilled" && tasking.scene_id ? sarArtifactUrls(tasking.scene_id) : {});
   }, [vesselDetail]);
 
   if (!vesselDetail) {
@@ -33,6 +27,7 @@ export function VesselDetailsPage({ vesselDetail, onBack }: Props) {
 
   const { vessel, risk, sar_tasking } = vesselDetail;
   const riskTier = risk?.tier?.toLowerCase() || 'low';
+  const previewPendingLabel = sar_tasking?.status === "failed" ? "PROCESSING FAILED" : "PENDING";
 
   return (
     <div className="incident-details-page">
@@ -154,36 +149,28 @@ export function VesselDetailsPage({ vesselDetail, onBack }: Props) {
                 <div className="sar-artifact">
                   <div className="sar-label">1. RAW SAR IMAGE</div>
                   <div className="sar-img-wrapper">
-                    {images.raw ? (
-                      <img src={images.raw} alt="Raw SAR" />
-                    ) : <span className="sar-placeholder">PENDING</span>}
+                    {images.raw ? <SARArtifactPreview url={images.raw} alt="Raw SAR" filename={SAR_ARTIFACT_FILENAMES.raw} /> : <span className="sar-placeholder">{previewPendingLabel}</span>}
                   </div>
                 </div>
                 
                 <div className="sar-artifact">
                   <div className="sar-label">2. DESPECKLED FILTER</div>
                   <div className="sar-img-wrapper">
-                    {images.filtered ? (
-                      <img src={images.filtered} alt="Despeckled" />
-                    ) : <span className="sar-placeholder">PENDING</span>}
+                    {images.filtered ? <SARArtifactPreview url={images.filtered} alt="Despeckled" filename={SAR_ARTIFACT_FILENAMES.filtered} /> : <span className="sar-placeholder">{previewPendingLabel}</span>}
                   </div>
                 </div>
                 
                 <div className="sar-artifact">
                   <div className="sar-label">3. CFAR OBJECT DETECTION</div>
                   <div className="sar-img-wrapper">
-                    {images.cfar ? (
-                      <img src={images.cfar} alt="CFAR Mask" />
-                    ) : <span className="sar-placeholder">PENDING</span>}
+                    {images.cfar ? <SARArtifactPreview url={images.cfar} alt="CFAR Mask" filename={SAR_ARTIFACT_FILENAMES.cfar} /> : <span className="sar-placeholder">{previewPendingLabel}</span>}
                   </div>
                 </div>
                 
                 <div className="sar-artifact">
                   <div className="sar-label">4. CLEANED POLYGON</div>
                   <div className="sar-img-wrapper">
-                    {images.final ? (
-                      <img src={images.final} alt="Polygon" />
-                    ) : <span className="sar-placeholder">PENDING</span>}
+                    {images.final ? <SARArtifactPreview url={images.final} alt="Polygon" filename={SAR_ARTIFACT_FILENAMES.final} /> : <span className="sar-placeholder">{previewPendingLabel}</span>}
                   </div>
                 </div>
               </div>

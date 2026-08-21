@@ -210,16 +210,34 @@ app = FastAPI(
     version="1.0.0",
     lifespan=_lifespan,
 )
+
+# Comma-separated deployment setting, e.g.:
+# DASHBOARD_ORIGINS=http://localhost:3000,http://192.168.1.25:3000
+_dashboard_origins = [
+    origin.strip().rstrip("/")
+    for origin in os.environ.get("DASHBOARD_ORIGINS", "http://localhost:3000").split(",")
+    if origin.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True,
-    allow_methods=["*"], allow_headers=["*"],
+    allow_origins=_dashboard_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 from fastapi.staticfiles import StaticFiles
-import os
-if os.path.exists("/data/artifacts"):
-    app.mount("/artifacts", StaticFiles(directory="/data/artifacts"), name="artifacts")
+
+# StaticFiles delegates PNG MIME detection to Starlette/mimetypes and streams
+# bytes directly from the shared read-only artifact volume. check_dir=False
+# keeps the route registered during a clean local startup before any scene has
+# created the directory; absent files then correctly produce an HTTP 404.
+_artifact_root = os.environ.get("SAR_ARTIFACT_ROOT", "/data/artifacts")
+app.mount(
+    "/artifacts",
+    StaticFiles(directory=_artifact_root, check_dir=False),
+    name="artifacts",
+)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -478,7 +496,7 @@ async def get_vessel_detail(mmsi: int):
     # Determine Verdict
     verdict = {"status": "none", "spill_id": None}
     if sar_tasking_row:
-        if sar_tasking_row["status"] == "pending":
+        if sar_tasking_row["status"] in ("pending", "processing"):
             verdict["status"] = "pending"
         elif sar_tasking_row["status"] == "fulfilled":
             # Check if this vessel has a spill attributed to it

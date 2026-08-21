@@ -401,7 +401,16 @@ async def _process_sar_message(
                 CANDIDATES_RAW_STREAM,
                 _candidates_raw_event(scene_metadata, candidates),
             )
-            
+
+        # The tasking API must expose a scene as fulfilled only after all PNG
+        # previews were saved successfully above. This prevents the dashboard
+        # from requesting an artifact directory while it is still absent.
+        await pool.execute(
+            "UPDATE satellite_tasking_requests SET status = 'fulfilled', completed_at = NOW() "
+            "WHERE scene_id = $1 AND status = 'processing'",
+            scene_id,
+        )
+
         await redis.publish("sar.tasking.events", json.dumps({"scene_id": scene_id, "step": "sar_complete", "candidates": len(candidates)}))
 
         STATE["scenes_processed"] += 1
@@ -420,6 +429,18 @@ async def _process_sar_message(
         )
     except Exception as exc:
         STATE["scenes_failed"] += 1
+        if scene_id:
+            # Do not leave a tasking request permanently "processing" when
+            # artifact generation failed; the vessel UI can then report the
+            # failure instead of waiting for previews that will never exist.
+            try:
+                await pool.execute(
+                    "UPDATE satellite_tasking_requests SET status = 'failed', completed_at = NOW() "
+                    "WHERE scene_id = $1 AND status = 'processing'",
+                    scene_id,
+                )
+            except Exception:
+                log.exception("Could not mark failed SAR tasking for scene=%s", scene_id)
         log.exception(
             "SAR scene processing failed id=%s path=%s: %s",
             scene_id,

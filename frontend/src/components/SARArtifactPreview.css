@@ -1,0 +1,32 @@
+.sar-artifact-unavailable {
+  width: 100%;
+  min-height: 92px;
+  box-sizing: border-box;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 12px;
+  color: #cbd5e1;
+  text-align: center;
+  font-size: 0.8rem;
+}
+
+.sar-artifact-unavailable small {
+  color: #94a3b8;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.7rem;
+}
+
+.sar-artifact-unavailable button {
+  margin-top: 4px;
+  border: 1px solid rgba(148, 163, 184, 0.55);
+  border-radius: 4px;
+  padding: 3px 8px;
+  color: #e2e8f0;
+  background: transparent;
+  cursor: pointer;
+  font-size: 0.72rem;
+}

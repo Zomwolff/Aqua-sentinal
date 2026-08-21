@@ -1,4 +1,41 @@
-export const API_BASE = `http://${window.location.hostname}:8015`;
+/**
+ * Public API origin. In Docker/local development the browser reaches the
+ * gateway through the same host as the dashboard on port 8015. Deployments
+ * can override that with VITE_API_URL at build time.
+ */
+const configuredApiBase = import.meta.env.VITE_API_URL?.trim();
+
+export const API_BASE = (configuredApiBase || `http://${window.location.hostname}:8015`)
+  .replace(/\/+$/, "");
+
+const SCENE_DIRECTORY_UNSAFE = /[^A-Za-z0-9_.=-]/g;
+
+/**
+ * Match services/shared/artifacts.py, which converts a scene ID to a safe
+ * artifact-directory name before writing it to the shared volume.
+ */
+export function artifactUrl(sceneId: string, filename: string): string {
+  const sceneDirectory = String(sceneId).replace(SCENE_DIRECTORY_UNSAFE, "_");
+  return `${API_BASE}/artifacts/${encodeURIComponent(sceneDirectory)}/${encodeURIComponent(filename)}`;
+}
+
+export const SAR_ARTIFACT_FILENAMES = {
+  raw: "raw_image.png",
+  filtered: "filtered_image.png",
+  cfar: "bright_target_mask.png",
+  final: "cleaned_mask.png",
+} as const;
+
+export type SarArtifactKey = keyof typeof SAR_ARTIFACT_FILENAMES;
+
+export function sarArtifactUrls(sceneId: string): Record<SarArtifactKey, string> {
+  return Object.fromEntries(
+    Object.entries(SAR_ARTIFACT_FILENAMES).map(([key, filename]) => [
+      key,
+      artifactUrl(sceneId, filename),
+    ]),
+  ) as Record<SarArtifactKey, string>;
+}
 
 export async function fetchVessels() {
   const res = await fetch(`${API_BASE}/vessels?active_since_hours=168`);

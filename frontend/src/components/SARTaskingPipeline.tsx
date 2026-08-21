@@ -1,4 +1,6 @@
 import React, { useEffect, useState } from "react";
+import { SAR_ARTIFACT_FILENAMES, sarArtifactUrls, type SarArtifactKey } from "../lib/api";
+import { SARArtifactPreview } from "./SARArtifactPreview";
 import "./SARTaskingPipeline.css";
 
 type SARStep = "sar_tasking" | "sar_fetching" | "sar_despeckling" | "sar_cfar" | "sar_morphology" | "sar_polygonize" | "sar_complete";
@@ -31,7 +33,7 @@ interface Props {
 export function SARTaskingPipeline({ liveEvent, historicalSceneId }: Props) {
   const [activeScene, setActiveScene] = useState<string | null>(null);
   const [currentStep, setCurrentStep] = useState<SARStep | null>(null);
-  const [images, setImages] = useState<Record<string, string>>({});
+  const [images, setImages] = useState<Partial<Record<SarArtifactKey, string>>>({});
   
   // Track open state
   const [isOpen, setIsOpen] = useState(false);
@@ -41,13 +43,7 @@ export function SARTaskingPipeline({ liveEvent, historicalSceneId }: Props) {
       setIsOpen(true);
       setActiveScene(historicalSceneId);
       setCurrentStep("sar_complete");
-      const baseUrl = `http://${window.location.hostname}:8015/artifacts/` + historicalSceneId;
-      setImages({
-        raw: baseUrl + "/raw_image.png",
-        filtered: baseUrl + "/filtered_image.png",
-        cfar: baseUrl + "/bright_target_mask.png",
-        final: baseUrl + "/cleaned_mask.png"
-      });
+      setImages(sarArtifactUrls(historicalSceneId));
     }
   }, [historicalSceneId]);
 
@@ -61,14 +57,7 @@ export function SARTaskingPipeline({ liveEvent, historicalSceneId }: Props) {
       setCurrentStep(data.step);
 
       if (data.step === "sar_complete") {
-        // Fetch images
-        const baseUrl = `http://${window.location.hostname}:8015/artifacts/` + data.scene_id;
-        setImages({
-          raw: baseUrl + "/raw_image.png",
-          filtered: baseUrl + "/filtered_image.png",
-          cfar: baseUrl + "/bright_target_mask.png",
-          final: baseUrl + "/cleaned_mask.png"
-        });
+        setImages(sarArtifactUrls(data.scene_id));
       } else if (data.step === "sar_tasking") {
         // reset images on new tasking
         setImages({});
@@ -113,19 +102,19 @@ export function SARTaskingPipeline({ liveEvent, historicalSceneId }: Props) {
           <div className="artifacts-grid">
             <div className="artifact-item">
               <div className="artifact-label">Raw SAR</div>
-              <img src={images.raw} alt="Raw SAR" onError={(e) => (e.currentTarget.style.display = 'none')} />
+              <SARArtifactPreview url={images.raw} alt="Raw SAR" filename={SAR_ARTIFACT_FILENAMES.raw} />
             </div>
             <div className="artifact-item">
               <div className="artifact-label">Despeckled</div>
-              <img src={images.filtered} alt="Despeckled" onError={(e) => (e.currentTarget.style.display = 'none')} />
+              <SARArtifactPreview url={images.filtered} alt="Despeckled" filename={SAR_ARTIFACT_FILENAMES.filtered} />
             </div>
             <div className="artifact-item">
               <div className="artifact-label">CFAR Mask</div>
-              <img src={images.cfar} alt="CFAR" onError={(e) => (e.currentTarget.style.display = 'none')} />
+              <SARArtifactPreview url={images.cfar} alt="CFAR" filename={SAR_ARTIFACT_FILENAMES.cfar} />
             </div>
             <div className="artifact-item">
               <div className="artifact-label">Final Polygon</div>
-              <img src={images.final} alt="Polygon" onError={(e) => (e.currentTarget.style.display = 'none')} />
+              <SARArtifactPreview url={images.final} alt="Polygon" filename={SAR_ARTIFACT_FILENAMES.final} />
             </div>
           </div>
         )}
