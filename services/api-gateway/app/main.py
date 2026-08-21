@@ -131,6 +131,7 @@ async def _alert_pusher():
     """Consume all event streams and push to WebSocket clients."""
     redis = await _get_redis()
     last_ids = {
+        "ais.clean":                "$",
         "anomaly.events":           "$",
         "vessel.risk":              "$",
         "sts.events":               "$",
@@ -142,6 +143,7 @@ async def _alert_pusher():
     }
     # Map stream name → WS event type
     _TYPE_MAP = {
+        "ais.clean":                 "ais",
         "anomaly.events":            "anomaly",
         "vessel.risk":               "risk",
         "sts.events":                "sts",
@@ -152,15 +154,25 @@ async def _alert_pusher():
         "spill.response":            "spill_response",
     }
     log.info("Alert pusher started (watching %d streams).", len(last_ids))
+    
+    ais_throttle_counter = 0
+
     while True:
         try:
             for stream, last_id in list(last_ids.items()):
-                results = await redis.xread({stream: last_id}, count=20, block=500)
+                results = await redis.xread({stream: last_id}, count=200, block=500)
                 if not results:
                     continue
                 for stream_name, messages in results:
                     for msg_id, data in messages:
                         last_ids[stream_name] = msg_id
+                        
+                        if stream_name == "ais.clean":
+                            ais_throttle_counter += 1
+                            # Sub-sample AIS messages to prevent overwhelming the browser
+                            if ais_throttle_counter % 3 != 0:
+                                continue
+
                         payload = {k: v for k, v in data.items()}
                         event_type = _TYPE_MAP.get(stream_name, stream_name)
                         await ws_manager.broadcast({

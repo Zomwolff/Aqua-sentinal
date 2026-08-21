@@ -70,10 +70,10 @@ async def _recompute_risk(mmsi: int, pool, redis) -> None:
     else:
         hours_since = 0.0
 
-    # Recent anomaly events (last 6h)
+    # Recent anomaly events (last 168h for demo)
     anomaly_rows = await pool.fetch(
         "SELECT anomaly_type, severity FROM anomaly_events "
-        "WHERE mmsi=$1 AND window_start >= NOW() - INTERVAL '6 hours'",
+        "WHERE mmsi=$1 AND window_start >= NOW() - INTERVAL '168 hours'",
         str(mmsi),
     )
     anomaly_events = [dict(r) for r in anomaly_rows]
@@ -104,10 +104,10 @@ async def _recompute_risk(mmsi: int, pool, redis) -> None:
     except Exception:
         dark_flag = False  # dark_vessel_events table may not exist yet (SAR phase)
 
-    # STS events (last 48h)
+    # STS events (last 168h for demo)
     sts_rows = await pool.fetch(
         "SELECT vessel_a_mmsi AS vessel_a, vessel_b_mmsi AS vessel_b, start_time, end_time FROM sts_events "
-        "WHERE (vessel_a_mmsi=$1 OR vessel_b_mmsi=$1) AND start_time >= NOW() - INTERVAL '48 hours'",
+        "WHERE (vessel_a_mmsi=$1 OR vessel_b_mmsi=$1) AND start_time >= NOW() - INTERVAL '168 hours'",
         str(mmsi),
     )
     sts_events = [

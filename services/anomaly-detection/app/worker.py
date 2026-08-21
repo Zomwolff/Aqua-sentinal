@@ -194,26 +194,6 @@ async def _save_and_publish_event(event: Dict[str, Any], pool, redis) -> None:
 
 
 async def _run_gap_check(pool, redis) -> None:
-    try:
-        rows = await pool.fetch(
-            """
-            SELECT mmsi, vessel_type, last_seen, last_lat, last_lon
-            FROM vessels
-            WHERE last_seen >= NOW() - INTERVAL '24 hours'
-              AND last_seen < NOW() - ($1 || ' minutes')::INTERVAL
-            """,
-            str(AIS_GAP_THRESHOLD_MIN),
-        )
-        for row in rows:
-            gap_event = check_ais_gap(row["mmsi"], row["last_seen"], dict(row))
-            if gap_event:
-                existing = await pool.fetchrow(
-                    """SELECT id FROM anomaly_events
-                    WHERE mmsi=$1 AND anomaly_type='ais_gap'
-                      AND window_start >= NOW() - INTERVAL '2 hours'""",
-                    row["mmsi"],
-                )
-                if not existing:
-                    await _save_and_publish_event(gap_event, pool, redis)
-    except Exception as e:
-        log.error("Gap check failed: %s", e)
+    # Temporarily disabled for the demo so that historical vessels 
+    # don't get universally flagged with 30-point ais_gap anomalies.
+    pass

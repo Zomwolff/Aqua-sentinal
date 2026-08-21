@@ -2,9 +2,15 @@ import { useEffect, useState } from "react";
 
 export type FeedItem = { time: string; kind: "spill" | "risk" | "dark" | "system"; title: string; body: string };
 
-export function useLiveFeeds() {
+export function useLiveFeeds(historicalFeed: FeedItem[] = []) {
   const [feed, setFeed] = useState<FeedItem[]>([]);
   const [liveEvent, setLiveEvent] = useState<any>(null);
+
+  useEffect(() => {
+    if (historicalFeed.length > 0 && feed.length === 0) {
+      setFeed(historicalFeed);
+    }
+  }, [historicalFeed]);
 
   useEffect(() => {
     let ws: WebSocket;
@@ -41,10 +47,22 @@ export function useLiveFeeds() {
             newFeedItem = { time: timeStr, kind: "system", title: "Response Rules Generated", body: `Recommendations ready for Spill ${data.data?.spill_id?.substring(0,8)}` };
           } else if (data.type === "incident_fused") {
             newFeedItem = { time: timeStr, kind: "spill", title: "Spill Incident Fused", body: `Spill ${data.data?.candidate_id?.substring(0,8)} detected` };
+          } else if (data.type === "ais") {
+             // To prevent flooding the feed, we only create a feed item occasionally,
+             // but we always pass the liveEvent down so App.tsx can animate the map.
+             if (Math.random() < 0.05) { // roughly 1 in 20 UI-received AIS pings gets a feed item
+                 newFeedItem = { time: timeStr, kind: "system", title: "Live AIS Ingestion", body: `Processing telemetry for MMSI ${data.data?.mmsi}` };
+             }
           }
 
           if (newFeedItem) {
-            setFeed(prev => [newFeedItem!, ...prev].slice(0, 50));
+            setFeed(prev => {
+              // De-duplicate "Live AIS Ingestion" messages to keep the feed clean
+              if (newFeedItem!.title === "Live AIS Ingestion" && prev.length > 0 && prev[0].title === "Live AIS Ingestion") {
+                 return prev;
+              }
+              return [newFeedItem!, ...prev].slice(0, 50);
+            });
           }
         } catch (e) {
           console.error("Failed to parse websocket message", e);

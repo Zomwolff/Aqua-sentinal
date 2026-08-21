@@ -20,7 +20,8 @@ function App() {
   const [layers, setLayers] = useState({ vessels: true, dark: true, protected: true });
   const [mapLoaded, setMapLoaded] = useState(false);
 
-  const { feed } = useLiveFeeds();
+  const [historicalFeed, setHistoricalFeed] = useState<FeedItem[]>([]);
+  const { feed, liveEvent } = useLiveFeeds(historicalFeed);
   const [vessels, setVessels] = useState<Vessel[]>([]);
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [activeCount, setActiveCount] = useState(0);
@@ -30,6 +31,10 @@ function App() {
     async function loadData() {
       try {
         const vData = await fetchVessels();
+        const iData = await fetchIncidents();
+        
+        let newFeed: FeedItem[] = [];
+
         if (mounted && vData.vessels) {
           setVessels(vData.vessels.map((v: any) => ({
              id: `v-${v.mmsi}`,
@@ -41,9 +46,26 @@ function App() {
              coordinates: [v.last_lon || 0, v.last_lat || 0],
              detail: v.risk_tier ? "Risk rules triggered" : "Normal tracking"
           })));
+
+          // Add risk-flagged vessels to the historical feed
+          vData.vessels.forEach((v: any) => {
+            if (v.risk_tier && v.risk_tier !== "LOW") {
+              const timeStr = new Date(v.last_seen || Date.now()).toLocaleTimeString("en-US", { hour12: false, timeZone: "UTC" });
+              // Try to extract a specific reason if contributing_factors exist, else generic
+              let reason = "Abnormal behavior detected";
+              if (v.contributing_factors && v.contributing_factors.length > 0) {
+                 reason = v.contributing_factors[0].factor.replace(/_/g, " ");
+              }
+              
+              if (v.risk_tier === "CRITICAL") {
+                newFeed.push({ time: timeStr, kind: "system", title: `SAR Process Triggered`, body: `Satellite tasked for CRITICAL vessel ${v.mmsi} - ${reason}` });
+              } else {
+                newFeed.push({ time: timeStr, kind: "risk", title: `Historical Risk: ${v.risk_tier}`, body: `Vessel ${v.mmsi} scored ${Math.round(v.risk_score)} due to ${reason}` });
+              }
+            }
+          });
         }
 
-        const iData = await fetchIncidents();
         if (mounted && iData.incidents) {
            setActiveCount(iData.count);
            setIncidents(iData.incidents.map((i: any) => ({
@@ -59,6 +81,18 @@ function App() {
               confidence: i.confidence ? Math.round(i.confidence * 100) : 0,
               coordinates: [i.longitude, i.latitude]
            })));
+           
+           // Add incidents to historical feed
+           iData.incidents.forEach((i: any) => {
+              const timeStr = new Date(i.detected_at || Date.now()).toLocaleTimeString("en-US", { hour12: false, timeZone: "UTC" });
+              newFeed.push({ time: timeStr, kind: "spill", title: "Historical Spill Detected", body: `Spill ${i.id.substring(0,8)} attributed to ${i.top_vessel_mmsi ? 'MMSI ' + i.top_vessel_mmsi : 'Unknown'}` });
+           });
+        }
+        
+        if (mounted && newFeed.length > 0) {
+            // Sort combined feed by time (descending) and set it
+            newFeed.sort((a, b) => b.time.localeCompare(a.time));
+            setHistoricalFeed(newFeed.slice(0, 50));
         }
       } catch (err) {
         console.error(err);
@@ -68,6 +102,45 @@ function App() {
     const timer = setInterval(loadData, 15000);
     return () => { mounted = false; clearInterval(timer); }
   }, []);
+
+  // Handle real-time websocket events for instant vessel movement and state updates
+  useEffect(() => {
+    if (!liveEvent) return;
+    if (liveEvent.type === "ais") {
+        setVessels(curr => {
+            const idx = curr.findIndex(v => v.mmsi === String(liveEvent.data.mmsi));
+            if (idx === -1) return curr;
+            const updated = [...curr];
+            updated[idx] = {
+                ...updated[idx],
+                coordinates: [liveEvent.data.lon, liveEvent.data.lat]
+            };
+            return updated;
+        });
+    } else if (liveEvent.type === "risk") {
+        setVessels(curr => {
+            const idx = curr.findIndex(v => v.mmsi === String(liveEvent.data.mmsi));
+            if (idx === -1) return curr;
+            const updated = [...curr];
+            updated[idx] = {
+                ...updated[idx],
+                risk: (liveEvent.data.tier || "LOW").toLowerCase() as Severity,
+                score: liveEvent.data.score ? Math.round(liveEvent.data.score) : updated[idx].score,
+            };
+            return updated;
+        });
+    }
+  }, [liveEvent]);
+
+  // Keep selectedVessel in sync with vessels array updates
+  useEffect(() => {
+    if (selectedVessel) {
+        const v = vessels.find(item => item.mmsi === selectedVessel.mmsi);
+        if (v && (v.coordinates[0] !== selectedVessel.coordinates[0] || v.risk !== selectedVessel.risk)) {
+            setSelectedVessel(v);
+        }
+    }
+  }, [vessels, selectedVessel]);
 
   useEffect(() => {
     if (!mapLoaded || !mapRef.current) return;
@@ -150,6 +223,22 @@ function App() {
       map.addLayer({ id: "trajectory-line", type: "line", source: "trajectory", paint: { "line-color": "#f4bd68", "line-width": 2, "line-dasharray": [1, 2] } });
       map.addSource("vessels", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
       map.addLayer({ id: "vessel-points", type: "circle", source: "vessels", paint: { "circle-radius": 7, "circle-color": ["match", ["get", "risk"], "critical", "#ed684c", "high", "#ef9259", "medium", "#e5b75d", "#73bd9d"], "circle-stroke-color": "#f5efe2", "circle-stroke-width": 1.5 } });
+      
+      // SAR radar ring for critical vessels
+      map.addLayer({ 
+        id: "vessel-sar-ring", 
+        type: "circle", 
+        source: "vessels", 
+        filter: ["==", ["get", "risk"], "critical"],
+        paint: { 
+            "circle-radius": 14, 
+            "circle-color": "transparent", 
+            "circle-stroke-color": "#ed684c", 
+            "circle-stroke-width": 2,
+            "circle-stroke-opacity": 0.8
+        } 
+      }, "vessel-points");
+
       map.addSource("protected", { type: "geojson", data: { type: "Feature", geometry: { type: "Polygon", coordinates: [[[73.42, 15.02], [73.8, 15.0], [73.85, 15.3], [73.45, 15.38], [73.42, 15.02]]] }, properties: {} } });
       map.addLayer({ id: "protected-fill", type: "fill", source: "protected", paint: { "fill-color": "#4e9a91", "fill-opacity": 0.16 } });
       map.addLayer({ id: "protected-outline", type: "line", source: "protected", paint: { "line-color": "#66b9a7", "line-width": 1, "line-dasharray": [3, 3] } });
@@ -174,7 +263,11 @@ function App() {
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !map.isStyleLoaded()) return;
-    ["vessel-points", "protected-fill", "protected-outline"].forEach((id) => map.setLayoutProperty(id, "visibility", (id.startsWith("vessel") ? layers.vessels : layers.protected) ? "visible" : "none"));
+    ["vessel-points", "vessel-sar-ring", "protected-fill", "protected-outline"].forEach((id) => {
+        if (map.getLayer(id)) {
+            map.setLayoutProperty(id, "visibility", (id.startsWith("vessel") ? layers.vessels : layers.protected) ? "visible" : "none");
+        }
+    });
   }, [layers]);
 
   const focusIncident = (incident: Incident) => {
@@ -250,7 +343,25 @@ function App() {
       </section>
       )}
       
-      {selectedVessel && <div className="vessel-popover"><button onClick={() => setSelectedVessel(null)} aria-label="Close vessel details">×</button><small>VESSEL PROFILE</small><h3>{selectedVessel.name}</h3><p>{selectedVessel.type} · MMSI {selectedVessel.mmsi}</p><div className="vessel-risk"><span className={`severity-pill ${selectedVessel.risk}`}>{severityLabel[selectedVessel.risk]} risk</span><strong>{selectedVessel.score}<small>/100</small></strong></div><div className="sparkline"><i /><i /><i /><i /><i /><i /><i /><i /></div><p className="vessel-detail">{selectedVessel.detail}</p></div>}
+      {selectedVessel && (
+      <div className="vessel-popover">
+         <button onClick={() => setSelectedVessel(null)} aria-label="Close vessel details">×</button>
+         <small>VESSEL PROFILE</small>
+         <h3>{selectedVessel.name}</h3>
+         <p>{selectedVessel.type} · MMSI {selectedVessel.mmsi}</p>
+         <div className="vessel-risk">
+             <span className={`severity-pill ${selectedVessel.risk}`}>{severityLabel[selectedVessel.risk]} risk</span>
+             <strong>{selectedVessel.score}<small>/100</small></strong>
+         </div>
+         {selectedVessel.risk === "critical" && (
+             <div style={{ marginTop: "12px", color: "#ed684c", fontWeight: 600, fontSize: "11px", display: "flex", alignItems: "center", gap: "6px" }}>
+                <span className="live-dot" style={{ background: "#ed684c" }} /> SATELLITE TASKING REQUESTED
+             </div>
+         )}
+         <div className="sparkline"><i /><i /><i /><i /><i /><i /><i /><i /></div>
+         <p className="vessel-detail">{selectedVessel.detail}</p>
+      </div>
+      )}
     </div>
   );
 }
