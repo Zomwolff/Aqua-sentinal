@@ -62,12 +62,16 @@ log = logging.getLogger("api-gateway")
 
 # ── Internal service URLs (Docker service names) ──────────────────────────────
 _SERVICES = {
-    "data-ingestion":    "http://data-ingestion:8000",
-    "ais-analytics":     "http://ais-analytics:8000",
-    "anomaly-detection": "http://anomaly-detection:8000",
-    "ais-spoof-detection": "http://ais-spoof-detection:8000",
-    "sts-detection":     "http://sts-detection:8000",
-    "vessel-risk-engine": "http://vessel-risk-engine:8000",
+    "data-ingestion":       "http://data-ingestion:8000",
+    "ais-analytics":        "http://ais-analytics:8000",
+    "anomaly-detection":    "http://anomaly-detection:8000",
+    "ais-spoof-detection":  "http://ais-spoof-detection:8000",
+    "sts-detection":        "http://sts-detection:8000",
+    "vessel-risk-engine":   "http://vessel-risk-engine:8000",
+    "source-attribution":   "http://source-attribution:8000",
+    "drift-forecast":       "http://drift-forecast:8000",
+    "severity-impact":      "http://severity-impact:8000",
+    "response-decision":    "http://response-decision:8000",
 }
 
 # ── DB / Redis helpers (direct connections for aggregation) ───────────────────
@@ -124,36 +128,41 @@ async def _get_redis() -> aioredis.Redis:
 
 # ── Background alert pusher ────────────────────────────────────────────────────
 async def _alert_pusher():
-    """Consume anomaly.events and vessel.risk streams and push to WebSocket clients."""
+    """Consume all event streams and push to WebSocket clients."""
     redis = await _get_redis()
     last_ids = {
-        "anomaly.events": "$",
-        "vessel.risk": "$",
-        "sts.events": "$",
+        "anomaly.events":           "$",
+        "vessel.risk":              "$",
+        "sts.events":               "$",
         "spill.candidates.filtered": "$",
-        "incident.fused": "$",
+        "incident.fused":           "$",
+        "spill.attributed":         "$",
+        "spill.severity":           "$",
+        "spill.response":           "$",
     }
-    log.info("Alert pusher started.")
+    # Map stream name → WS event type
+    _TYPE_MAP = {
+        "anomaly.events":            "anomaly",
+        "vessel.risk":               "risk",
+        "sts.events":                "sts",
+        "spill.candidates.filtered": "spill_candidate",
+        "incident.fused":            "incident_fused",
+        "spill.attributed":          "spill_attributed",
+        "spill.severity":            "spill_severity",
+        "spill.response":            "spill_response",
+    }
+    log.info("Alert pusher started (watching %d streams).", len(last_ids))
     while True:
         try:
             for stream, last_id in list(last_ids.items()):
-                # A bounded read prevents an idle stream from becoming a socket
-                # timeout that is incorrectly reported as a gateway failure.
-                results = await redis.xread({stream: last_id}, count=20, block=1000)
+                results = await redis.xread({stream: last_id}, count=20, block=500)
                 if not results:
                     continue
                 for stream_name, messages in results:
                     for msg_id, data in messages:
                         last_ids[stream_name] = msg_id
-                        # Decode and broadcast
                         payload = {k: v for k, v in data.items()}
-                        event_type = (
-                            "anomaly" if stream_name == "anomaly.events"
-                            else "sts" if stream_name == "sts.events"
-                            else "risk" if stream_name == "vessel.risk"
-                            else "spill_candidate" if stream_name == "spill.candidates.filtered"
-                            else "incident_fused"
-                        )
+                        event_type = _TYPE_MAP.get(stream_name, stream_name)
                         await ws_manager.broadcast({
                             "type": event_type,
                             "stream": stream_name,
@@ -882,20 +891,24 @@ async def list_features(
 @app.get("/spill/candidates/{candidate_id}")
 async def get_spill_candidate(candidate_id: str):
     """
-    Full details for one spill candidate, including its GeoJSON geometry.
-
-    WS events (spill.candidates.filtered / incident.fused) do not carry polygon
-    geometry; the dashboard resolves it here by candidate_id.
+    Full details for one spill incident by its ID (used by SpillCandidateLayer).
+    Falls back to spill_incidents table (spill_candidates table no longer used).
+    Returns GeoJSON geometry derived from the PostGIS centroid point.
     """
     pool = await _get_pool()
     row = await pool.fetchrow(
         """
-        SELECT candidate_id, scene_id, acquisition_time,
-               classification_label, confidence, area_m2, pixel_count,
-               is_synthetic, texture_features,
-               ST_AsGeoJSON(geom) AS geometry
-        FROM spill_candidates
-        WHERE candidate_id = $1
+        SELECT
+            id AS candidate_id,
+            source_image_id AS scene_id,
+            detected_at AS acquisition_time,
+            status AS classification_label,
+            confidence,
+            area_km2 * 1000000.0 AS area_m2,
+            source AS raw_source,
+            ST_AsGeoJSON(geom) AS geometry
+        FROM spill_incidents
+        WHERE id = $1
         """,
         candidate_id,
     )
@@ -905,11 +918,6 @@ async def get_spill_candidate(candidate_id: str):
     result = {k: v for k, v in dict(row).items()}
     if isinstance(result.get("geometry"), str):
         result["geometry"] = json.loads(result["geometry"])
-    if isinstance(result.get("texture_features"), str):
-        try:
-            result["texture_features"] = json.loads(result["texture_features"])
-        except json.JSONDecodeError:
-            result["texture_features"] = None
     if isinstance(result.get("acquisition_time"), datetime):
         result["acquisition_time"] = result["acquisition_time"].isoformat()
     if result.get("confidence") is not None:
@@ -917,6 +925,258 @@ async def get_spill_candidate(candidate_id: str):
     if result.get("area_m2") is not None:
         result["area_m2"] = float(result["area_m2"])
     return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SPILL INCIDENTS (Module B)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/spill/incidents", tags=["SpillIntelligence"])
+async def list_spill_incidents(
+    status: Optional[str] = Query(None, description="detected | attributed | responded"),
+    since_hours: int = Query(72, ge=1, le=720),
+    limit: int = Query(50, le=200),
+    offset: int = Query(0, ge=0),
+):
+    """
+    All spill incidents with their current severity, top attributed vessel, and
+    latest response status. Primary feed for the dashboard Incident List panel.
+    """
+    pool = await _get_pool()
+    conditions = ["si.detected_at >= NOW() - ($1 || ' hours')::INTERVAL"]
+    params: list = [str(since_hours)]
+    idx = 2
+    if status:
+        conditions.append(f"si.status = ${idx}"); params.append(status); idx += 1
+    params += [limit, offset]
+
+    rows = await pool.fetch(f"""
+        SELECT
+            si.id,
+            si.detected_at,
+            si.latitude,
+            si.longitude,
+            si.area_km2,
+            si.confidence,
+            si.status,
+            si.source,
+            sev.severity_level,
+            sev.score AS severity_score,
+            sev.protected_area_risk,
+            sev.population_risk,
+            ar_top.final_score AS top_attribution_score,
+            v_top.mmsi AS top_vessel_mmsi,
+            v_top.vessel_type AS top_vessel_type
+        FROM spill_incidents si
+        LEFT JOIN severity sev ON sev.spill_id = si.id
+        LEFT JOIN LATERAL (
+            SELECT vessel_id, final_score FROM attribution_results
+            WHERE spill_id = si.id ORDER BY final_score DESC LIMIT 1
+        ) ar_top ON TRUE
+        LEFT JOIN vessels v_top ON v_top.id = ar_top.vessel_id
+        WHERE {" AND ".join(conditions)}
+        ORDER BY si.detected_at DESC
+        LIMIT ${idx} OFFSET ${idx+1}
+    """, *params)
+
+    return {
+        "count": len(rows),
+        "since_hours": since_hours,
+        "incidents": [
+            {k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in dict(r).items()}
+            for r in rows
+        ],
+    }
+
+
+@app.get("/spill/incidents/{spill_id}", tags=["SpillIntelligence"])
+async def get_spill_incident(spill_id: str):
+    """Full detail for a spill incident: severity, attribution, forecast, and recommendations."""
+    pool = await _get_pool()
+    row = await pool.fetchrow(
+        """
+        SELECT id, detected_at, latitude, longitude,
+               ST_AsGeoJSON(geom) AS geometry,
+               area_km2, confidence, status, source, source_image_id
+        FROM spill_incidents WHERE id = $1
+        """,
+        spill_id,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Spill incident not found")
+
+    incident = {k: v for k, v in dict(row).items()}
+    if isinstance(incident.get("geometry"), str):
+        incident["geometry"] = json.loads(incident["geometry"])
+    if isinstance(incident.get("detected_at"), datetime):
+        incident["detected_at"] = incident["detected_at"].isoformat()
+
+    # Severity
+    sev_row = await pool.fetchrow(
+        "SELECT * FROM severity WHERE spill_id = $1", spill_id
+    )
+    severity = None
+    if sev_row:
+        severity = {k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in dict(sev_row).items()}
+
+    # Attribution top-5
+    attr_rows = await pool.fetch(
+        """
+        SELECT ar.final_score, ar.distance_score, ar.trajectory_score,
+               ar.wind_score, ar.time_score, ar.behavior_score, ar.model_version,
+               v.mmsi, v.name AS vessel_name, v.vessel_type, v.flag,
+               v.last_lat, v.last_lon
+        FROM attribution_results ar
+        JOIN vessels v ON v.id = ar.vessel_id
+        WHERE ar.spill_id = $1
+        ORDER BY ar.final_score DESC LIMIT 5
+        """,
+        spill_id,
+    )
+    attribution = [
+        {k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in dict(r).items()}
+        for r in attr_rows
+    ]
+
+    # Forecast polygons
+    forecast_rows = await pool.fetch(
+        """
+        SELECT id, horizon_hours, drift_distance_m,
+               ST_AsGeoJSON(geom) AS geometry, computed_at
+        FROM forecasts WHERE spill_id = $1 ORDER BY horizon_hours ASC
+        """,
+        spill_id,
+    )
+    forecasts = []
+    for r in forecast_rows:
+        fr = {k: v for k, v in dict(r).items()}
+        if isinstance(fr.get("geometry"), str):
+            fr["geometry"] = json.loads(fr["geometry"])
+        if isinstance(fr.get("computed_at"), datetime):
+            fr["computed_at"] = fr["computed_at"].isoformat()
+        forecasts.append(fr)
+
+    # Recommendations
+    rec_rows = await pool.fetch(
+        """
+        SELECT id, recommendation, priority, status, generated_at,
+               acknowledged_at, acknowledged_by
+        FROM response_recommendations
+        WHERE spill_id = $1
+        ORDER BY
+            CASE priority WHEN 'URGENT' THEN 1 WHEN 'HIGH' THEN 2
+                          WHEN 'MEDIUM' THEN 3 ELSE 4 END,
+            generated_at ASC
+        """,
+        spill_id,
+    )
+    recommendations = [
+        {k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in dict(r).items()}
+        for r in rec_rows
+    ]
+
+    return {
+        "incident": incident,
+        "severity": severity,
+        "attribution": attribution,
+        "forecasts": forecasts,
+        "recommendations": recommendations,
+    }
+
+
+@app.get("/spill/incidents/{spill_id}/attribution", tags=["SpillIntelligence"])
+async def get_spill_attribution(spill_id: str):
+    """Source attribution results for a spill — which vessels were nearby and scored."""
+    pool = await _get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT ar.final_score, ar.distance_score, ar.trajectory_score,
+               ar.wind_score, ar.time_score, ar.behavior_score, ar.model_version,
+               v.mmsi, v.name AS vessel_name, v.vessel_type, v.flag,
+               v.last_lat, v.last_lon
+        FROM attribution_results ar
+        JOIN vessels v ON v.id = ar.vessel_id
+        WHERE ar.spill_id = $1
+        ORDER BY ar.final_score DESC
+        """,
+        spill_id,
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="No attribution data for this spill")
+    return {
+        "spill_id": spill_id,
+        "candidates": [
+            {k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in dict(r).items()}
+            for r in rows
+        ],
+    }
+
+
+@app.get("/spill/incidents/{spill_id}/forecast", tags=["SpillIntelligence"])
+async def get_spill_forecast(spill_id: str):
+    """Lagrangian drift forecast polygons for a spill at 3h, 6h, 12h, 24h horizons."""
+    pool = await _get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT id, horizon_hours, drift_distance_m,
+               ST_AsGeoJSON(geom) AS geometry, computed_at
+        FROM forecasts WHERE spill_id = $1
+        ORDER BY horizon_hours ASC
+        """,
+        spill_id,
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="No forecast data for this spill")
+    result = []
+    for r in rows:
+        fr = {k: v for k, v in dict(r).items()}
+        if isinstance(fr.get("geometry"), str):
+            fr["geometry"] = json.loads(fr["geometry"])
+        if isinstance(fr.get("computed_at"), datetime):
+            fr["computed_at"] = fr["computed_at"].isoformat()
+        result.append(fr)
+    return {"spill_id": spill_id, "horizons": result}
+
+
+@app.get("/spill/incidents/{spill_id}/severity", tags=["SpillIntelligence"])
+async def get_spill_severity(spill_id: str):
+    """Severity scorecard for a spill (area, protected area, population risk)."""
+    pool = await _get_pool()
+    row = await pool.fetchrow(
+        "SELECT * FROM severity WHERE spill_id = $1", spill_id
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="No severity data for this spill")
+    result = {k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in dict(row).items()}
+    return result
+
+
+@app.get("/spill/incidents/{spill_id}/recommendations", tags=["SpillIntelligence"])
+async def get_spill_recommendations(spill_id: str):
+    """Response recommendations for a spill, ordered by priority."""
+    pool = await _get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT id, recommendation, priority, status, generated_at,
+               acknowledged_at, acknowledged_by
+        FROM response_recommendations
+        WHERE spill_id = $1
+        ORDER BY
+            CASE priority WHEN 'URGENT' THEN 1 WHEN 'HIGH' THEN 2
+                          WHEN 'MEDIUM' THEN 3 ELSE 4 END,
+            generated_at ASC
+        """,
+        spill_id,
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="No recommendations for this spill")
+    return {
+        "spill_id": spill_id,
+        "recommendations": [
+            {k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in dict(r).items()}
+            for r in rows
+        ],
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

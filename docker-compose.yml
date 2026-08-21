@@ -293,6 +293,14 @@ services:
     environment:
       <<: *backend-env
       SERVICE_NAME: source-attribution
+      ATTRIBUTION_SPATIAL_WINDOW_M: ${ATTRIBUTION_SPATIAL_WINDOW_M:-20000}
+      ATTRIBUTION_TEMPORAL_WINDOW_H: ${ATTRIBUTION_TEMPORAL_WINDOW_H:-6.0}
+    # Override shared mount: needs canonical shared/db/ + shared/spatial/ packages
+    volumes:
+      - ./shared/db:/app/shared/db:ro
+      - ./shared/spatial:/app/shared/spatial:ro
+      - ./shared/__init__.py:/app/shared/__init__.py:ro
+      - ./services/shared/redis_client.py:/app/shared/redis_client.py:ro
     ports:
       - "8011:8000"
 
@@ -304,6 +312,12 @@ services:
     environment:
       <<: *backend-env
       SERVICE_NAME: drift-forecast
+    # Override shared mount: needs canonical shared/db/ + shared/spatial/ packages
+    volumes:
+      - ./shared/db:/app/shared/db:ro
+      - ./shared/spatial:/app/shared/spatial:ro
+      - ./shared/__init__.py:/app/shared/__init__.py:ro
+      - ./services/shared/redis_client.py:/app/shared/redis_client.py:ro
     ports:
       - "8012:8000"
 
@@ -315,6 +329,15 @@ services:
     environment:
       <<: *backend-env
       SERVICE_NAME: severity-impact
+      SEVERITY_AREA_SATURATION_M2: ${SEVERITY_AREA_SATURATION_M2:-10000000}
+      SEVERITY_PROTECTED_RADIUS_M: ${SEVERITY_PROTECTED_RADIUS_M:-10000}
+      SEVERITY_COAST_RADIUS_M: ${SEVERITY_COAST_RADIUS_M:-20000}
+    # Override shared mount: needs canonical shared/db/ + shared/spatial/ packages
+    volumes:
+      - ./shared/db:/app/shared/db:ro
+      - ./shared/spatial:/app/shared/spatial:ro
+      - ./shared/__init__.py:/app/shared/__init__.py:ro
+      - ./services/shared/redis_client.py:/app/shared/redis_client.py:ro
     ports:
       - "8013:8000"
 
@@ -326,6 +349,12 @@ services:
     environment:
       <<: *backend-env
       SERVICE_NAME: response-decision
+    # Override shared mount: needs canonical shared/db/ + shared/spatial/ packages
+    volumes:
+      - ./shared/db:/app/shared/db:ro
+      - ./shared/spatial:/app/shared/spatial:ro
+      - ./shared/__init__.py:/app/shared/__init__.py:ro
+      - ./services/shared/redis_client.py:/app/shared/redis_client.py:ro
     ports:
       - "8014:8000"
 

@@ -26,3 +26,26 @@ export async function getSpillCandidate(candidateId, fetcher = fetch) {
 export async function getVessel(mmsi, fetcher = fetch) {
   return json(fetcher, `/vessels/${encodeURIComponent(mmsi)}`);
 }
+export async function getSpillIncidents(fetcher = fetch) {
+  return json(fetcher, `/spill/incidents`);
+}
+
+export async function getSpillIncident(spillId, fetcher = fetch) {
+  return json(fetcher, `/spill/incidents/${encodeURIComponent(spillId)}`);
+}
+
+export async function getSpillAttribution(spillId, fetcher = fetch) {
+  return json(fetcher, `/spill/incidents/${encodeURIComponent(spillId)}/attribution`);
+}
+
+export async function getSpillForecast(spillId, fetcher = fetch) {
+  return json(fetcher, `/spill/incidents/${encodeURIComponent(spillId)}/forecast`);
+}
+
+export async function getSpillSeverity(spillId, fetcher = fetch) {
+  return json(fetcher, `/spill/incidents/${encodeURIComponent(spillId)}/severity`);
+}
+
+export async function getSpillRecommendations(spillId, fetcher = fetch) {
+  return json(fetcher, `/spill/incidents/${encodeURIComponent(spillId)}/recommendations`);
+}

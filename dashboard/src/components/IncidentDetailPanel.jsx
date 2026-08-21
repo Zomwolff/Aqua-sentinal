@@ -1,0 +1,146 @@
+import { useEffect, useState } from "react";
+import { getSpillIncident } from "../lib/apiClient";
+import { getSeverityColor, getPriorityColor, formatScore } from "../lib/spillIncidentHelpers";
+
+export function IncidentDetailPanel({ spillId, onClose }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let mounted = true;
+    if (!spillId) return;
+
+    const fetchDetail = async () => {
+      setLoading(true);
+      try {
+        const res = await getSpillIncident(spillId);
+        if (mounted) {
+          setData(res);
+          setLoading(false);
+        }
+      } catch (e) {
+        console.error("Failed to fetch incident details", e);
+        if (mounted) setLoading(false);
+      }
+    };
+    
+    fetchDetail();
+    // Refresh every 15s to get new recommendations/attribution
+    const interval = setInterval(fetchDetail, 15000);
+    return () => {
+      mounted = false;
+      clearInterval(interval);
+    };
+  }, [spillId]);
+
+  if (!spillId) return null;
+
+  return (
+    <div className="incident-detail-overlay">
+      <div className="incident-detail-panel">
+        <div className="detail-header">
+          <h2>Spill Incident {spillId.substring(0, 8)}</h2>
+          <button className="close-button" onClick={onClose}>×</button>
+        </div>
+        
+        {loading && !data ? (
+          <div className="detail-content">Loading...</div>
+        ) : (
+          <div className="detail-content">
+            <Section title="Overview">
+              <Row label="Detected" value={new Date(data.incident.detected_at).toLocaleString()} />
+              <Row label="Location" value={`${data.incident.latitude.toFixed(4)}, ${data.incident.longitude.toFixed(4)}`} />
+              <Row label="Area" value={`${data.incident.area_km2?.toFixed(2)} km²`} />
+              <Row label="Confidence" value={`${(data.incident.confidence * 100).toFixed(1)}%`} />
+            </Section>
+
+            {data.severity && (
+              <Section title="Severity & Impact">
+                <div style={{ display: "flex", gap: "10px", alignItems: "center", marginBottom: "10px" }}>
+                  <span className="severity-badge" style={{ backgroundColor: getSeverityColor(data.severity.severity_level) }}>
+                    {data.severity.severity_level}
+                  </span>
+                  <span>Score: {formatScore(data.severity.score)}</span>
+                </div>
+                <Row label="Coast Risk" value={formatScore(data.severity.coast_distance_risk)} />
+                <Row label="Protected Area Risk" value={formatScore(data.severity.protected_area_risk)} />
+                <Row label="Population Risk" value={formatScore(data.severity.population_risk)} />
+              </Section>
+            )}
+
+            {data.attribution?.length > 0 && (
+              <Section title="Top Suspects">
+                <table className="suspect-table">
+                  <thead>
+                    <tr>
+                      <th>Vessel</th>
+                      <th>Type</th>
+                      <th>Score</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.attribution.slice(0, 3).map((attr) => (
+                      <tr key={attr.mmsi}>
+                        <td>{attr.mmsi}</td>
+                        <td>{attr.vessel_type || "Unknown"}</td>
+                        <td>
+                          <div className="score-bar-bg">
+                            <div className="score-bar-fill" style={{ width: `${Math.min(100, attr.final_score * 100)}%` }}></div>
+                          </div>
+                          {(attr.final_score * 100).toFixed(0)}%
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </Section>
+            )}
+
+            {data.forecasts?.length > 0 && (
+              <Section title="Drift Forecasts">
+                <div className="forecast-tags">
+                  {data.forecasts.map(f => (
+                    <span key={f.horizon_hours} className="forecast-tag">
+                      +{f.horizon_hours}h
+                    </span>
+                  ))}
+                </div>
+              </Section>
+            )}
+
+            {data.recommendations?.length > 0 && (
+              <Section title="Response Actions">
+                <div className="recommendations-list">
+                  {data.recommendations.map(rec => (
+                    <div key={rec.id} className="recommendation-item">
+                      <span className="priority-dot" style={{ backgroundColor: getPriorityColor(rec.priority) }}></span>
+                      <span className="recommendation-text">{rec.recommendation}</span>
+                    </div>
+                  ))}
+                </div>
+              </Section>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Section({ title, children }) {
+  return (
+    <div className="detail-section">
+      <h3>{title}</h3>
+      {children}
+    </div>
+  );
+}
+
+function Row({ label, value }) {
+  return (
+    <div className="detail-row">
+      <span className="detail-label">{label}:</span>
+      <span className="detail-value">{value}</span>
+    </div>
+  );
+}

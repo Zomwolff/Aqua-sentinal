@@ -1,0 +1,390 @@
+"""
+Source Attribution worker — consumes incident.fused, scores vessels,
+creates spill_incidents, writes attribution_results.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import sys
+import time
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
+
+sys.path.insert(0, "/app")
+from shared.db.connection import create_pool, get_pool, close_pool
+from shared.redis_client import (
+    close_redis, consume_stream, ensure_consumer_group,
+    get_redis, publish_to_stream,
+)
+from app.attribution import (
+    ATTRIBUTION_SPATIAL_WINDOW_M, ATTRIBUTION_TEMPORAL_WINDOW_H,
+    MODEL_VERSION,
+    attribution_label, compute_attribution_score,
+    score_behavior, score_distance, score_time,
+    score_trajectory, score_wind_drift,
+)
+
+log = logging.getLogger(__name__)
+
+SERVICE_NAME   = "source-attribution"
+CONSUMER_GROUP = "source-attribution"
+CONSUMER_NAME  = "sa-worker"
+INPUT_STREAM   = "incident.fused"
+OUTPUT_STREAM  = "spill.attributed"
+
+STATE: Dict[str, Any] = {
+    "heartbeat": None,
+    "incidents_processed": 0,
+    "attributions_written": 0,
+    "failed": 0,
+    "last_candidate_id": None,
+    "last_spill_id": None,
+}
+
+
+def _parse_dt(raw: Any) -> Optional[datetime]:
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, datetime):
+        return raw if raw.tzinfo else raw.replace(tzinfo=timezone.utc)
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+async def _get_or_create_spill_incident(
+    pool, candidate_id: str, scene_id: str, confidence: float,
+    acquisition_time: Optional[datetime], is_synthetic: bool,
+    lat: float, lon: float, area_km2: float
+) -> Optional[tuple]:
+    """
+    Create a spill_incident row directly from the event payload.
+    Returns the new spill_id (UUID str) or None on failure.
+    """
+    try:
+        row = await pool.fetchrow(
+            """
+            INSERT INTO spill_incidents
+                (id, detected_at, latitude, longitude, geom, centroid,
+                 area_km2, confidence, source, source_image_id, status)
+            VALUES (
+                $1,
+                COALESCE($4, NOW()),
+                $2,
+                $3,
+                ST_Buffer(ST_SetSRID(ST_MakePoint($3, $2), 4326)::geography, 1000)::geometry,
+                ST_SetSRID(ST_MakePoint($3, $2), 4326),
+                $5,
+                $6,
+                'sar_satellite',
+                $7,
+                'detected'
+            )
+            ON CONFLICT (id) DO UPDATE SET status='detected'
+            RETURNING id, latitude, longitude
+            """,
+            candidate_id, lat, lon, acquisition_time, area_km2, confidence, scene_id
+        )
+        if row:
+            log.info("Created/Found spill_incident id=%s", row['id'])
+            return str(row["id"]), float(row["latitude"]), float(row["longitude"])
+        return None
+    except Exception as e:
+        log.error("Failed to create spill_incident for candidate=%s: %s", candidate_id, e)
+        return None
+
+
+async def _fetch_candidate_vessels(
+    pool, spill_lat: float, spill_lon: float,
+    acquisition_time: datetime,
+) -> List[Dict[str, Any]]:
+    """
+    Fetch all vessels that were within the spatial+temporal window.
+    Returns list of dicts with vessel metadata and closest position.
+    """
+    window_h = ATTRIBUTION_TEMPORAL_WINDOW_H
+    window_m = ATTRIBUTION_SPATIAL_WINDOW_M
+    start_ts = acquisition_time - timedelta(hours=window_h)
+    end_ts   = acquisition_time + timedelta(hours=window_h)
+
+    rows = await pool.fetch(
+        """
+        SELECT
+            v.id              AS vessel_id,
+            v.mmsi,
+            v.vessel_type,
+            v.last_lat,
+            v.last_lon,
+            vp.latitude       AS pos_lat,
+            vp.longitude      AS pos_lon,
+            vp.timestamp      AS pos_ts,
+            ST_Distance(
+                vp.geom::geography,
+                ST_SetSRID(ST_MakePoint($2, $1), 4326)::geography
+            ) AS distance_m
+        FROM vessel_positions vp
+        JOIN vessels v ON v.id = vp.vessel_id
+        WHERE vp.timestamp BETWEEN $3 AND $4
+          AND ST_DWithin(
+                vp.geom::geography,
+                ST_SetSRID(ST_MakePoint($2, $1), 4326)::geography,
+                $5
+          )
+        ORDER BY distance_m ASC
+        """,
+        spill_lat, spill_lon, start_ts, end_ts, window_m * 2,
+    )
+    return [dict(r) for r in rows]
+
+
+async def _fetch_anomaly_counts(
+    pool, mmsi: str, acquisition_time: datetime,
+) -> tuple:
+    """Count HIGH and MEDIUM anomaly events in 6h before acquisition."""
+    since = acquisition_time - timedelta(hours=6)
+    rows = await pool.fetch(
+        "SELECT severity FROM anomaly_events WHERE mmsi=$1 AND window_start BETWEEN $2 AND $3",
+        mmsi, since, acquisition_time,
+    )
+    high = sum(1 for r in rows if r["severity"] == "HIGH")
+    med  = sum(1 for r in rows if r["severity"] == "MEDIUM")
+    return high, med
+
+
+async def _fetch_weather(
+    pool, spill_lat: float, spill_lon: float,
+    acquisition_time: datetime,
+) -> Dict[str, float]:
+    """Nearest environmental_conditions sample at acquisition time."""
+    row = await pool.fetchrow(
+        """
+        SELECT wind_speed_kmh, wind_direction_deg, current_speed_ms, current_direction_deg
+        FROM environmental_conditions
+        WHERE timestamp BETWEEN $3 - INTERVAL '3 hours' AND $3 + INTERVAL '3 hours'
+        ORDER BY geom <-> ST_SetSRID(ST_MakePoint($2, $1), 4326)
+        LIMIT 1
+        """,
+        spill_lat, spill_lon, acquisition_time,
+    )
+    if row:
+        return {
+            "wind_speed_ms":      float((row["wind_speed_kmh"] or 0) / 3.6),
+            "wind_dir_deg":       float(row["wind_direction_deg"] or 0),
+            "current_speed_ms":   float(row["current_speed_ms"] or 0),
+            "current_dir_deg":    float(row["current_direction_deg"] or 0),
+        }
+    return {"wind_speed_ms": 0.0, "wind_dir_deg": 0.0, "current_speed_ms": 0.0, "current_dir_deg": 0.0}
+
+
+async def _score_and_persist_vessel(
+    pool, spill_id: str,
+    spill_lat: float, spill_lon: float,
+    vessel: Dict[str, Any],
+    acquisition_time: datetime,
+    weather: Dict[str, float],
+) -> Optional[Dict[str, Any]]:
+    """Compute full 5-factor score for one vessel and upsert into attribution_results."""
+    vessel_id  = vessel["vessel_id"]
+    mmsi       = str(vessel["mmsi"])
+    pos_lat    = float(vessel["pos_lat"])
+    pos_lon    = float(vessel["pos_lon"])
+    pos_ts     = vessel["pos_ts"]
+    if pos_ts and pos_ts.tzinfo is None:
+        pos_ts = pos_ts.replace(tzinfo=timezone.utc)
+
+    # Factor 1: distance from position to spill at acquisition time
+    dist_m = float(vessel["distance_m"])
+    d_score = score_distance(dist_m)
+
+    # Factor 2: trajectory — closest approach from ALL positions in window
+    traj_row = await pool.fetchrow(
+        """
+        SELECT MIN(
+            ST_Distance(
+                vp.geom::geography,
+                ST_SetSRID(ST_MakePoint($2, $1), 4326)::geography
+            )
+        ) AS closest_m
+        FROM vessel_positions vp
+        JOIN vessels v ON v.id = vp.vessel_id
+        WHERE v.mmsi = $3
+          AND vp.timestamp BETWEEN $4 AND $5
+        """,
+        spill_lat, spill_lon, mmsi,
+        acquisition_time - timedelta(hours=ATTRIBUTION_TEMPORAL_WINDOW_H),
+        acquisition_time + timedelta(hours=ATTRIBUTION_TEMPORAL_WINDOW_H),
+    )
+    closest_m = float(traj_row["closest_m"]) if traj_row and traj_row["closest_m"] else None
+    t_score = score_trajectory(closest_m)
+
+    # Factor 3: temporal coincidence
+    hours_gap = None
+    if pos_ts:
+        hours_gap = abs((acquisition_time - pos_ts).total_seconds()) / 3600.0
+    ti_score = score_time(hours_gap)
+
+    # Factor 4: behavioral anomaly
+    high_cnt, med_cnt = await _fetch_anomaly_counts(pool, mmsi, acquisition_time)
+    b_score = score_behavior(high_cnt, med_cnt)
+
+    # Factor 5: wind/current backward drift
+    elapsed_h = (acquisition_time - pos_ts).total_seconds() / 3600.0 if pos_ts else 0.0
+    w_score = score_wind_drift(
+        vessel_lat=pos_lat, vessel_lon=pos_lon,
+        spill_lat=spill_lat, spill_lon=spill_lon,
+        wind_speed_ms=weather["wind_speed_ms"],
+        wind_dir_deg=weather["wind_dir_deg"],
+        current_speed_ms=weather["current_speed_ms"],
+        current_dir_deg=weather["current_dir_deg"],
+        elapsed_hours=max(0.0, elapsed_h),
+    )
+
+    final = compute_attribution_score(d_score, t_score, ti_score, b_score, w_score)
+
+    try:
+        await pool.execute(
+            """
+            INSERT INTO attribution_results
+                (spill_id, vessel_id, distance_score, trajectory_score,
+                 wind_score, time_score, behavior_score, final_score, model_version)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+            ON CONFLICT (spill_id, vessel_id, model_version)
+            DO UPDATE SET
+                distance_score=EXCLUDED.distance_score,
+                trajectory_score=EXCLUDED.trajectory_score,
+                wind_score=EXCLUDED.wind_score,
+                time_score=EXCLUDED.time_score,
+                behavior_score=EXCLUDED.behavior_score,
+                final_score=EXCLUDED.final_score,
+                computed_at=NOW()
+            """,
+            spill_id, vessel_id, d_score, t_score, w_score, ti_score, b_score, final, MODEL_VERSION,
+        )
+    except Exception as e:
+        log.error("attribution_results upsert failed vessel=%s spill=%s: %s", mmsi, spill_id, e)
+
+    return {
+        "vessel_id": vessel_id, "mmsi": mmsi,
+        "distance_score": d_score, "trajectory_score": t_score,
+        "time_score": ti_score, "behavior_score": b_score,
+        "wind_score": w_score, "final_score": final,
+        "label": attribution_label(final),
+    }
+
+
+async def _process_incident_fused(
+    data: Dict[str, Any], pool, redis,
+) -> None:
+    candidate_id        = str(data.get("candidate_id") or "")
+    scene_id            = str(data.get("scene_id") or "")
+    confidence          = float(data.get("confidence") or 0.0)
+    acquisition_time    = _parse_dt(data.get("acquisition_time"))
+    is_synthetic        = str(data.get("is_synthetic", "false")).lower() in ("true", "1")
+
+    if not candidate_id:
+        log.warning("incident.fused message missing candidate_id")
+        return
+
+    acq = acquisition_time or datetime.now(timezone.utc)
+
+    result = await _get_or_create_spill_incident(
+        pool, candidate_id, scene_id, confidence, acq, is_synthetic,
+        float(data.get("lat") or 0.0), float(data.get("lon") or 0.0), float(data.get("area_km2") or 0.0)
+    )
+    if result is None:
+        return
+
+    spill_id, spill_lat, spill_lon = result
+    STATE["last_candidate_id"] = candidate_id
+    STATE["last_spill_id"] = spill_id
+
+    # Fetch candidate vessels from AIS positions
+    vessels = await _fetch_candidate_vessels(pool, spill_lat, spill_lon, acq)
+    if not vessels:
+        log.info("No AIS vessels found near spill=%s — publishing with no attribution", spill_id)
+        await publish_to_stream(redis, OUTPUT_STREAM, {
+            "spill_id": spill_id,
+            "candidate_id": candidate_id,
+            "scene_id": scene_id,
+            "spill_lat": spill_lat,
+            "spill_lon": spill_lon,
+            "acquisition_time": acq.isoformat(),
+            "top_vessel_id": "",
+            "top_vessel_mmsi": "",
+            "top_score": 0.0,
+            "top_label": "insufficient_evidence",
+            "candidates_scored": 0,
+            "is_synthetic": is_synthetic,
+        })
+        STATE["incidents_processed"] += 1
+        return
+
+    # Deduplicate by vessel_id — keep closest position per vessel
+    seen = {}
+    for v in vessels:
+        vid = v["vessel_id"]
+        if vid not in seen or v["distance_m"] < seen[vid]["distance_m"]:
+            seen[vid] = v
+    unique_vessels = list(seen.values())
+
+    weather = await _fetch_weather(pool, spill_lat, spill_lon, acq)
+
+    scored = []
+    for vessel in unique_vessels[:20]:  # cap at 20 candidates
+        result_v = await _score_and_persist_vessel(
+            pool, spill_id, spill_lat, spill_lon, vessel, acq, weather,
+        )
+        if result_v:
+            scored.append(result_v)
+            STATE["attributions_written"] += 1
+
+    if not scored:
+        top = {"vessel_id": "", "mmsi": "", "final_score": 0.0, "label": "insufficient_evidence"}
+    else:
+        top = max(scored, key=lambda x: x["final_score"])
+
+    log.info(
+        "Attribution: spill=%s top_vessel=%s score=%.3f label=%s (%d candidates)",
+        spill_id, top.get("mmsi"), top["final_score"], top["label"], len(scored),
+    )
+
+    await publish_to_stream(redis, OUTPUT_STREAM, {
+        "spill_id": spill_id,
+        "candidate_id": candidate_id,
+        "scene_id": scene_id,
+        "spill_lat": spill_lat,
+        "spill_lon": spill_lon,
+        "acquisition_time": acq.isoformat(),
+        "top_vessel_id": str(top.get("vessel_id") or ""),
+        "top_vessel_mmsi": str(top.get("mmsi") or ""),
+        "top_score": top["final_score"],
+        "top_label": top["label"],
+        "candidates_scored": len(scored),
+        "is_synthetic": is_synthetic,
+    })
+    STATE["incidents_processed"] += 1
+
+
+async def run_attribution_worker() -> None:
+    pool = await create_pool()
+    redis = await get_redis()
+    await ensure_consumer_group(redis, INPUT_STREAM, CONSUMER_GROUP)
+    log.info("%s worker started (spatial_window=%.0fm temporal_window=%.1fh).",
+             SERVICE_NAME, ATTRIBUTION_SPATIAL_WINDOW_M, ATTRIBUTION_TEMPORAL_WINDOW_H)
+
+    while True:
+        STATE["heartbeat"] = time.time()
+        messages = await consume_stream(
+            redis, INPUT_STREAM, CONSUMER_GROUP, CONSUMER_NAME,
+            count=10, block_ms=2000,
+        )
+        for msg in messages:
+            try:
+                await _process_incident_fused(msg["data"], pool, redis)
+            except Exception as exc:
+                STATE["failed"] += 1
+                log.exception("Attribution failed for message %s: %s", msg.get("id"), exc)

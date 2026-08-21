@@ -43,7 +43,7 @@ function reducer(state, action) {
  * without creating a duplicate polygon. Geometry is resolved from the
  * api-gateway candidate endpoint (events do not carry polygons).
  */
-export function SpillCandidateLayer({ event, fetcher = fetch }) {
+export function SpillCandidateLayer({ event, fetcher = fetch, onSpillSelect }) {
   const [state, dispatch] = useReducer(reducer, null, initialLayerState);
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -119,6 +119,9 @@ export function SpillCandidateLayer({ event, fetcher = fetch }) {
       style={() => candidateStyle(candidate)}
       onEachFeature={(_feature, layer) => {
         layer.bindPopup(renderPopupHtml(candidate));
+      }}
+      eventHandlers={{
+        click: () => onSpillSelect?.(candidate.candidate_id),
       }}
     />
   ));
