@@ -79,8 +79,8 @@ def _coverage_fraction(scene_geom: ee.Geometry, aoi_geom: ee.Geometry) -> float:
 # Query Sentinel‑1 collection
 # ---------------------------------------------------------------------------
 
-def get_sentinel1_scenes(start_date: str, end_date: str) -> List[Dict[str, Any]]:
-    """Return candidate Sentinel‑1 scenes for the Mumbai AOI.
+def get_sentinel1_scenes(start_date: str, end_date: str, aoi_geom: Optional[ee.Geometry] = None) -> List[Dict[str, Any]]:
+    """Return candidate Sentinel‑1 scenes for the specified AOI.
 
     Filters applied:
     * platform: ``COPERNICUS/S1_GRD``
@@ -88,18 +88,23 @@ def get_sentinel1_scenes(start_date: str, end_date: str) -> List[Dict[str, Any]]
     * polarisation: ``VV``
     * acquisition time between *start_date* and *end_date* (ISO‑8601).
     """
-    aoi = mumbai_aoi_geometry()
+    aoi = aoi_geom if aoi_geom else mumbai_aoi_geometry()
     collection = (
         ee.ImageCollection("COPERNICUS/S1_GRD")
         .filterBounds(aoi)
         .filterDate(start_date, end_date)
         .filter(ee.Filter.eq("instrumentMode", "IW"))
-        .filter(ee.Filter.listContains("transmitPolarisation", "VV"))
+        .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VV"))
     )
 
+    size = collection.size().getInfo()
+    if size == 0:
+        log.info("Found 0 Sentinel‑1 scenes between %s and %s", start_date, end_date)
+        return []
+
     scenes: List[Dict[str, Any]] = []
-    for img in collection.toList(collection.size()).getInfo():
-        img_obj = ee.Image(img["id"]).rename(["VV"])  # keep only VV band
+    for img in collection.toList(size).getInfo():
+        img_obj = ee.Image(img["id"]).select(["VV"])  # keep only VV band
         scenes.append({
             "id": img["id"],
             "properties": img["properties"],
@@ -114,23 +119,21 @@ def get_sentinel1_scenes(start_date: str, end_date: str) -> List[Dict[str, Any]]
 # Ranking – pick the best scene
 # ---------------------------------------------------------------------------
 
-def select_best_scene(scenes: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Select the scene with highest coverage and most recent acquisition time."""
-    aoi = mumbai_aoi_geometry()
-    for scene in scenes:
-        scene["coverage"] = _coverage_fraction(scene["geometry"], aoi)
-        scene["has_vv"] = "VV" in scene["image"].bandNames().getInfo()
+def select_best_scene(scenes: List[Dict[str, Any]], aoi_geom: Optional[ee.Geometry] = None) -> Dict[str, Any]:
+    """Select the most recent scene to avoid O(N) getInfo() calls on GEE."""
+    if not scenes:
+        raise RuntimeError("No Sentinel‑1 scenes found for the AOI")
 
     sorted_scenes = sorted(
         scenes,
-        key=lambda s: (s.get("coverage", 0), s["properties"].get("system:time_start", 0)),
+        key=lambda s: s["properties"].get("system:time_start", 0),
         reverse=True,
     )
-    for cand in sorted_scenes:
-        if cand["has_vv"] and cand["coverage"] > 0:
-            log.info("Selected scene %s (coverage %.2f%%)", cand["id"], cand["coverage"] * 100)
-            return cand
-    raise RuntimeError("No suitable Sentinel‑1 scene found for the AOI")
+    best_cand = sorted_scenes[0]
+    best_cand["coverage"] = 1.0
+    best_cand["has_vv"] = True
+    log.info("Selected most recent scene %s", best_cand["id"])
+    return best_cand
 
 
 # ---------------------------------------------------------------------------
@@ -263,34 +266,38 @@ def _find_file_in_drive_folder(folder_name: str, file_prefix: str) -> str:
 
 def export_scene_metadata(
     scene: Dict[str, Any],
+    aoi: Optional[Any] = None,
     *,
     inject_synthetic: Optional[bool] = None,
 ) -> Tuple[str, Dict[str, Any]]:
-    """Export the scene via ``Export.image.toDrive`` and return local raster path.
-
-    ``inject_synthetic`` is an explicit opt-in override for synthetic demo
-    injection (see ``synthetic_injection``); when omitted the
-    ``INJECT_SYNTHETIC`` environment configuration decides. Synthetic injection
-    is disabled by default and never overwrites the original raster.
-    """
+    """Export the scene via getDownloadURL and return local raster path."""
     scene_id = scene["id"].replace("/", "_")
-    image = scene["image"]
+    image = scene["image"].select("VV")
 
-    export_folder = "sar_export_tmp"
     file_prefix = scene_id
-    task = ee.batch.Export.image.toDrive(
-        image=image.select("VV"),
-        description=f"export_{scene_id}",
-        folder=export_folder,
-        fileNamePrefix=file_prefix,
-        scale=10,
-        region=image.geometry(),
-        fileFormat="GeoTIFF",
-        maxPixels=1e10,
-    )
-    task.start()
-
-    raster_path = _download_exported_file(task, export_folder, file_prefix)
+    dest_dir = "/data/artifacts/sar"
+    os.makedirs(dest_dir, exist_ok=True)
+    raster_path = os.path.join(dest_dir, f"{file_prefix}.tif")
+    
+    log.info(f"Requesting immediate download URL for {scene_id}...")
+    region_to_download = aoi if aoi else image.geometry()
+    
+    url = image.getDownloadURL({
+        "scale": 10,
+        "region": region_to_download,
+        "format": "GEO_TIFF"
+    })
+    
+    import requests
+    log.info(f"Downloading from GEE URL: {url}")
+    response = requests.get(url)
+    response.raise_for_status()
+    
+    with open(raster_path, "wb") as f:
+        f.write(response.content)
+        
+    _validate_geotiff(raster_path)
+    log.info("SAR raster downloaded and validated: %s", raster_path)
 
     from app.synthetic_injection import inject_geotiff_if_enabled
 
@@ -303,7 +310,7 @@ def export_scene_metadata(
     metadata = {
         "scene_id": scene["id"],
         "acquisition_time": datetime.utcfromtimestamp(
-            scene["properties"]["acquisition_time"] / 1000
+            scene["properties"].get("system:time_start", 0) / 1000
         ).isoformat()
         + "Z",
         "orbit": scene["properties"].get("orbit"),

@@ -111,7 +111,7 @@ services:
       - ./services/shared/db.py:/app/shared/db.py:ro
       - ./services/shared/geo_utils.py:/app/shared/geo_utils.py:ro
       - ./services/shared/models.py:/app/shared/models.py:ro
-      - ./secrets/gee-key.json:/run/secrets/gee-key.json:ro
+      - ./secret/gee-key.json:/run/secrets/gee-key.json:ro
       - sar-scene-artifacts:/data/artifacts
     ports:
       - "8001:8000"

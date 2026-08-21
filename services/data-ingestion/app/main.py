@@ -31,6 +31,7 @@ sys.path.insert(0, "/app")
 from shared.db import get_pool, close_pool
 from shared.redis_client import get_redis, close_redis
 from app.worker import run_ingestion_worker, ingest_ais_batch, STATE
+from app.dynamic_sar_worker import dynamic_sar_worker
 from app.deduplicator import AISDeduplicator
 from app.reference_loader import load_reference_layers, get_port_polygons, get_protected_zones
 
@@ -60,6 +61,10 @@ async def _lifespan(app: FastAPI):
         # Start live AIS ingestion worker
         task = asyncio.create_task(run_ingestion_worker())
         app.state.worker_task = task
+        
+        # Start dynamic SAR tasking worker
+        sar_task = asyncio.create_task(dynamic_sar_worker())
+        app.state.sar_task = sar_task
         log.info("%s startup complete.", SERVICE_NAME)
     except Exception as exc:
         log.exception("Startup failed: %s", exc)
@@ -74,6 +79,14 @@ async def _lifespan(app: FastAPI):
             await app.state.worker_task
         except asyncio.CancelledError:
             pass
+            
+    if hasattr(app.state, "sar_task"):
+        app.state.sar_task.cancel()
+        try:
+            await app.state.sar_task
+        except asyncio.CancelledError:
+            pass
+            
     await close_pool()
     await close_redis()
 

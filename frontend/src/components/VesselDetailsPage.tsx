@@ -115,6 +115,31 @@ export function VesselDetailsPage({ vesselDetail, onBack }: Props) {
               </>
             )}
           </div>
+
+          <div className="idp-card">
+            <h3>Final Verdict</h3>
+            {vesselDetail.verdict?.status === "spill_detected" ? (
+              <div style={{ padding: '16px', background: 'rgba(237, 104, 76, 0.1)', border: '1px solid rgba(237, 104, 76, 0.3)', borderRadius: '4px', marginTop: '10px' }}>
+                <div style={{ color: "#ed684c", fontWeight: 700, fontSize: "16px", marginBottom: "4px" }}>OIL SPILL DETECTED</div>
+                <div style={{ color: "#e8ede7", fontSize: "12px", opacity: 0.8 }}>Spill ID: {vesselDetail.verdict.spill_id}</div>
+              </div>
+            ) : vesselDetail.verdict?.status === "no_spill_detected" ? (
+              <div style={{ padding: '16px', background: 'rgba(118, 188, 153, 0.1)', border: '1px solid rgba(118, 188, 153, 0.3)', borderRadius: '4px', marginTop: '10px' }}>
+                <div style={{ color: "#76bc99", fontWeight: 700, fontSize: "16px", marginBottom: "4px" }}>CLEAR (NO SPILL)</div>
+                <div style={{ color: "#e8ede7", fontSize: "12px", opacity: 0.8 }}>Tasking completed, no spill detected in ROI.</div>
+              </div>
+            ) : vesselDetail.verdict?.status === "pending" ? (
+              <div style={{ padding: '16px', background: 'rgba(229, 183, 93, 0.1)', border: '1px solid rgba(229, 183, 93, 0.3)', borderRadius: '4px', marginTop: '10px' }}>
+                <div style={{ color: "#e5b75d", fontWeight: 700, fontSize: "16px", marginBottom: "4px" }}>SAR PENDING</div>
+                <div style={{ color: "#e8ede7", fontSize: "12px", opacity: 0.8 }}>Awaiting satellite tasking completion.</div>
+              </div>
+            ) : (
+              <div style={{ padding: '16px', background: 'rgba(255, 255, 255, 0.05)', border: '1px solid rgba(255, 255, 255, 0.1)', borderRadius: '4px', marginTop: '10px' }}>
+                <div style={{ color: "#a0a0a0", fontWeight: 700, fontSize: "16px" }}>NO TASKING REQUESTED</div>
+                <div style={{ color: "#8a968f", fontSize: "12px", opacity: 0.8 }}>No SAR tasking has been requested for this vessel.</div>
+              </div>
+            )}
+          </div>
         </div>
 
         <div className="idp-main-view">

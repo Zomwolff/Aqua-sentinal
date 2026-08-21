@@ -370,9 +370,21 @@ async def list_vessels(
             v.mmsi, v.name AS vessel_name, v.vessel_type, v.flag, v.imo_number,
             v.last_lat, v.last_lon, v.last_seen,
             v.destination, v.draught,
-            r.risk_score, r.tier AS risk_tier, r.recommended_action
+            r.risk_score, r.tier AS risk_tier, r.recommended_action,
+            sat.status AS sar_status,
+            attr.spill_id AS detected_spill_id
         FROM vessels v
         LEFT JOIN vessel_risk_scores r ON v.mmsi = r.mmsi
+        LEFT JOIN (
+            SELECT DISTINCT ON (vessel_id) vessel_id, status
+            FROM satellite_tasking_requests
+            ORDER BY vessel_id, requested_at DESC
+        ) sat ON sat.vessel_id = v.id
+        LEFT JOIN (
+            SELECT DISTINCT ON (vessel_id) vessel_id, spill_id
+            FROM attribution_results
+            ORDER BY vessel_id, computed_at DESC
+        ) attr ON attr.vessel_id = v.id
         {where}
         ORDER BY v.last_seen DESC
         LIMIT ${idx} OFFSET ${idx+1}
@@ -454,7 +466,7 @@ async def get_vessel_detail(mmsi: int):
     if trust and trust.get("timestamp"):
         trust["timestamp"] = trust["timestamp"].isoformat()
 
-    # SAR Tasking Request
+    # SAR Tasking Request & Verdict
     sar_tasking_row = await pool.fetchrow(
         "SELECT id, status, requested_at, scene_id FROM satellite_tasking_requests "
         "WHERE mmsi=$1 ORDER BY requested_at DESC LIMIT 1", str(mmsi)
@@ -463,6 +475,24 @@ async def get_vessel_detail(mmsi: int):
     if sar_tasking_row:
         sar_tasking = {k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in dict(sar_tasking_row).items()}
 
+    # Determine Verdict
+    verdict = {"status": "none", "spill_id": None}
+    if sar_tasking_row:
+        if sar_tasking_row["status"] == "pending":
+            verdict["status"] = "pending"
+        elif sar_tasking_row["status"] == "fulfilled":
+            # Check if this vessel has a spill attributed to it
+            attr_row = await pool.fetchrow(
+                "SELECT ar.spill_id FROM attribution_results ar "
+                "JOIN vessels v ON v.id = ar.vessel_id "
+                "WHERE v.mmsi=$1 ORDER BY ar.computed_at DESC LIMIT 1", str(mmsi)
+            )
+            if attr_row:
+                verdict["status"] = "spill_detected"
+                verdict["spill_id"] = str(attr_row["spill_id"])
+            else:
+                verdict["status"] = "no_spill_detected"
+
     return {
         "vessel": vessel,
         "features": features,
@@ -470,6 +500,7 @@ async def get_vessel_detail(mmsi: int):
         "anomalies": anomalies,
         "trust": trust,
         "sar_tasking": sar_tasking,
+        "verdict": verdict,
     }
 
 

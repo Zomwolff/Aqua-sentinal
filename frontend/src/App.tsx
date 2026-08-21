@@ -46,11 +46,13 @@ function App() {
              id: `v-${v.mmsi}`,
              name: v.vessel_name || `Vessel ${v.mmsi}`,
              mmsi: String(v.mmsi),
-             type: v.vessel_type_str || "Unknown",
+             type: v.vessel_type || "Unknown",
              risk: (v.risk_tier || "LOW").toLowerCase() as Severity,
              score: v.risk_score ? Math.round(v.risk_score) : 0,
              coordinates: [v.last_lon || 0, v.last_lat || 0],
-             detail: v.risk_tier ? "Risk rules triggered" : "Normal tracking"
+             detail: v.risk_tier ? "Risk rules triggered" : "Normal tracking",
+             sar_status: v.sar_status || null,
+             detected_spill_id: v.detected_spill_id || null
           })));
 
           // Add risk-flagged vessels to the historical feed
@@ -324,7 +326,9 @@ function App() {
           <div className="map-legend"><small>LAYERS</small>{([['vessels', 'AIS vessels'], ['protected', 'Protected zones']] as const).map(([key, label]) => <button key={key} className={`legend-item ${layers[key as keyof typeof layers] ? "active" : ""}`} onClick={() => setLayers((state) => ({ ...state, [key]: !state[key as keyof typeof layers] }))}><span className={`legend-swatch ${key}`} />{label}</button>)}</div>
           <div className="map-scale"><span className="scale-line" /><span>10 nm</span></div>
           {selectedIncident && <div className="coordinate">{selectedIncident.coordinates[1].toFixed(2)}° N &nbsp; {selectedIncident.coordinates[0].toFixed(2)}° E</div>}
-          <div className="forecast-bar"><div><small>FORECAST HORIZON</small><strong>{horizon === 0 ? "NOW" : `+${horizon}H`}</strong></div><div className="horizon-track">{[0, 3, 6, 12, 24].map((value) => <button key={value} className={horizon === value ? "chosen" : ""} onClick={() => setHorizon(value)}><span>{value === 0 ? "Now" : `+${value}h`}</span></button>)}</div><div className="forecast-confidence"><small>MODEL CONFIDENCE</small><strong>{Math.max(48, 92 - horizon / 2)}%</strong></div></div>
+          {(viewMode === "incident" || (viewMode === "vessel" && selectedVessel?.detected_spill_id)) && (
+            <div className="forecast-bar"><div><small>FORECAST HORIZON</small><strong>{horizon === 0 ? "NOW" : `+${horizon}H`}</strong></div><div className="horizon-track">{[0, 3, 6, 12, 24].map((value) => <button key={value} className={horizon === value ? "chosen" : ""} onClick={() => setHorizon(value)}><span>{value === 0 ? "Now" : `+${value}h`}</span></button>)}</div><div className="forecast-confidence"><small>MODEL CONFIDENCE</small><strong>{Math.max(48, 92 - horizon / 2)}%</strong></div></div>
+          )}
         </section>
         <aside className="sidebar">
           <section className="side-section feed-section">
@@ -333,30 +337,37 @@ function App() {
                 {feed.map((item, idx) => <div className="feed-item" key={idx}><span className={`feed-icon ${item.kind}`}>{item.kind === "spill" ? "!" : item.kind === "risk" ? "↗" : item.kind === "dark" ? "◌" : "·"}</span><div><b>{item.title}</b><p>{item.body}</p></div><time>{item.time}</time></div>)}
              </div>
           </section>
-           <section className="side-section incidents-section">
-             <div className="section-head"><div><small>MONITORED EVENTS</small><h2>Active incidents <em>{incidents.length < 10 ? `0${incidents.length}` : incidents.length}</em></h2></div><button className="text-button">View archive <span>→</span></button></div>
-             <div className="incident-list">
-                {incidents.map((incident) => <button className={`incident-row ${selectedIncident?.id === incident.id ? "selected" : ""}`} key={incident.id} onClick={() => focusIncident(incident)}><span className={`severity-bar ${incident.severity}`} /><div className="incident-copy"><div><b>{incident.id}</b><span className={`severity-pill ${incident.severity}`}>{severityLabel[incident.severity]}</span></div><strong>{incident.title}</strong><p>{incident.location} <span>·</span> {incident.age}</p><small>Top attribution: <b>{incident.vessel}</b></small></div><span className="row-arrow">↗</span></button>)}
-             </div>
-          </section>
-          
-          <section className="side-section flagged-vessels-section">
-             <div className="section-head"><div><small>RISK INTELLIGENCE</small><h2>Flagged Vessels <em>{vessels.filter(v => v.risk === "critical" || v.risk === "high").length}</em></h2></div></div>
-             <div className="incident-list">
-                {vessels.filter(v => v.risk === "critical" || v.risk === "high").map((vessel) => (
-                  <button className={`incident-row ${selectedVessel?.id === vessel.id && viewMode === "vessel" ? "selected" : ""}`} key={vessel.id} onClick={() => focusFlaggedVessel(vessel)}>
-                    <span className={`severity-bar ${vessel.risk}`} />
-                    <div className="incident-copy">
-                      <div><b>{vessel.mmsi}</b><span className={`severity-pill ${vessel.risk}`}>{severityLabel[vessel.risk]}</span></div>
-                      <strong>{vessel.name}</strong>
-                      <p>{vessel.type} <span>·</span> Score: {vessel.score}/100</p>
-                      <small>SAR Tasking: <b>{vessel.risk === "critical" ? "Requested" : "None"}</b></small>
-                    </div>
-                    <span className="row-arrow">↗</span>
-                  </button>
-                ))}
-             </div>
-          </section>
+          <div className="sidebar-bottom">
+            <section className="side-section incidents-section">
+               <div className="section-head"><div><small>MONITORED EVENTS</small><h2>Active incidents <em>{incidents.length < 10 ? `0${incidents.length}` : incidents.length}</em></h2></div><button className="text-button">View archive <span>→</span></button></div>
+               <div className="incident-list">
+                  {incidents.map((incident) => <button className={`incident-row ${selectedIncident?.id === incident.id ? "selected" : ""}`} key={incident.id} onClick={() => focusIncident(incident)}><span className={`severity-bar ${incident.severity}`} /><div className="incident-copy"><div><b>{incident.id}</b><span className={`severity-pill ${incident.severity}`}>{severityLabel[incident.severity]}</span></div><strong>{incident.title}</strong><p>{incident.location} <span>·</span> {incident.age}</p><small>Top attribution: <b>{incident.vessel}</b></small></div><span className="row-arrow">↗</span></button>)}
+               </div>
+            </section>
+            
+            <section className="side-section flagged-vessels-section">
+               <div className="section-head"><div><small>RISK INTELLIGENCE</small><h2>Flagged Vessels <em>{vessels.filter(v => v.risk === "critical" || v.risk === "high").length}</em></h2></div></div>
+               <div className="incident-list">
+                  {vessels.filter(v => v.risk === "critical" || v.risk === "high").map((vessel) => (
+                    <button className={`incident-row ${selectedVessel?.id === vessel.id && viewMode === "vessel" ? "selected" : ""}`} key={vessel.id} onClick={() => focusFlaggedVessel(vessel)}>
+                      <span className={`severity-bar ${vessel.risk}`} />
+                      <div className="incident-copy">
+                        <div><b>{vessel.mmsi}</b><span className={`severity-pill ${vessel.risk}`}>{severityLabel[vessel.risk]}</span></div>
+                        <strong>{vessel.name}</strong>
+                        <p>{vessel.type} <span>·</span> Score: {vessel.score}/100</p>
+                        <small>Verdict: <b>
+                          {vessel.detected_spill_id ? <span style={{color: "#ed684c"}}>Oil Spill Detected</span> : 
+                           vessel.sar_status === "fulfilled" ? <span style={{color: "#76bc99"}}>Clear (No Spill)</span> :
+                           vessel.sar_status === "pending" ? <span style={{color: "#e5b75d"}}>SAR Pending</span> :
+                           vessel.risk === "critical" ? "Tasking Requested" : "None"}
+                        </b></small>
+                      </div>
+                      <span className="row-arrow">↗</span>
+                    </button>
+                  ))}
+               </div>
+            </section>
+          </div>
         </aside>
       </main>
       
@@ -392,11 +403,19 @@ function App() {
              <span className={`severity-pill ${selectedVessel.risk}`}>{severityLabel[selectedVessel.risk]} risk</span>
              <strong>{selectedVessel.score}<small>/100</small></strong>
          </div>
-         {selectedVessel.risk === "critical" && (
+         {selectedVessel.detected_spill_id ? (
              <div style={{ marginTop: "12px", color: "#ed684c", fontWeight: 600, fontSize: "11px", display: "flex", alignItems: "center", gap: "6px" }}>
-                <span className="live-dot" style={{ background: "#ed684c" }} /> SATELLITE TASKING REQUESTED
+                <span className="live-dot" style={{ background: "#ed684c" }} /> OIL SPILL DETECTED
              </div>
-         )}
+         ) : selectedVessel.sar_status === "fulfilled" ? (
+             <div style={{ marginTop: "12px", color: "#76bc99", fontWeight: 600, fontSize: "11px", display: "flex", alignItems: "center", gap: "6px" }}>
+                <span className="live-dot" style={{ background: "#76bc99", animation: "none" }} /> CLEAR (NO SPILL)
+             </div>
+         ) : selectedVessel.sar_status === "pending" || selectedVessel.risk === "critical" ? (
+             <div style={{ marginTop: "12px", color: "#e5b75d", fontWeight: 600, fontSize: "11px", display: "flex", alignItems: "center", gap: "6px" }}>
+                <span className="live-dot" style={{ background: "#e5b75d" }} /> SATELLITE TASKING REQUESTED
+             </div>
+         ) : null}
          <div className="sparkline"><i /><i /><i /><i /><i /><i /><i /><i /></div>
          <p className="vessel-detail">{selectedVessel.detail}</p>
       </div>
