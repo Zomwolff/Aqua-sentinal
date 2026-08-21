@@ -13,6 +13,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from app.morphology import estimate_min_area_px
 from app.polygonize import extract_candidates
+from app.worker import _reproject_candidates_to_wgs84
 from shared.spatial.geo import area_m2_from_geometry
 
 
@@ -187,6 +188,25 @@ def test_polygon_coordinates_are_longitude_latitude_not_reversed():
     assert any(19.10 <= lat <= 19.20 for lat in lats)
     assert not any(18.0 <= lat <= 20.0 for lat in lons), "first coord must be lon"
     assert not any(72.0 <= lon <= 74.0 for lon in lats), "second coord must be lat"
+
+
+def test_utm_candidates_are_reprojected_to_wgs84_and_oriented():
+    candidates = extract_candidates(
+        _rect_mask(),
+        Affine(10.0, 0.0, 263000.0, 0.0, -10.0, 2095000.0),
+        min_area_m2=5000.0,
+        pixel_size_m=10.0,
+    )
+
+    _reproject_candidates_to_wgs84(candidates, "EPSG:32643")
+
+    assert len(candidates) == 1
+    ring = candidates[0]["geometry"]["coordinates"][0]
+    assert all(72.0 <= lon <= 74.0 for lon, _ in ring)
+    assert all(18.0 <= lat <= 20.0 for _, lat in ring)
+    lon, lat = candidates[0]["centroid"]["coordinates"]
+    assert 72.0 <= lon <= 74.0
+    assert 18.0 <= lat <= 20.0
 
 
 def test_estimate_min_area_px_requires_explicit_min_area_m2():

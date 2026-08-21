@@ -4,11 +4,11 @@ import asyncpg
 
 async def seed():
     conn = await asyncpg.connect(
-        user="postgres",
-        password="postgres",
+        user="aqua_sentinel",
+        password="change_me",
         host="postgres",
         port=5432,
-        database="maritime_oilspill"
+        database="aqua_sentinel"
     )
     
     print("Fetching a real vessel from the database...")
@@ -22,6 +22,7 @@ async def seed():
     
     if not row:
         print("No vessels found with positions!")
+        await conn.close()
         return
         
     vessel_id = row['vessel_id']

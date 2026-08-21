@@ -12,6 +12,9 @@ from typing import Any, Dict, List
 
 import numpy as np
 import rasterio
+from rasterio.warp import transform_geom
+from shapely.geometry import mapping, shape
+from shapely.geometry.polygon import orient
 
 from shared.artifacts import save_scene_artifact
 from shared.db.connection import create_pool
@@ -221,6 +224,40 @@ def _artifact_root() -> str:
 _AREA_M2_SQL = "SELECT " + area_m2_from_geometry("ST_GeomFromGeoJSON($1)")
 
 
+def _reproject_candidates_to_wgs84(candidates, source_crs: str) -> None:
+    """Convert raster-space candidate geometry to GeoJSON lon/lat in place.
+
+    ``extract_candidates`` applies the raster affine transform, so its output
+    remains in the raster's native CRS. Sentinel-1 downloads commonly use a
+    UTM CRS (for Mumbai, EPSG:32643); treating those metre coordinates as
+    EPSG:4326 makes the subsequent PostGIS geography cast invalid.
+    """
+    if not source_crs:
+        raise ValueError("SAR raster has no CRS; candidates cannot be reprojected.")
+
+    for candidate in candidates:
+        geometry = transform_geom(
+            source_crs,
+            "EPSG:4326",
+            candidate["geometry"],
+            precision=8,
+        )
+        polygon = shape(geometry)
+        if polygon.geom_type != "Polygon" or polygon.is_empty:
+            raise ValueError("SAR candidate did not reproject to a valid Polygon.")
+
+        # GeoJSON's right-hand rule: exterior counter-clockwise, holes
+        # clockwise. This also prevents PostGIS geography from interpreting a
+        # small candidate as the complement of the globe.
+        candidate["geometry"] = mapping(orient(polygon, sign=1.0))
+        candidate["centroid"] = transform_geom(
+            source_crs,
+            "EPSG:4326",
+            candidate["centroid"],
+            precision=8,
+        )
+
+
 async def _resolve_candidate_areas(pool, candidates) -> None:
     """Stamp each candidate's ``area_m2`` via PostGIS geography.
 
@@ -327,6 +364,7 @@ async def _process_sar_message(
             min_area_m2=min_area_m2,
             pixel_size_m=SENTINEL1_PIXEL_SIZE_M,
         )
+        _reproject_candidates_to_wgs84(candidates, raster_metadata["crs"])
 
         # Scene-level artifact (step 4 dependency): filtered intensity, cleaned
         # mask, and bright-target mask, retrievable by scene_id. Raster pixels
