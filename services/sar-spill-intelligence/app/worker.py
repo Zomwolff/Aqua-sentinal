@@ -290,15 +290,21 @@ async def _process_sar_message(
         raw_image = working_image
         await asyncio.sleep(0.5)
 
-        # STEP 2: Despeckling
+        # STEP 2: Despeckling — intensity (linear-power) domain Lee filter;
+        # speckle is multiplicative in power, so the Lee MMSE model is applied
+        # there and the result converted back to dB.
         await redis.publish("sar.tasking.events", json.dumps({"scene_id": scene_id, "step": "sar_despeckling"}))
-        filtered_image = await asyncio.to_thread(lee_filter, working_image)
+        filtered_image = await asyncio.to_thread(lee_filter, working_image, 5, "linear")
         await asyncio.sleep(0.5)
 
         # STEP 3: CFAR / Dark Region
+        # CFAR threshold multiplier k is env-tunable (SAR_CFAR_K, default 2.5)
+        # so it can be calibrated against real Mumbai Sentinel-1 scenes without
+        # a code change.
+        cfar_k = float(os.environ.get("SAR_CFAR_K", 2.5))
         await redis.publish("sar.tasking.events", json.dumps({"scene_id": scene_id, "step": "sar_cfar"}))
         dark_mask = await asyncio.to_thread(dark_region_mask, filtered_image)
-        anomaly_mask = await asyncio.to_thread(cfar_detect, filtered_image)
+        anomaly_mask = await asyncio.to_thread(cfar_detect, filtered_image, 3, 15, cfar_k)
         binary_mask = (dark_mask | anomaly_mask) & finite
         await asyncio.sleep(0.5)
 
@@ -343,6 +349,34 @@ async def _process_sar_message(
             shape=binary_mask.shape,
             crs=raster_metadata.get("crs"),
         )
+
+        # STEP 4 support — vectorize bright targets (possible vessels) and
+        # publish them to sar.objects so the dark-vessel detector's SAR
+        # correlation has real coordinates to join against vessel_positions.
+        try:
+            from app.bright_targets import extract_bright_targets
+
+            bright_targets = await asyncio.to_thread(
+                extract_bright_targets,
+                bright_target_mask,
+                list(affine),
+                SENTINEL1_PIXEL_SIZE_M,
+            )
+            if bright_targets:
+                await redis.xadd(
+                    "sar.objects",
+                    {"data": json.dumps({
+                        "scene_id": scene_id,
+                        "acquisition_time": scene_metadata.get("acquisition_time"),
+                        "is_synthetic": scene_metadata.get("is_synthetic", False),
+                        "objects": bright_targets[:200],
+                    })},
+                )
+                STATE["bright_targets_published"] = (
+                    STATE.get("bright_targets_published", 0) + len(bright_targets)
+                )
+        except Exception as exc:
+            log.warning("sar.objects publish failed for %s: %s", scene_id, exc)
 
         # STEP 3 Step C — resolve physical area via the shared PostGIS
         # geography path, then persist all candidate rows for this scene in a

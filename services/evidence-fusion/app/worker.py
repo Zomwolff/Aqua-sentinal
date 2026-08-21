@@ -112,12 +112,17 @@ async def _handle_filtered_candidate(data: Dict[str, Any], pool, redis) -> None:
     start_ts = acq - timedelta(hours=temporal_hours)
     end_ts = acq + timedelta(hours=temporal_hours)
 
+    centroid_lat = float(row["centroid_lat"]) if row["centroid_lat"] is not None else None
+    centroid_lon = float(row["centroid_lon"]) if row["centroid_lon"] is not None else None
+    area_m2 = float(row["area_m2"]) if row["area_m2"] is not None else None
+    geom_geojson = row["geom_geojson"]
+
     records = await pool.fetch(
         build_vessel_correlation_sql(),
         start_ts,
         end_ts,
-        float(row["centroid_lon"]),
-        float(row["centroid_lat"]),
+        centroid_lon,
+        centroid_lat,
         float(spatial_m),
     )
     vessel_records = [dict(r) for r in records]
@@ -129,7 +134,14 @@ async def _handle_filtered_candidate(data: Dict[str, Any], pool, redis) -> None:
         candidate_acquisition=acq,
     )
 
-    fused = fuse_evidence(candidate, correlated)
+    fused = fuse_evidence(
+        candidate,
+        correlated,
+        centroid_lat=centroid_lat,
+        centroid_lon=centroid_lon,
+        area_m2=area_m2,
+        geom_geojson=geom_geojson,
+    )
     await publish_to_stream(redis, FUSED_STREAM, fused)
 
     STATE["candidates_fused"] += 1

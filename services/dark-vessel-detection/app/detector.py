@@ -292,6 +292,11 @@ async def run_dark_vessel_detector() -> None:
     pool  = await get_pool()
     redis = await get_redis()
 
+    # sar.objects carries vectorized bright-target detections (lat/lon/length)
+    # published by sar-spill-intelligence — the primary SAR-correlation input.
+    # sar.clean is still consumed for backwards compatibility with any upstream
+    # publisher that emits fully-formed detection records.
+    await ensure_consumer_group(redis, "sar.objects", SAR_CONSUMER_GROUP)
     await ensure_consumer_group(redis, "sar.clean", SAR_CONSUMER_GROUP)
     log.info(
         "Dark Vessel Detection started. gap_threshold=%.0fmin scan_interval=%.0fs",
@@ -309,12 +314,30 @@ async def run_dark_vessel_detector() -> None:
 
         try:
             messages = await consume_stream(
-                redis, "sar.clean", SAR_CONSUMER_GROUP, SAR_CONSUMER_NAME,
+                redis, "sar.objects", SAR_CONSUMER_GROUP, SAR_CONSUMER_NAME,
                 count=20, block_ms=200,
+            )
+            for msg in messages:
+                payload = msg["data"]
+                acq_raw = payload.get("acquisition_time")
+                for obj in payload.get("objects") or []:
+                    detection = dict(obj)
+                    detection.setdefault("source", payload.get("scene_id", "sar_module"))
+                    detection.setdefault("sensor", "SAR")
+                    if acq_raw:
+                        detection.setdefault("timestamp", acq_raw)
+                    await _correlate_sar_detection(detection, pool, redis)
+        except Exception as e:
+            log.error("SAR objects stream consume error: %s", e)
+
+        try:
+            messages = await consume_stream(
+                redis, "sar.clean", SAR_CONSUMER_GROUP, f"{SAR_CONSUMER_NAME}-clean",
+                count=20, block_ms=100,
             )
             for msg in messages:
                 await _correlate_sar_detection(msg["data"], pool, redis)
         except Exception as e:
-            log.error("SAR stream consume error: %s", e)
+            log.error("SAR legacy stream consume error: %s", e)
 
         await asyncio.sleep(1)

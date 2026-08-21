@@ -56,29 +56,90 @@ def _parse_dt(raw: Any) -> Optional[datetime]:
         return None
 
 
-async def _get_or_create_spill_incident(
-    pool, candidate_id: str, scene_id: str, confidence: float,
-    acquisition_time: Optional[datetime], is_synthetic: bool,
-    lat: float, lon: float, area_km2: float
-) -> Optional[tuple]:
+async def _fetch_candidate_geometry(
+    pool, candidate_id: str,
+) -> Optional[Dict[str, Any]]:
     """
-    Create a spill_incident row directly from the event payload.
-    Returns the new spill_id (UUID str) or None on failure.
+    Resolve the real spill-candidate geometry from PostGIS.
+
+    Returns dict(centroid_lat, centroid_lon, area_km2, geom_geojson) or None.
+    This is the fallback for incident.fused messages produced before the
+    evidence-fusion payload carried geometry (and a cross-check of the payload).
     """
     try:
         row = await pool.fetchrow(
             """
+            SELECT ST_Y(ST_Centroid(geom)) AS centroid_lat,
+                   ST_X(ST_Centroid(geom)) AS centroid_lon,
+                   area_m2,
+                   ST_AsGeoJSON(geom)      AS geom_geojson
+            FROM spill_candidates
+            WHERE candidate_id = $1::uuid
+            """,
+            candidate_id,
+        )
+    except Exception as exc:
+        log.warning("candidate geometry lookup failed for %s: %s", candidate_id, exc)
+        return None
+    if row is None or row["centroid_lat"] is None:
+        return None
+    return {
+        "centroid_lat": float(row["centroid_lat"]),
+        "centroid_lon": float(row["centroid_lon"]),
+        "area_km2": float(row["area_m2"]) / 1_000_000.0 if row["area_m2"] else 0.0,
+        "geom_geojson": row["geom_geojson"],
+    }
+
+
+async def _get_or_create_spill_incident(
+    pool, candidate_id: str, scene_id: str, confidence: float,
+    acquisition_time: Optional[datetime], is_synthetic: bool,
+    lat: float, lon: float, area_km2: float,
+    geom_geojson: Optional[str] = None,
+) -> Optional[tuple]:
+    """
+    Create a spill_incident row from the fused event + the REAL candidate
+    polygon. When the candidate geometry (GeoJSON) is available the incident
+    boundary is the detected slick polygon itself and area/centroid are derived
+    from it geodesically; only when no geometry exists do we fall back to a
+    1 km buffer circle around the centroid (clearly a lower bound).
+    Returns the new spill_id (UUID str) or None on failure.
+    """
+    if geom_geojson:
+        geom_sql = "ST_SetSRID(ST_GeomFromGeoJSON($8), 4326)"
+    else:
+        geom_sql = (
+            "ST_Buffer(ST_SetSRID(ST_MakePoint($3, $2), 4326)::geography, 1000)::geometry"
+        )
+
+    centroid_from_geom_sql = f"ST_Centroid({geom_sql})"
+    lat_expr = f"ST_Y({centroid_from_geom_sql})"
+    lon_expr = f"ST_X({centroid_from_geom_sql})"
+    # Geodesic area of the actual polygon (m^2) — never trust a payload number.
+    area_expr = f"ST_Area({geom_sql}::geography) / 1000000.0"
+
+    try:
+        # NOTE: asyncpg requires len(args) == highest referenced $n.
+        # Branch A (GeoJSON): highest ref is $8 -> pass 8 args.
+        # Branch B (buffer fallback): highest ref is $7 -> pass 7 args.
+        args: list = [
+            candidate_id, lat, lon, acquisition_time, area_km2, confidence, scene_id
+        ]
+        if geom_geojson:
+            args.append(geom_geojson)
+        row = await pool.fetchrow(
+            f"""
             INSERT INTO spill_incidents
                 (id, detected_at, latitude, longitude, geom, centroid,
                  area_km2, confidence, source, source_image_id, status)
             VALUES (
                 $1,
                 COALESCE($4, NOW()),
-                $2,
-                $3,
-                ST_Buffer(ST_SetSRID(ST_MakePoint($3, $2), 4326)::geography, 1000)::geometry,
-                ST_SetSRID(ST_MakePoint($3, $2), 4326),
-                $5,
+                {lat_expr},
+                {lon_expr},
+                {geom_sql},
+                {centroid_from_geom_sql},
+                {area_expr},
                 $6,
                 'sar_satellite',
                 $7,
@@ -87,7 +148,7 @@ async def _get_or_create_spill_incident(
             ON CONFLICT (id) DO UPDATE SET status='detected'
             RETURNING id, latitude, longitude
             """,
-            candidate_id, lat, lon, acquisition_time, area_km2, confidence, scene_id
+            *args
         )
         if row:
             log.info("Created/Found spill_incident id=%s", row['id'])
@@ -291,9 +352,33 @@ async def _process_incident_fused(
 
     acq = acquisition_time or datetime.now(timezone.utc)
 
+    # Prefer geometry from the fused event; fall back to the DB row (covers
+    # messages produced before evidence-fusion carried geometry, and guards
+    # against payloads missing coordinates).
+    payload_lat = data.get("lat")
+    payload_lon = data.get("lon")
+    geom_geojson = data.get("geom_geojson")
+
+    if payload_lat is None or payload_lon is None or geom_geojson is None:
+        db_geom = await _fetch_candidate_geometry(pool, candidate_id)
+        if db_geom:
+            payload_lat = payload_lat if payload_lat is not None else db_geom["centroid_lat"]
+            payload_lon = payload_lon if payload_lon is not None else db_geom["centroid_lon"]
+            area_val = float(data.get("area_km2") or 0.0)
+            if area_val <= 0.0:
+                payload_area = db_geom["area_km2"]
+            else:
+                payload_area = area_val
+            geom_geojson = geom_geojson if geom_geojson is not None else db_geom["geom_geojson"]
+        else:
+            payload_area = float(data.get("area_km2") or 0.0)
+    else:
+        payload_area = float(data.get("area_km2") or 0.0)
+
     result = await _get_or_create_spill_incident(
         pool, candidate_id, scene_id, confidence, acq, is_synthetic,
-        float(data.get("lat") or 0.0), float(data.get("lon") or 0.0), float(data.get("area_km2") or 0.0)
+        float(payload_lat or 0.0), float(payload_lon or 0.0), float(payload_area or 0.0),
+        geom_geojson=geom_geojson,
     )
     if result is None:
         return

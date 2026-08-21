@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import time
 from datetime import datetime, timedelta, timezone
 import ee
@@ -15,9 +16,23 @@ from app.sar_acquisition import (
 
 log = logging.getLogger("data-ingestion")
 
+
+def _env_flag(name: str, default: str = "false") -> bool:
+    """Parse a boolean environment flag. Defaults to OFF (research integrity)."""
+    return str(os.environ.get(name, default)).strip().lower() in ("1", "true", "yes", "on")
+
+
 async def process_task(task_id: int, mmsi: str, lat: float, lon: float, pool):
     log.info(f"Processing SAR tasking request {task_id} for MMSI {mmsi} at ({lat}, {lon})")
-    
+
+    # Synthetic slick injection is OPT-IN (env INJECT_SYNTHETIC, default OFF).
+    # Real operational taskings must never be contaminated with demo evidence.
+    inject_synthetic = _env_flag("INJECT_SYNTHETIC")
+    # Mock-scene fallback on GEE failure is OPT-IN as well (default OFF):
+    # without a real scene the tasking is marked 'failed' instead of feeding
+    # fabricated data into the spill pipeline.
+    allow_mock_fallback = _env_flag("SAR_ALLOW_MOCK_FALLBACK")
+
     # Run GEE fetching in a separate thread since it blocks and can take a while
     def _fetch_sar():
         try:
@@ -36,9 +51,16 @@ async def process_task(task_id: int, mmsi: str, lat: float, lon: float, pool):
             scenes = get_sentinel1_scenes(start_str, end_str, aoi_geom=aoi)
             best = select_best_scene(scenes, aoi_geom=aoi)
             
-            raster_path, meta = export_scene_metadata(best, aoi=aoi, inject_synthetic=True)
+            # inject_synthetic=None -> resolved inside export via resolve_synthetic_enabled
+            raster_path, meta = export_scene_metadata(best, aoi=aoi, inject_synthetic=inject_synthetic)
             
         except Exception as e:
+            if not allow_mock_fallback:
+                log.error(
+                    f"GEE acquisition failed for tasking {task_id} and mock fallback is "
+                    f"disabled (SAR_ALLOW_MOCK_FALLBACK=false): {e}"
+                )
+                raise
             log.warning(f"GEE failed ({e}), generating a mock GeoTIFF for SAR pipeline demonstration")
             import numpy as np
             import rasterio
@@ -96,13 +118,13 @@ async def process_task(task_id: int, mmsi: str, lat: float, lon: float, pool):
         log.info(f"Successfully fulfilled SAR tasking {task_id} with scene {scene_id}")
         
         await pool.execute(
-            "UPDATE satellite_tasking_requests SET status = 'fulfilled', scene_id = $1 WHERE id = $2",
+            "UPDATE satellite_tasking_requests SET status = 'fulfilled', scene_id = $1, completed_at = NOW() WHERE id = $2",
             scene_id, task_id
         )
     except Exception as e:
         log.error(f"Failed to process SAR tasking {task_id}: {e}")
         await pool.execute(
-            "UPDATE satellite_tasking_requests SET status = 'failed' WHERE id = $1",
+            "UPDATE satellite_tasking_requests SET status = 'failed', completed_at = NOW() WHERE id = $1",
             task_id
         )
 

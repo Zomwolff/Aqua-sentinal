@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -86,19 +87,35 @@ async def _recompute_risk(mmsi: int, pool, redis) -> None:
     )
     trust_score = float(trust_row["rolling_trust_score"]) if trust_row and trust_row["rolling_trust_score"] else 1.0
 
-    # Dark vessel flag — check dark_vessel_events table near vessel's last position
+    # Dark vessel flag — recent dark-vessel event attributed to this vessel
+    # (matched_mmsi / matched_vessel_id), or any unattributed dark detection
+    # geographically near the vessel's last known position. The table uses
+    # detected_at (NOT timestamp) and requires geography casts on BOTH sides
+    # of ST_DWithin for metric distance.
     dark_flag = False
     try:
+        _dlat = float(vessel_row["last_lat"]) if vessel_row["last_lat"] is not None else None
+        _dlon = float(vessel_row["last_lon"]) if vessel_row["last_lon"] is not None else None
         dark_row = await pool.fetchrow(
-            """SELECT id FROM dark_vessel_events
-               WHERE timestamp >= NOW() - INTERVAL '6 hours'
-                 AND ST_DWithin(
-                     geom,
-                     (SELECT ST_SetSRID(ST_MakePoint(last_lon, last_lat), 4326)::geography
-                      FROM vessels WHERE mmsi=$1 AND last_lat IS NOT NULL LIMIT 1),
-                     10000
-                 ) LIMIT 1""",
+            """SELECT dve.id FROM dark_vessel_events dve
+               WHERE dve.detected_at >= NOW() - INTERVAL '6 hours'
+                 AND (
+                   dve.matched_mmsi = $1
+                   OR dve.matched_vessel_id = $2
+                   OR (
+                     $3::float8 IS NOT NULL AND $4::float8 IS NOT NULL
+                     AND ST_DWithin(
+                         dve.geom::geography,
+                         ST_SetSRID(ST_MakePoint($4::float8, $3::float8), 4326)::geography,
+                         10000
+                     )
+                   )
+                 )
+               LIMIT 1""",
             str(mmsi),
+            vessel_row["id"],
+            _dlat,
+            _dlon,
         )
         dark_flag = dark_row is not None
     except Exception:
@@ -177,19 +194,31 @@ async def _recompute_risk(mmsi: int, pool, redis) -> None:
         except Exception as e:
             log.error("Publish vessel.risk MMSI %d: %s", mmsi, e)
 
-    # Issue satellite tasking request for HIGH/CRITICAL
+    # Issue satellite tasking request for HIGH/CRITICAL — deduplicated so a
+    # burst of signals for the same vessel does not spam one request per
+    # recomputation (and trigger repeated SAR acquisitions).
     if result["tier"] in ("HIGH", "CRITICAL"):
         try:
-            await pool.execute(
+            dedup_hours = float(os.environ.get("TASKING_DEDUP_HOURS", 6))
+            inserted = await pool.fetchval(
                 """INSERT INTO satellite_tasking_requests
                        (mmsi, risk_score, risk_tier, reason)
-                   VALUES ($1,$2,$3,$4::jsonb)""",
+                   SELECT $1,$2,$3,$4::jsonb
+                   WHERE NOT EXISTS (
+                     SELECT 1 FROM satellite_tasking_requests
+                     WHERE mmsi = $1
+                       AND requested_at >= NOW() - ($5 || ' hours')::INTERVAL
+                       AND status IN ('pending', 'fulfilled')
+                   )
+                   RETURNING id""",
                 str(mmsi), result["risk_score"], result["tier"],
                 json.dumps({"contributing_factors": result["contributing_factors"]}),
+                str(dedup_hours),
             )
-            log.warning(
-                "SATELLITE TASKING: MMSI=%d tier=%s score=%.1f",
-                mmsi, result["tier"], result["risk_score"],
-            )
+            if inserted:
+                log.warning(
+                    "SATELLITE TASKING: MMSI=%d tier=%s score=%.1f",
+                    mmsi, result["tier"], result["risk_score"],
+                )
         except Exception as e:
             log.error("satellite_tasking_requests insert MMSI %d: %s", mmsi, e)

@@ -45,10 +45,13 @@ def correlation_windows() -> Tuple[float, float]:
 
 
 def candidate_lookup_sql() -> str:
-    """SQL returning the candidate centroid (lon, lat) and acquisition time."""
+    """SQL returning the candidate centroid (lon, lat), geodesic area, GeoJSON
+    geometry and acquisition time."""
     return """
         SELECT ST_X(ST_Centroid(geom)) AS centroid_lon,
                ST_Y(ST_Centroid(geom)) AS centroid_lat,
+               area_m2,
+               ST_AsGeoJSON(geom) AS geom_geojson,
                acquisition_time
         FROM spill_candidates
         WHERE candidate_id = $1
@@ -127,12 +130,19 @@ def select_correlated_vessel(
 def fuse_evidence(
     candidate: Dict[str, Any],
     correlated_vessel: Optional[Dict[str, Any]],
+    *,
+    centroid_lat: Optional[float] = None,
+    centroid_lon: Optional[float] = None,
+    area_m2: Optional[float] = None,
+    geom_geojson: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build the ``incident.fused`` payload.
 
     ``candidate`` must contain candidate_id, scene_id, confidence,
     classification_label; scene metadata (orbit/polarization/resolution) is
-    optional and forwarded when present.
+    optional and forwarded when present. The candidate's real geometry is
+    forwarded when the DB row was found (centroid_lat/centroid_lon/area_m2/
+    geom_geojson), so downstream consumers never have to guess coordinates.
 
     The result NEVER contains attribution fields.
     """
@@ -149,6 +159,15 @@ def fuse_evidence(
     for key in ("orbit", "polarization", "resolution"):
         if key in candidate and candidate.get(key) is not None:
             event[key] = candidate[key]
+
+    # Real spill-candidate geometry (None only when the DB row was missing).
+    if centroid_lat is not None and centroid_lon is not None:
+        event["lat"] = float(centroid_lat)
+        event["lon"] = float(centroid_lon)
+    if area_m2 is not None:
+        event["area_km2"] = float(area_m2) / 1_000_000.0
+    if geom_geojson is not None:
+        event["geom_geojson"] = geom_geojson
 
     if correlated_vessel is not None:
         event["correlated_vessel_id"] = int(correlated_vessel["vessel_id"])

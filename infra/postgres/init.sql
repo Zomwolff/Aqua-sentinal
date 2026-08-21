@@ -496,8 +496,15 @@ CREATE TABLE IF NOT EXISTS satellite_tasking_requests (
     risk_tier    risk_tier_enum,
     reason       JSONB,
     requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    status       TEXT NOT NULL DEFAULT 'pending'        -- pending | acknowledged | fulfilled
+    status       TEXT NOT NULL DEFAULT 'pending'        -- pending | acknowledged | fulfilled | failed
 );
+
+-- Idempotent column additions for volumes created with older init.sql revisions
+-- (CREATE TABLE IF NOT EXISTS alone does not evolve existing tables).
+ALTER TABLE satellite_tasking_requests ADD COLUMN IF NOT EXISTS scene_id     VARCHAR(255);
+ALTER TABLE satellite_tasking_requests ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS idx_tasking_status_requested ON satellite_tasking_requests (status, requested_at);
+CREATE INDEX IF NOT EXISTS idx_dark_vessel_detected_at ON dark_vessel_events (detected_at);
 
 CREATE INDEX IF NOT EXISTS idx_sat_tasking_vessel_id   ON satellite_tasking_requests (vessel_id);
 CREATE INDEX IF NOT EXISTS idx_sat_tasking_requested   ON satellite_tasking_requests (requested_at);
