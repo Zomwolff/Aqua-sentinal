@@ -208,7 +208,7 @@ async def _recompute_risk(mmsi: int, pool, redis) -> None:
                      SELECT 1 FROM satellite_tasking_requests
                      WHERE mmsi = $1
                        AND requested_at >= NOW() - ($5 || ' hours')::INTERVAL
-                       AND status IN ('pending', 'fulfilled')
+                       AND status IN ('pending', 'processing', 'fulfilled')
                    )
                    RETURNING id""",
                 str(mmsi), result["risk_score"], result["tier"],

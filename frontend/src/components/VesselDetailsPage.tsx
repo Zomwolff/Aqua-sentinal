@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import "./IncidentDetailsPage.css";
-import { ARTIFACTS_BASE } from "../lib/api";
+import { ARTIFACTS_BASE, SAR_ARTIFACT_FILENAMES, sarArtifactUrls, type SarArtifactKey } from "../lib/api";
+import { SARArtifactPreview } from "./SARArtifactPreview";
 
 interface Props {
   vesselDetail: any;
@@ -19,19 +20,14 @@ const SAR_STEPS = [
 ];
 
 export function VesselDetailsPage({ vesselDetail, onBack, liveEvent }: Props) {
-  const [images, setImages] = useState<Record<string, string>>({});
+  const [images, setImages] = useState<Partial<Record<SarArtifactKey, string>>>({});
   const [liveStep, setLiveStep] = useState<string | null>(null);
+  const [cacheBuster, setCacheBuster] = useState<number>(Date.now());
 
   useEffect(() => {
-    if (vesselDetail?.sar_tasking?.scene_id) {
-      const sceneId = vesselDetail.sar_tasking.scene_id;
-      const baseUrl = `${ARTIFACTS_BASE}/` + sceneId.replace(/\//g, "_");
-      setImages({
-        raw: baseUrl + "/raw_image.png",
-        filtered: baseUrl + "/filtered_image.png",
-        cfar: baseUrl + "/bright_target_mask.png",
-        final: baseUrl + "/cleaned_mask.png",
-      });
+    const tasking = vesselDetail?.sar_tasking;
+    if (tasking?.scene_id) {
+      setImages(sarArtifactUrls(tasking.scene_id));
     }
   }, [vesselDetail]);
 
@@ -40,7 +36,8 @@ export function VesselDetailsPage({ vesselDetail, onBack, liveEvent }: Props) {
     if (!liveEvent || liveEvent.type !== "sar_tasking") return;
     if (vesselDetail?.sar_tasking && liveEvent.data?.scene_id === vesselDetail.sar_tasking.scene_id) {
       setLiveStep(liveEvent.data.step);
-      if (liveEvent.data.step === "sar_complete") setImages((prev) => ({ ...prev }));
+      // Force reload images by updating the cacheBuster, which will be appended to URLs
+      setCacheBuster(Date.now());
     }
   }, [liveEvent, vesselDetail]);
 
@@ -55,6 +52,7 @@ export function VesselDetailsPage({ vesselDetail, onBack, liveEvent }: Props) {
 
   const { vessel, risk, sar_tasking } = vesselDetail;
   const riskTier = risk?.tier?.toLowerCase() || 'low';
+  const previewPendingLabel = sar_tasking?.status === "failed" ? "PROCESSING FAILED" : "PENDING";
 
   // Honest step state derivation: fulfilled -> all done; failed -> stopped;
   // pending -> acquisition active; otherwise follow the live stream.
@@ -259,7 +257,7 @@ export function VesselDetailsPage({ vesselDetail, onBack, liveEvent }: Props) {
                   <div className="sar-label">1. RAW SAR IMAGE</div>
                   <div className="sar-img-wrapper">
                     {images.raw ? (
-                      <img src={images.raw} alt="Raw SAR" onError={(e) => (e.currentTarget.style.opacity = "0")} />
+                      <SARArtifactPreview url={`${images.raw}?cb=${cacheBuster}`} alt="Raw SAR" filename={SAR_ARTIFACT_FILENAMES.raw} />
                     ) : <span className="sar-placeholder">{isFailed ? "UNAVAILABLE" : isFulfilled ? "NOT RETAINED" : "AWAITING ACQUISITION"}</span>}
                   </div>
                 </div>
@@ -268,7 +266,7 @@ export function VesselDetailsPage({ vesselDetail, onBack, liveEvent }: Props) {
                   <div className="sar-label">2. DESPECKLED FILTER</div>
                   <div className="sar-img-wrapper">
                     {images.filtered ? (
-                      <img src={images.filtered} alt="Despeckled" onError={(e) => (e.currentTarget.style.opacity = "0")} />
+                      <SARArtifactPreview url={`${images.filtered}?cb=${cacheBuster}`} alt="Despeckled" filename={SAR_ARTIFACT_FILENAMES.filtered} />
                     ) : <span className="sar-placeholder">{isFailed ? "UNAVAILABLE" : `STAGE ${Math.min(currentIdx + 1, 4)} OF 7`}</span>}
                   </div>
                 </div>
@@ -277,7 +275,7 @@ export function VesselDetailsPage({ vesselDetail, onBack, liveEvent }: Props) {
                   <div className="sar-label">3. CFAR OBJECT DETECTION</div>
                   <div className="sar-img-wrapper">
                     {images.cfar ? (
-                      <img src={images.cfar} alt="CFAR Mask" onError={(e) => (e.currentTarget.style.opacity = "0")} />
+                      <SARArtifactPreview url={`${images.cfar}?cb=${cacheBuster}`} alt="CFAR Mask" filename={SAR_ARTIFACT_FILENAMES.cfar} />
                     ) : <span className="sar-placeholder">{isFailed ? "UNAVAILABLE" : `STAGE ${Math.min(Math.max(currentIdx - 2, 1), 4)} OF 7`}</span>}
                   </div>
                 </div>
@@ -286,7 +284,7 @@ export function VesselDetailsPage({ vesselDetail, onBack, liveEvent }: Props) {
                   <div className="sar-label">4. CLEANED POLYGON</div>
                   <div className="sar-img-wrapper">
                     {images.final ? (
-                      <img src={images.final} alt="Polygon" onError={(e) => (e.currentTarget.style.opacity = "0")} />
+                      <SARArtifactPreview url={`${images.final}?cb=${cacheBuster}`} alt="Polygon" filename={SAR_ARTIFACT_FILENAMES.final} />
                     ) : <span className="sar-placeholder">{isFailed ? "UNAVAILABLE" : `STAGE ${Math.min(Math.max(currentIdx - 3, 1), 4)} OF 7`}</span>}
                   </div>
                 </div>

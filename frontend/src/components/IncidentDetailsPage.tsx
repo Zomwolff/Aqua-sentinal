@@ -1,4 +1,6 @@
 import React, { useEffect, useState } from "react";
+import { SAR_ARTIFACT_FILENAMES, sarArtifactUrls, type SarArtifactKey } from "../lib/api";
+import { SARArtifactPreview } from "./SARArtifactPreview";
 import "./IncidentDetailsPage.css";
 import { ARTIFACTS_BASE } from "../lib/api";
 
@@ -9,18 +11,11 @@ interface Props {
 }
 
 export function IncidentDetailsPage({ incidentDetail, onBack, onSpotVessel }: Props) {
-  const [images, setImages] = useState<Record<string, string>>({});
+  const [images, setImages] = useState<Partial<Record<SarArtifactKey, string>>>({});
 
   useEffect(() => {
     if (incidentDetail?.incident?.source_image_id) {
-      const sceneId = incidentDetail.incident.source_image_id;
-      const baseUrl = `${ARTIFACTS_BASE}/` + sceneId.replace(/\//g, "_");
-      setImages({
-        raw: baseUrl + "/raw_image.png",
-        filtered: baseUrl + "/filtered_image.png",
-        cfar: baseUrl + "/bright_target_mask.png",
-        final: baseUrl + "/cleaned_mask.png"
-      });
+      setImages(sarArtifactUrls(incidentDetail.incident.source_image_id));
     } else {
       setImages({});
     }
@@ -157,25 +152,25 @@ export function IncidentDetailsPage({ incidentDetail, onBack, onSpotVessel }: Pr
                 <div className="sar-artifact">
                   <div className="sar-label">1. Raw Satellite Feed (Sentinel-1 VV)</div>
                   <div className="sar-img-wrapper">
-                    <img src={images.raw} alt="Raw SAR" onError={(e) => (e.currentTarget.style.display = 'none')} />
+                    <SARArtifactPreview url={images.raw} alt="Raw SAR" filename={SAR_ARTIFACT_FILENAMES.raw} />
                   </div>
                 </div>
                 <div className="sar-artifact">
                   <div className="sar-label">2. Despeckled Filter (Lee)</div>
                   <div className="sar-img-wrapper">
-                    <img src={images.filtered} alt="Despeckled" onError={(e) => (e.currentTarget.style.display = 'none')} />
+                    <SARArtifactPreview url={images.filtered} alt="Despeckled" filename={SAR_ARTIFACT_FILENAMES.filtered} />
                   </div>
                 </div>
                 <div className="sar-artifact">
                   <div className="sar-label">3. Adaptive Threshold (CFAR)</div>
                   <div className="sar-img-wrapper">
-                    <img src={images.cfar} alt="CFAR Mask" onError={(e) => (e.currentTarget.style.display = 'none')} />
+                    <SARArtifactPreview url={images.cfar} alt="CFAR Mask" filename={SAR_ARTIFACT_FILENAMES.cfar} />
                   </div>
                 </div>
                 <div className="sar-artifact">
                   <div className="sar-label">4. Final Polygon Extraction</div>
                   <div className="sar-img-wrapper">
-                    <img src={images.final} alt="Final Polygon" onError={(e) => (e.currentTarget.style.display = 'none')} />
+                    <SARArtifactPreview url={images.final} alt="Final Polygon" filename={SAR_ARTIFACT_FILENAMES.final} />
                   </div>
                 </div>
               </div>

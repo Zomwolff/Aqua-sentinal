@@ -112,15 +112,17 @@ async def process_task(task_id: int, mmsi: str, lat: float, lon: float, pool):
     try:
         raster_path, meta, scene_id = await asyncio.to_thread(_fetch_sar)
         
-        # Publish from the main asyncio event loop, not the background thread
-        publish_sar_scene(raster_path, meta)
-        
-        log.info(f"Successfully fulfilled SAR tasking {task_id} with scene {scene_id}")
-        
+        # The scene may be acquired before its PNG previews have been written.
+        # Keep this task out of the polling queue, but do not report it as
+        # fulfilled until sar-spill-intelligence has persisted every artifact.
         await pool.execute(
-            "UPDATE satellite_tasking_requests SET status = 'fulfilled', scene_id = $1, completed_at = NOW() WHERE id = $2",
+            "UPDATE satellite_tasking_requests SET status = 'processing', scene_id = $1 WHERE id = $2",
             scene_id, task_id
         )
+
+        # Publish from the main asyncio event loop, not the background thread.
+        publish_sar_scene(raster_path, meta)
+        log.info(f"SAR tasking {task_id} acquired scene {scene_id}; awaiting artifact generation")
     except Exception as e:
         log.error(f"Failed to process SAR tasking {task_id}: {e}")
         await pool.execute(

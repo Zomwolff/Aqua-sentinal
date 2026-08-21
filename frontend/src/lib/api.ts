@@ -5,6 +5,35 @@
 export const API_BASE = "/api";
 export const ARTIFACTS_BASE = "/artifacts";
 
+const SCENE_DIRECTORY_UNSAFE = /[^A-Za-z0-9_.=-]/g;
+
+/**
+ * Match services/shared/artifacts.py, which converts a scene ID to a safe
+ * artifact-directory name before writing it to the shared volume.
+ */
+export function artifactUrl(sceneId: string, filename: string): string {
+  const sceneDirectory = String(sceneId).replace(SCENE_DIRECTORY_UNSAFE, "_");
+  return `${ARTIFACTS_BASE}/${encodeURIComponent(sceneDirectory)}/${encodeURIComponent(filename)}`;
+}
+
+export const SAR_ARTIFACT_FILENAMES = {
+  raw: "raw_image.png",
+  filtered: "filtered_image.png",
+  cfar: "bright_target_mask.png",
+  final: "cleaned_mask.png",
+} as const;
+
+export type SarArtifactKey = keyof typeof SAR_ARTIFACT_FILENAMES;
+
+export function sarArtifactUrls(sceneId: string): Record<SarArtifactKey, string> {
+  return Object.fromEntries(
+    Object.entries(SAR_ARTIFACT_FILENAMES).map(([key, filename]) => [
+      key,
+      artifactUrl(sceneId, filename),
+    ]),
+  ) as Record<SarArtifactKey, string>;
+}
+
 export async function fetchVessels() {
   const res = await fetch(`${API_BASE}/vessels?active_since_hours=168`);
   if (!res.ok) throw new Error("Failed to fetch vessels");

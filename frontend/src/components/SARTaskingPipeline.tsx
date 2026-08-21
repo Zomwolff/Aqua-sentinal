@@ -1,4 +1,6 @@
 import React, { useEffect, useState } from "react";
+import { SAR_ARTIFACT_FILENAMES, sarArtifactUrls, type SarArtifactKey } from "../lib/api";
+import { SARArtifactPreview } from "./SARArtifactPreview";
 import "./SARTaskingPipeline.css";
 import { ARTIFACTS_BASE } from "../lib/api";
 
@@ -43,17 +45,12 @@ export function SARTaskingPipeline({ liveEvent, historicalSceneId, tasking }: { 
 
   // Historical scene (incident detail page) opens the pipeline in review mode.
   useEffect(() => {
-    if (!historicalSceneId) return;
-    setIsOpen(true);
-    setActiveScene(historicalSceneId);
-    setCurrentStep("sar_complete");
-    const baseUrl = `${ARTIFACTS_BASE}/` + historicalSceneId.replace(/\//g, "_");
-    setImages({
-      raw: baseUrl + "/raw_image.png",
-      filtered: baseUrl + "/filtered_image.png",
-      cfar: baseUrl + "/bright_target_mask.png",
-      final: baseUrl + "/cleaned_mask.png",
-    });
+    if (historicalSceneId) {
+      setIsOpen(true);
+      setActiveScene(historicalSceneId);
+      setCurrentStep("sar_complete");
+      setImages(sarArtifactUrls(historicalSceneId));
+    }
   }, [historicalSceneId]);
 
   useEffect(() => {
@@ -66,14 +63,7 @@ export function SARTaskingPipeline({ liveEvent, historicalSceneId, tasking }: { 
       setCurrentStep(data.step);
 
       if (data.step === "sar_complete") {
-        // Fetch images
-        const baseUrl = `${ARTIFACTS_BASE}/` + data.scene_id;
-        setImages({
-          raw: baseUrl + "/raw_image.png",
-          filtered: baseUrl + "/filtered_image.png",
-          cfar: baseUrl + "/bright_target_mask.png",
-          final: baseUrl + "/cleaned_mask.png"
-        });
+        setImages(sarArtifactUrls(data.scene_id));
       } else if (data.step === "sar_tasking") {
         // reset images on new tasking
         setImages({});
@@ -179,19 +169,19 @@ export function SARTaskingPipeline({ liveEvent, historicalSceneId, tasking }: { 
           <div className="artifacts-grid">
             <div className="artifact-item">
               <div className="artifact-label">Raw SAR</div>
-              <img src={images.raw} alt="Raw SAR" onError={(e) => (e.currentTarget.style.display = 'none')} />
+              <SARArtifactPreview url={images.raw} alt="Raw SAR" filename={SAR_ARTIFACT_FILENAMES.raw} />
             </div>
             <div className="artifact-item">
               <div className="artifact-label">Despeckled</div>
-              <img src={images.filtered} alt="Despeckled" onError={(e) => (e.currentTarget.style.display = 'none')} />
+              <SARArtifactPreview url={images.filtered} alt="Despeckled" filename={SAR_ARTIFACT_FILENAMES.filtered} />
             </div>
             <div className="artifact-item">
               <div className="artifact-label">CFAR Mask</div>
-              <img src={images.cfar} alt="CFAR" onError={(e) => (e.currentTarget.style.display = 'none')} />
+              <SARArtifactPreview url={images.cfar} alt="CFAR" filename={SAR_ARTIFACT_FILENAMES.cfar} />
             </div>
             <div className="artifact-item">
               <div className="artifact-label">Final Polygon</div>
-              <img src={images.final} alt="Polygon" onError={(e) => (e.currentTarget.style.display = 'none')} />
+              <SARArtifactPreview url={images.final} alt="Polygon" filename={SAR_ARTIFACT_FILENAMES.final} />
             </div>
           </div>
         )}

@@ -217,19 +217,32 @@ app = FastAPI(
 # CORS: configurable via ALLOWED_ORIGINS (comma-separated). Default "*" keeps
 # local development working; when a wildcard is used, credentials are disabled
 # per the CORS spec (allow_credentials=True + "*" is an invalid combination).
-_allowed_origins = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "*").split(",") if o.strip()]
+_allowed_origins = [
+    o.strip().rstrip("/")
+    for o in os.environ.get("ALLOWED_ORIGINS", os.environ.get("DASHBOARD_ORIGINS", "*")).split(",")
+    if o.strip()
+]
 _wildcard = "*" in _allowed_origins
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins,
     allow_credentials=not _wildcard,
-    allow_methods=["*"], allow_headers=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 from fastapi.staticfiles import StaticFiles
-import os
-if os.path.exists("/data/artifacts"):
-    app.mount("/artifacts", StaticFiles(directory="/data/artifacts"), name="artifacts")
+
+# StaticFiles delegates PNG MIME detection to Starlette/mimetypes and streams
+# bytes directly from the shared read-only artifact volume. check_dir=False
+# keeps the route registered during a clean local startup before any scene has
+# created the directory; absent files then correctly produce an HTTP 404.
+_artifact_root = os.environ.get("SAR_ARTIFACT_ROOT", "/data/artifacts")
+app.mount(
+    "/artifacts",
+    StaticFiles(directory=_artifact_root, check_dir=False),
+    name="artifacts",
+)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -489,7 +502,7 @@ async def get_vessel_detail(mmsi: int):
     # Determine Verdict
     verdict = {"status": "none", "spill_id": None}
     if sar_tasking_row:
-        if sar_tasking_row["status"] == "pending":
+        if sar_tasking_row["status"] in ("pending", "processing"):
             verdict["status"] = "pending"
         elif sar_tasking_row["status"] == "fulfilled":
             # Check if this vessel has a spill attributed to it

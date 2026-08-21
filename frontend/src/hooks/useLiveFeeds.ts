@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { API_BASE } from "../lib/api";
 
 export type FeedItem = { time: string; kind: "spill" | "risk" | "dark" | "system" | "sar"; title: string; body: string };
 export type ConnectionStatus = "connecting" | "connected" | "reconnecting" | "offline";
@@ -24,10 +25,8 @@ export function useLiveFeeds(historicalFeed: FeedItem[] = []) {
 
     function connect() {
       if (closedPermanently) return;
-      // Same-origin WebSocket through the reverse proxy (/live -> gateway).
-      // Falls back to the explicit gateway port when opened without the proxy.
-      const wsProto = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const wsUrl = `${wsProto}//${window.location.host}/live`;
+      const wsUrl = new URL("/live", API_BASE);
+      wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
       setStatus((s) => (s === "connected" ? s : "connecting"));
       ws = new WebSocket(wsUrl);
 

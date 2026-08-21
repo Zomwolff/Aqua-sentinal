@@ -369,6 +369,7 @@ services:
       <<: *backend-env
       SERVICE_NAME: api-gateway
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-*}
+      DASHBOARD_ORIGINS: ${DASHBOARD_ORIGINS:-http://localhost:3000}
     volumes:
       - ./shared/spatial:/app/shared/spatial:ro
       - sar-scene-artifacts:/data/artifacts:ro
@@ -376,7 +377,10 @@ services:
       - "8015:8000"
 
   dashboard:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: ${VITE_API_URL:-}
     restart: unless-stopped
     depends_on:
       api-gateway:
