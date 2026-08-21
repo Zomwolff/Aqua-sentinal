@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import maplibregl, { Map as MapLibreMap } from "maplibre-gl";
-import { fetchVessels, fetchIncidents, fetchIncidentDetail } from "./lib/api";
+import { fetchVessels, fetchIncidents, fetchIncidentDetail, fetchVesselDetail } from "./lib/api";
 import { useLiveFeeds } from "./hooks/useLiveFeeds";
 import { SARTaskingPipeline } from "./components/SARTaskingPipeline";
 import { IncidentDetailsPage } from "./components/IncidentDetailsPage";
+import { VesselDetailsPage } from "./components/VesselDetailsPage";
 
 type Severity = "critical" | "high" | "medium" | "low";
 type Vessel = { id: string; name: string; mmsi: string; type: string; risk: Severity; score: number; coordinates: [number, number]; detail: string };
@@ -28,7 +29,8 @@ function App() {
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [activeCount, setActiveCount] = useState(0);
   const [historicalSceneId, setHistoricalSceneId] = useState<string | null>(null);
-  const [viewMode, setViewMode] = useState<"map" | "incident">("map");
+  const [viewMode, setViewMode] = useState<"map" | "incident" | "vessel">("map");
+  const [vesselDetail, setVesselDetail] = useState<any>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -281,10 +283,30 @@ function App() {
     });
   }, [layers]);
 
-  const focusIncident = (incident: Incident) => {
+  const focusIncident = async (incident: Incident) => {
     setSelectedIncident(incident);
+    setSelectedVessel(null);
     setViewMode("incident");
     mapRef.current?.flyTo({ center: incident.coordinates, zoom: 8.4, duration: 1000 });
+    try {
+       const data = await fetchIncidentDetail(incident.rawId);
+       setIncidentDetail(data);
+    } catch (e) {
+       console.error(e);
+    }
+  };
+
+  const focusFlaggedVessel = async (vessel: Vessel) => {
+    setSelectedVessel(vessel);
+    setSelectedIncident(null);
+    setViewMode("vessel");
+    mapRef.current?.flyTo({ center: vessel.coordinates, zoom: 8.4, duration: 1000 });
+    try {
+       const data = await fetchVesselDetail(vessel.mmsi);
+       setVesselDetail(data);
+    } catch (e) {
+       console.error(e);
+    }
   };
 
   return (
@@ -311,10 +333,28 @@ function App() {
                 {feed.map((item, idx) => <div className="feed-item" key={idx}><span className={`feed-icon ${item.kind}`}>{item.kind === "spill" ? "!" : item.kind === "risk" ? "↗" : item.kind === "dark" ? "◌" : "·"}</span><div><b>{item.title}</b><p>{item.body}</p></div><time>{item.time}</time></div>)}
              </div>
           </section>
-          <section className="side-section incidents-section">
+           <section className="side-section incidents-section">
              <div className="section-head"><div><small>MONITORED EVENTS</small><h2>Active incidents <em>{incidents.length < 10 ? `0${incidents.length}` : incidents.length}</em></h2></div><button className="text-button">View archive <span>→</span></button></div>
              <div className="incident-list">
                 {incidents.map((incident) => <button className={`incident-row ${selectedIncident?.id === incident.id ? "selected" : ""}`} key={incident.id} onClick={() => focusIncident(incident)}><span className={`severity-bar ${incident.severity}`} /><div className="incident-copy"><div><b>{incident.id}</b><span className={`severity-pill ${incident.severity}`}>{severityLabel[incident.severity]}</span></div><strong>{incident.title}</strong><p>{incident.location} <span>·</span> {incident.age}</p><small>Top attribution: <b>{incident.vessel}</b></small></div><span className="row-arrow">↗</span></button>)}
+             </div>
+          </section>
+          
+          <section className="side-section flagged-vessels-section">
+             <div className="section-head"><div><small>RISK INTELLIGENCE</small><h2>Flagged Vessels <em>{vessels.filter(v => v.risk === "critical" || v.risk === "high").length}</em></h2></div></div>
+             <div className="incident-list">
+                {vessels.filter(v => v.risk === "critical" || v.risk === "high").map((vessel) => (
+                  <button className={`incident-row ${selectedVessel?.id === vessel.id && viewMode === "vessel" ? "selected" : ""}`} key={vessel.id} onClick={() => focusFlaggedVessel(vessel)}>
+                    <span className={`severity-bar ${vessel.risk}`} />
+                    <div className="incident-copy">
+                      <div><b>{vessel.mmsi}</b><span className={`severity-pill ${vessel.risk}`}>{severityLabel[vessel.risk]}</span></div>
+                      <strong>{vessel.name}</strong>
+                      <p>{vessel.type} <span>·</span> Score: {vessel.score}/100</p>
+                      <small>SAR Tasking: <b>{vessel.risk === "critical" ? "Requested" : "None"}</b></small>
+                    </div>
+                    <span className="row-arrow">↗</span>
+                  </button>
+                ))}
              </div>
           </section>
         </aside>
@@ -331,7 +371,18 @@ function App() {
          />
       )}
       
-      {selectedVessel && (
+      {viewMode === "vessel" && (
+         <VesselDetailsPage 
+            vesselDetail={vesselDetail} 
+            onBack={() => {
+               setViewMode("map");
+               setSelectedVessel(null);
+               setVesselDetail(null);
+            }} 
+         />
+      )}
+      
+      {selectedVessel && viewMode !== "vessel" && (
       <div className="vessel-popover">
          <button onClick={() => setSelectedVessel(null)} aria-label="Close vessel details">×</button>
          <small>VESSEL PROFILE</small>

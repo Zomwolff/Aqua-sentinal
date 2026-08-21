@@ -18,7 +18,8 @@ export function useLiveFeeds(historicalFeed: FeedItem[] = []) {
     let isSubscribed = true;
 
     function connect() {
-      ws = new WebSocket("ws://localhost:8015/live");
+      const wsUrl = `ws://${window.location.hostname}:8015/live`;
+      ws = new WebSocket(wsUrl);
       
       ws.onmessage = (event) => {
         if (!isSubscribed) return;

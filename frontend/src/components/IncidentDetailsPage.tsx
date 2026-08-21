@@ -12,7 +12,7 @@ export function IncidentDetailsPage({ incidentDetail, onBack }: Props) {
   useEffect(() => {
     if (incidentDetail?.incident?.source_image_id) {
       const sceneId = incidentDetail.incident.source_image_id;
-      const baseUrl = "http://localhost:8015/artifacts/" + sceneId;
+      const baseUrl = `http://${window.location.hostname}:8015/artifacts/` + sceneId;
       setImages({
         raw: baseUrl + "/raw_image.png",
         filtered: baseUrl + "/filtered_image.png",

@@ -41,7 +41,7 @@ export function SARTaskingPipeline({ liveEvent, historicalSceneId }: Props) {
       setIsOpen(true);
       setActiveScene(historicalSceneId);
       setCurrentStep("sar_complete");
-      const baseUrl = "http://localhost:8015/artifacts/" + historicalSceneId;
+      const baseUrl = `http://${window.location.hostname}:8015/artifacts/` + historicalSceneId;
       setImages({
         raw: baseUrl + "/raw_image.png",
         filtered: baseUrl + "/filtered_image.png",
@@ -62,7 +62,7 @@ export function SARTaskingPipeline({ liveEvent, historicalSceneId }: Props) {
 
       if (data.step === "sar_complete") {
         // Fetch images
-        const baseUrl = "http://localhost:8015/artifacts/" + data.scene_id;
+        const baseUrl = `http://${window.location.hostname}:8015/artifacts/` + data.scene_id;
         setImages({
           raw: baseUrl + "/raw_image.png",
           filtered: baseUrl + "/filtered_image.png",

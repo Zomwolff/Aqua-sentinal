@@ -454,12 +454,22 @@ async def get_vessel_detail(mmsi: int):
     if trust and trust.get("timestamp"):
         trust["timestamp"] = trust["timestamp"].isoformat()
 
+    # SAR Tasking Request
+    sar_tasking_row = await pool.fetchrow(
+        "SELECT id, status, requested_at, scene_id FROM satellite_tasking_requests "
+        "WHERE mmsi=$1 ORDER BY requested_at DESC LIMIT 1", str(mmsi)
+    )
+    sar_tasking = None
+    if sar_tasking_row:
+        sar_tasking = {k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in dict(sar_tasking_row).items()}
+
     return {
         "vessel": vessel,
         "features": features,
         "risk": risk,
         "anomalies": anomalies,
         "trust": trust,
+        "sar_tasking": sar_tasking,
     }
 
 
