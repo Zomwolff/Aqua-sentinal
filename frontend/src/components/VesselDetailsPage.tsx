@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import "./IncidentDetailsPage.css";
-import { ARTIFACTS_BASE, SAR_ARTIFACT_FILENAMES, sarArtifactUrls, type SarArtifactKey } from "../lib/api";
+import { fetchIncidentDetail, SAR_ARTIFACT_FILENAMES, sarArtifactUrls, type SarArtifactKey } from "../lib/api";
 import { SARArtifactPreview } from "./SARArtifactPreview";
 
 interface Props {
@@ -23,6 +23,9 @@ export function VesselDetailsPage({ vesselDetail, onBack, liveEvent }: Props) {
   const [images, setImages] = useState<Partial<Record<SarArtifactKey, string>>>({});
   const [liveStep, setLiveStep] = useState<string | null>(null);
   const [cacheBuster, setCacheBuster] = useState<number>(Date.now());
+  const [incidentReport, setIncidentReport] = useState<any>(null);
+  const [reportLoading, setReportLoading] = useState(false);
+  const [reportError, setReportError] = useState<string | null>(null);
 
   useEffect(() => {
     const tasking = vesselDetail?.sar_tasking;
@@ -40,6 +43,30 @@ export function VesselDetailsPage({ vesselDetail, onBack, liveEvent }: Props) {
       setCacheBuster(Date.now());
     }
   }, [liveEvent, vesselDetail]);
+
+  // Once this vessel is attributed to a spill, load the backend-computed
+  // intelligence report for the independently scrollable left rail.
+  useEffect(() => {
+    const spillId = vesselDetail?.verdict?.spill_id;
+    let cancelled = false;
+    setIncidentReport(null);
+    setReportError(null);
+    if (!spillId) return;
+
+    setReportLoading(true);
+    fetchIncidentDetail(String(spillId))
+      .then((detail) => {
+        if (!cancelled) setIncidentReport(detail?.intelligence_report || null);
+      })
+      .catch((error) => {
+        if (!cancelled) setReportError(error instanceof Error ? error.message : "Incident report unavailable");
+      })
+      .finally(() => {
+        if (!cancelled) setReportLoading(false);
+      });
+
+    return () => { cancelled = true; };
+  }, [vesselDetail?.verdict?.spill_id]);
 
   if (!vesselDetail) {
     return (
@@ -196,6 +223,94 @@ export function VesselDetailsPage({ vesselDetail, onBack, liveEvent }: Props) {
                 <div style={{ color: "#a0a0a0", fontWeight: 700, fontSize: "16px" }}>NO TASKING REQUESTED</div>
                 <div style={{ color: "#8a968f", fontSize: "12px", opacity: 0.8 }}>No SAR tasking has been requested for this vessel.</div>
               </div>
+            )}
+          </div>
+
+          <div className="idp-card incident-intelligence-card">
+            <h3>Oil Spill Incident</h3>
+            {vesselDetail.verdict?.status === "no_spill_detected" ? (
+              <>
+                <div className="incident-summary-grid">
+                  <div><label>Severity</label><strong className="report-low">NONE</strong></div>
+                  <div><label>Detection Result</label><strong>CLEAR</strong></div>
+                  <div><label>Detected Spill Area</label><strong>0.00 km²</strong></div>
+                  <div><label>Ecological Risk</label><strong>NOT ASSESSED</strong></div>
+                </div>
+
+                <div className="incident-report-section">
+                  <h4>Probable Source</h4>
+                  <div className="idp-empty-state">Not applicable — no spill candidate was detected.</div>
+                </div>
+
+                <div className="incident-report-section">
+                  <h4>Spill Forecast</h4>
+                  <div className="idp-empty-state">Not generated — there is no detected spill geometry to forecast.</div>
+                </div>
+
+                <div className="incident-report-section">
+                  <h4>Recommended Actions</h4>
+                  <ol className="report-action-list">
+                    <li>Continue routine AIS monitoring for this vessel.</li>
+                    <li>Request follow-up SAR only if the vessel risk remains elevated or new evidence appears.</li>
+                  </ol>
+                </div>
+
+                <small className="report-provenance">Derived from the completed SAR tasking result; no spill evidence was detected in the monitored area.</small>
+              </>
+            ) : vesselDetail.verdict?.status !== "spill_detected" ? (
+              <div className="idp-empty-state">Incident intelligence will appear after SAR processing is completed.</div>
+            ) : reportLoading ? (
+                <div className="idp-empty-state">Calculating incident intelligence…</div>
+              ) : reportError ? (
+                <div className="idp-empty-state">{reportError}</div>
+              ) : incidentReport ? (
+                <>
+                  <div className="incident-summary-grid">
+                    <div><label>Severity</label><strong className={`report-${String(incidentReport.assessment?.severity || "unknown").toLowerCase()}`}>{incidentReport.assessment?.severity || "UNKNOWN"}</strong></div>
+                    <div><label>Confidence</label><strong>{incidentReport.assessment?.detection_confidence_percent ?? "—"}%</strong></div>
+                    <div><label>Spill Area</label><strong>{incidentReport.assessment?.spill_area_km2 != null ? `${Number(incidentReport.assessment.spill_area_km2).toFixed(2)} km²` : "—"}</strong></div>
+                    <div><label>Ecological Risk</label><strong>{incidentReport.assessment?.ecological_risk?.level || "UNKNOWN"}</strong></div>
+                  </div>
+
+                  <div className="incident-report-section">
+                    <h4>Probable Source</h4>
+                    <div className="source-share-list">
+                      {(incidentReport.probable_sources || []).map((source: any, index: number) => (
+                        <div className="source-share-row" key={`${source.mmsi || "unknown"}-${index}`}>
+                          <span>{source.vessel_name || (source.mmsi ? `MMSI ${source.mmsi}` : "Unknown")}</span>
+                          <b>{source.relative_likelihood_percent ?? 0}%</b>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="incident-report-section">
+                    <h4>Spill Forecast</h4>
+                    <div className="forecast-timeline">
+                      {(incidentReport.spill_forecast?.timeline_hours || [0]).map((hours: number, index: number) => (
+                        <React.Fragment key={`${hours}-${index}`}>
+                          {index > 0 && <span>→</span>}
+                          <b>{hours === 0 ? "NOW" : `+${Number(hours)}h`}</b>
+                        </React.Fragment>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="incident-report-section">
+                    <h4>Recommended Actions</h4>
+                    {(incidentReport.recommended_actions || []).length > 0 ? (
+                      <ol className="report-action-list">
+                        {incidentReport.recommended_actions.map((item: any) => (
+                          <li key={item.order}>{item.action}</li>
+                        ))}
+                      </ol>
+                    ) : <div className="idp-empty-state">Actions are still being calculated.</div>}
+                  </div>
+
+                  <small className="report-provenance">Computed from SAR, spatial-risk, AIS attribution, and drift-model records. Missing evidence is not fabricated.</small>
+                </>
+              ) : (
+                <div className="idp-empty-state">Incident analysis is still being generated.</div>
             )}
           </div>
         </div>

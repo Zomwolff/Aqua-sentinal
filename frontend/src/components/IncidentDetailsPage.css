@@ -155,7 +155,11 @@
   flex-direction: column;
   gap: 20px;
   overflow-y: auto;
+  overflow-x: hidden;
+  min-height: 0;
   padding-right: 8px;
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
 }
 
 .idp-sidebar::-webkit-scrollbar {
@@ -165,6 +169,28 @@
   background: rgba(255, 255, 255, 0.1);
   border-radius: 4px;
 }
+
+.incident-intelligence-card { flex-shrink: 0; }
+.incident-summary-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.incident-summary-grid > div { background: rgba(15, 23, 42, .68); border: 1px solid rgba(255,255,255,.04); border-radius: 7px; padding: 11px; min-width: 0; }
+.incident-summary-grid label { display: block; color: #8290a3; font-size: 10px; margin-bottom: 6px; }
+.incident-summary-grid strong { color: #e8edf5; font: 13px monospace; overflow-wrap: anywhere; }
+.incident-summary-grid .report-critical { color: #fb7185; }
+.incident-summary-grid .report-high { color: #fb923c; }
+.incident-summary-grid .report-moderate { color: #facc15; }
+.incident-summary-grid .report-low { color: #34d399; }
+.incident-report-section { border-top: 1px solid rgba(255,255,255,.07); padding-top: 14px; }
+.incident-report-section h4 { margin: 0 0 10px; color: #cbd5e1; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+.source-share-list { display: flex; flex-direction: column; gap: 7px; }
+.source-share-row { display: flex; justify-content: space-between; gap: 12px; color: #b8c3d2; font-size: 11px; }
+.source-share-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.source-share-row b { color: #60a5fa; font-family: monospace; flex-shrink: 0; }
+.forecast-timeline { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; color: #6b7c91; font: 10px monospace; }
+.forecast-timeline b { color: #dbe4ef; }
+.report-action-list { margin: 0; padding-left: 19px; color: #b8c3d2; font-size: 11px; line-height: 1.55; }
+.report-action-list li { margin-bottom: 8px; padding-left: 3px; }
+.report-action-list li::marker { color: #fb7185; font-family: monospace; }
+.report-provenance { color: #68778a; font-size: 9px; line-height: 1.5; }
 
 .idp-card {
   background: rgba(30, 41, 59, 0.4);

@@ -55,6 +55,8 @@ import redis.asyncio as aioredis
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.incident_report import build_incident_report
+
 sys.path.insert(0, "/app")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -1125,7 +1127,9 @@ async def get_spill_incident(spill_id: str):
     # Forecast polygons (incl. model confidence + version for the UI)
     forecast_rows = await pool.fetch(
         """
-        SELECT id, horizon_hours,
+        SELECT id, horizon_hours, forecast_time,
+               ST_X(ST_Centroid(geom)) AS predicted_lon,
+               ST_Y(ST_Centroid(geom)) AS predicted_lat,
                ST_AsGeoJSON(geom) AS geometry, generated_at,
                confidence, model_version
         FROM forecasts WHERE spill_id = $1 ORDER BY horizon_hours ASC
@@ -1166,6 +1170,9 @@ async def get_spill_incident(spill_id: str):
         "attribution": attribution,
         "forecasts": forecasts,
         "recommendations": recommendations,
+        "intelligence_report": build_incident_report(
+            incident, severity, attribution, forecasts, recommendations
+        ),
     }
 
 
