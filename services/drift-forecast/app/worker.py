@@ -72,7 +72,8 @@ async def _fetch_weather(
         SELECT wind_speed_kmh, wind_direction_deg,
                current_speed_ms, current_direction_deg
         FROM environmental_conditions
-        WHERE timestamp BETWEEN $3 - INTERVAL '3 hours' AND $3 + INTERVAL '3 hours'
+        WHERE timestamp BETWEEN $3::timestamptz - INTERVAL '3 hours'
+                            AND $3::timestamptz + INTERVAL '3 hours'
         ORDER BY geom <-> ST_SetSRID(ST_MakePoint($2, $1), 4326)
         LIMIT 1
         """,
@@ -80,7 +81,7 @@ async def _fetch_weather(
     )
     if row:
         return {
-            "wind_speed_ms":    float((row["wind_speed_kmh"] or 0) / 3.6),
+            "wind_speed_ms":    float(row["wind_speed_kmh"] or 0) / 3.6,
             "wind_dir_deg":     float(row["wind_direction_deg"] or 0),
             "current_speed_ms": float(row["current_speed_ms"] or 0),
             "current_dir_deg":  float(row["current_direction_deg"] or 0),
@@ -104,8 +105,8 @@ async def _fetch_forcing_series(
                current_speed_ms, current_direction_deg
         FROM environmental_conditions
         WHERE geom IS NOT NULL
-          AND timestamp BETWEEN $3 - ($4 || ' hours')::INTERVAL
-                            AND $3 + ($5 || ' hours')::INTERVAL
+          AND timestamp BETWEEN $3::timestamptz - ($4 || ' hours')::INTERVAL
+                            AND $3::timestamptz + ($5 || ' hours')::INTERVAL
           AND ST_DWithin(
               geom::geography,
               ST_SetSRID(ST_MakePoint($2, $1), 4326)::geography,

@@ -93,7 +93,11 @@ def _normalise_upload(source_path: Path, output_path: Path, latitude: float, lon
         if src.width * src.height > _MAX_RASTER_PIXELS:
             raise ValueError("The SAR image is too large; maximum raster size is 100 megapixels.")
         width, height = src.width, src.height
-        image = src.read(1).astype("float32")
+        if not src.crs and src.count >= 3:
+            rgb = src.read((1, 2, 3)).astype("float32")
+            image = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+        else:
+            image = src.read(1).astype("float32")
         if not np.isfinite(image).any():
             raise ValueError("The SAR image contains no usable pixels.")
 
@@ -102,6 +106,7 @@ def _normalise_upload(source_path: Path, output_path: Path, latitude: float, lon
                 raise ValueError("Uploaded GeoTIFFs must use EPSG:4326 coordinates.")
             transform = src.transform
             geolocation = "embedded_geotiff"
+            radiometry = "embedded_values"
         else:
             # Plain image uploads have no map coordinates. Anchor their centre
             # on the selected vessel using the Sentinel-1 10 m pixel spacing.
@@ -115,6 +120,21 @@ def _normalise_upload(source_path: Path, output_path: Path, latitude: float, lon
                 y_size,
             )
             geolocation = "vessel_position_anchor"
+
+            finite_values = image[np.isfinite(image)]
+            # PNG/JPEG SAR products normally contain display intensities rather
+            # than calibrated VV backscatter. Preserve already-dB rasters, but
+            # map display imagery robustly onto a documented proxy dB range so
+            # the existing darkness score is not fed incompatible 0..255 data.
+            if float(np.min(finite_values)) < 0.0 and float(np.percentile(finite_values, 98)) <= 20.0:
+                radiometry = "provided_db_values"
+            else:
+                low, high = np.percentile(finite_values, (2.0, 98.0))
+                if not np.isfinite(low) or not np.isfinite(high) or high <= low:
+                    raise ValueError("The SAR image has insufficient intensity variation for analysis.")
+                scaled = np.clip((image - float(low)) / float(high - low), 0.0, 1.0)
+                image = (-30.0 + 40.0 * scaled).astype("float32")
+                radiometry = "display_intensity_to_db_proxy"
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with rasterio.open(
@@ -131,7 +151,12 @@ def _normalise_upload(source_path: Path, output_path: Path, latitude: float, lon
         ) as dst:
             dst.write(image, 1)
 
-    return {"width": int(width), "height": int(height), "geolocation": geolocation}
+    return {
+        "width": int(width),
+        "height": int(height),
+        "geolocation": geolocation,
+        "radiometry": radiometry,
+    }
 
 
 @app.post("/upload/{mmsi}", status_code=202)
@@ -188,6 +213,7 @@ async def upload_sar(mmsi: int, image: UploadFile = File(...)):
             "source": "user_upload",
             "original_filename": filename,
             "geolocation": raster_info["geolocation"],
+            "radiometry": raster_info["radiometry"],
             "note": "User-provided SAR raster submitted through the dashboard",
         }
         tasking_id = await pool.fetchval(
@@ -210,6 +236,7 @@ async def upload_sar(mmsi: int, image: UploadFile = File(...)):
             "resolution": 10,
             "mmsi": str(vessel["mmsi"]),
             "geolocation": raster_info["geolocation"],
+            "radiometry": raster_info["radiometry"],
         }
         redis = await get_redis()
         await publish_to_stream(redis, "sar.clean", {
@@ -223,6 +250,7 @@ async def upload_sar(mmsi: int, image: UploadFile = File(...)):
             "mmsi": str(vessel["mmsi"]),
             "status": "processing",
             "geolocation": raster_info["geolocation"],
+            "radiometry": raster_info["radiometry"],
         }
     except HTTPException:
         raise

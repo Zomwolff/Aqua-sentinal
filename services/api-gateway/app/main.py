@@ -508,8 +508,20 @@ async def get_vessel_detail(mmsi: int):
         if sar_tasking_row["status"] in ("pending", "processing"):
             verdict["status"] = "pending"
         elif sar_tasking_row["status"] == "fulfilled":
-            # Check if this vessel has a spill attributed to it
-            attr_row = await pool.fetchrow(
+            # A manual upload is explicitly associated with this tasking request.
+            # Prefer the processed scene verdict even when the attribution model
+            # cannot find an AIS position close enough to nominate a vessel.
+            scene_spill = None
+            if sar_tasking_row["scene_id"]:
+                scene_spill = await pool.fetchrow(
+                    "SELECT id AS spill_id FROM spill_incidents "
+                    "WHERE source_image_id=$1 "
+                    "ORDER BY confidence DESC, detected_at DESC LIMIT 1",
+                    sar_tasking_row["scene_id"],
+                )
+
+            # Retain attribution as a fallback for automatically tasked scenes.
+            attr_row = scene_spill or await pool.fetchrow(
                 "SELECT ar.spill_id FROM attribution_results ar "
                 "JOIN vessels v ON v.id = ar.vessel_id "
                 "WHERE v.mmsi=$1 ORDER BY ar.computed_at DESC LIMIT 1", str(mmsi)

@@ -113,10 +113,13 @@ async def _get_or_create_spill_incident(
         )
 
     centroid_from_geom_sql = f"ST_Centroid({geom_sql})"
-    lat_expr = f"ST_Y({centroid_from_geom_sql})"
-    lon_expr = f"ST_X({centroid_from_geom_sql})"
+    # Keep the typed payload coordinates as a defensive fallback. Explicit
+    # casts are required in the GeoJSON branch because asyncpg otherwise sees
+    # $2/$3 as untyped parameters even though geometry supplies the centroid.
+    lat_expr = f"COALESCE(ST_Y({centroid_from_geom_sql}), $2::double precision)"
+    lon_expr = f"COALESCE(ST_X({centroid_from_geom_sql}), $3::double precision)"
     # Geodesic area of the actual polygon (m^2) — never trust a payload number.
-    area_expr = f"ST_Area({geom_sql}::geography) / 1000000.0"
+    area_expr = f"COALESCE(ST_Area({geom_sql}::geography) / 1000000.0, $5::double precision)"
 
     try:
         # NOTE: asyncpg requires len(args) == highest referenced $n.
@@ -225,7 +228,8 @@ async def _fetch_weather(
         """
         SELECT wind_speed_kmh, wind_direction_deg, current_speed_ms, current_direction_deg
         FROM environmental_conditions
-        WHERE timestamp BETWEEN $3 - INTERVAL '3 hours' AND $3 + INTERVAL '3 hours'
+        WHERE timestamp BETWEEN $3::timestamptz - INTERVAL '3 hours'
+                            AND $3::timestamptz + INTERVAL '3 hours'
         ORDER BY geom <-> ST_SetSRID(ST_MakePoint($2, $1), 4326)
         LIMIT 1
         """,
@@ -233,7 +237,7 @@ async def _fetch_weather(
     )
     if row:
         return {
-            "wind_speed_ms":      float((row["wind_speed_kmh"] or 0) / 3.6),
+            "wind_speed_ms":      float(row["wind_speed_kmh"] or 0) / 3.6,
             "wind_dir_deg":       float(row["wind_direction_deg"] or 0),
             "current_speed_ms":   float(row["current_speed_ms"] or 0),
             "current_dir_deg":    float(row["current_direction_deg"] or 0),
