@@ -25,7 +25,7 @@ export function useLiveFeeds(historicalFeed: FeedItem[] = []) {
 
     function connect() {
       if (closedPermanently) return;
-      const wsUrl = new URL("/live", API_BASE);
+      const wsUrl = new URL("/live", window.location.origin);
       wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
       setStatus((s) => (s === "connected" ? s : "connecting"));
       ws = new WebSocket(wsUrl);

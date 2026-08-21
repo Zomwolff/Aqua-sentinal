@@ -308,11 +308,11 @@ function App() {
       map.addSource("dark-vessels", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
       map.addLayer({
         id: "dark-vessel-halo", type: "circle", source: "dark-vessels",
-        paint: { "circle-radius": 16, "circle-color": "rgba(237,104,76,0.12)", "circle-stroke-color": "#ed684c", "circle-stroke-width": 1, "circle-stroke-opacity": 0.5 }
+        paint: { "circle-radius": 16, "circle-color": "rgba(237,104,76,0.08)", "circle-stroke-color": "#ed684c", "circle-stroke-width": 1, "circle-stroke-opacity": 0.3 }
       });
       map.addLayer({
         id: "dark-vessel-points", type: "circle", source: "dark-vessels",
-        paint: { "circle-radius": 6, "circle-color": "#ed684c", "circle-stroke-color": "#f5efe2", "circle-stroke-width": 1.5 }
+        paint: { "circle-radius": 5, "circle-color": "#192423", "circle-stroke-color": "#ed684c", "circle-stroke-width": 1.5 }
       });
 
       // Historical track of the selected vessel
