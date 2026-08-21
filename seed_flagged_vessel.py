@@ -1,14 +1,20 @@
 import asyncio
 import json
+import os
 import asyncpg
+
+# DEMO UTILITY: injects a clearly-labelled demo vessel (MMSI 999999999,
+# "FLAGGED-TANKER-Y") with a CRITICAL risk score so the SAR tasking pipeline
+# can be exercised end-to-end. This bypasses the live pipeline by design and
+# is NOT research data — the vessel name marks it as synthetic.
 
 async def seed():
     conn = await asyncpg.connect(
-        user="aqua_sentinel",
-        password="change_me",
-        host="localhost",
-        port=5433,
-        database="maritime_oilspill"
+        user=os.environ.get("POSTGRES_USER", "postgres"),
+        password=os.environ.get("POSTGRES_PASSWORD", "change_me"),
+        host=os.environ.get("POSTGRES_HOST", "localhost"),
+        port=int(os.environ.get("POSTGRES_PORT_HOST", "5433")),
+        database=os.environ.get("POSTGRES_DB", "maritime_oilspill")
     )
     
     mmsi = 999999999

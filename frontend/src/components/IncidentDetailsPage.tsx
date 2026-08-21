@@ -1,18 +1,20 @@
 import React, { useEffect, useState } from "react";
 import "./IncidentDetailsPage.css";
+import { ARTIFACTS_BASE } from "../lib/api";
 
 interface Props {
   incidentDetail: any; // Result from fetchIncidentDetail
   onBack: () => void;
+  onSpotVessel?: (mmsi: string) => void;
 }
 
-export function IncidentDetailsPage({ incidentDetail, onBack }: Props) {
+export function IncidentDetailsPage({ incidentDetail, onBack, onSpotVessel }: Props) {
   const [images, setImages] = useState<Record<string, string>>({});
 
   useEffect(() => {
     if (incidentDetail?.incident?.source_image_id) {
       const sceneId = incidentDetail.incident.source_image_id;
-      const baseUrl = `http://${window.location.hostname}:8015/artifacts/` + sceneId;
+      const baseUrl = `${ARTIFACTS_BASE}/` + sceneId.replace(/\//g, "_");
       setImages({
         raw: baseUrl + "/raw_image.png",
         filtered: baseUrl + "/filtered_image.png",
@@ -105,6 +107,15 @@ export function IncidentDetailsPage({ incidentDetail, onBack }: Props) {
                       <small>Distance: {(attr.distance_score * 100).toFixed(0)}%</small>
                       <small>Trajectory: {(attr.trajectory_score * 100).toFixed(0)}%</small>
                     </div>
+                    {onSpotVessel && attr.mmsi && (
+                      <button
+                        className="idp-spot-btn"
+                        onClick={() => onSpotVessel(String(attr.mmsi))}
+                        title="Center the map on this vessel's live position"
+                      >
+                        ◎ Spot vessel on map
+                      </button>
+                    )}
                   </li>
                 ))}
               </ul>

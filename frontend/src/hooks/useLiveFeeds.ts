@@ -1,10 +1,14 @@
 import { useEffect, useState } from "react";
 
 export type FeedItem = { time: string; kind: "spill" | "risk" | "dark" | "system" | "sar"; title: string; body: string };
+export type ConnectionStatus = "connecting" | "connected" | "reconnecting" | "offline";
+
+const RECONNECT_DELAY_MS = 3000;
 
 export function useLiveFeeds(historicalFeed: FeedItem[] = []) {
   const [feed, setFeed] = useState<FeedItem[]>([]);
   const [liveEvent, setLiveEvent] = useState<any>(null);
+  const [status, setStatus] = useState<ConnectionStatus>("connecting");
 
   useEffect(() => {
     if (historicalFeed.length > 0 && feed.length === 0) {
@@ -16,22 +20,32 @@ export function useLiveFeeds(historicalFeed: FeedItem[] = []) {
     let ws: WebSocket;
     let reconnectTimeout: ReturnType<typeof setTimeout>;
     let isSubscribed = true;
+    let closedPermanently = false;
 
     function connect() {
-      const wsUrl = `ws://${window.location.hostname}:8015/live`;
+      if (closedPermanently) return;
+      // Same-origin WebSocket through the reverse proxy (/live -> gateway).
+      // Falls back to the explicit gateway port when opened without the proxy.
+      const wsProto = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const wsUrl = `${wsProto}//${window.location.host}/live`;
+      setStatus((s) => (s === "connected" ? s : "connecting"));
       ws = new WebSocket(wsUrl);
-      
+
+      ws.onopen = () => {
+        if (isSubscribed) setStatus("connected");
+      };
+
       ws.onmessage = (event) => {
         if (!isSubscribed) return;
         try {
           const data = JSON.parse(event.data);
           if (data.type === "heartbeat") return;
-          
+
           setLiveEvent(data);
 
           const timeStr = new Date(data.at || Date.now()).toLocaleTimeString("en-US", { hour12: false, timeZone: "UTC" });
           let newFeedItem: FeedItem | null = null;
-          
+
           if (data.type === "anomaly") {
             newFeedItem = { time: timeStr, kind: "risk", title: `Anomaly: ${data.data?.anomaly_type}`, body: `Vessel ${data.data?.mmsi} - ${data.data?.severity} severity` };
           } else if (data.type === "risk") {
@@ -51,6 +65,21 @@ export function useLiveFeeds(historicalFeed: FeedItem[] = []) {
           } else if (data.type === "ais") {
              // Always show AIS telemetry in the feed
              newFeedItem = { time: timeStr, kind: "system", title: "Live AIS Ingestion", body: `Processing telemetry for MMSI ${data.data?.mmsi}` };
+          } else if (data.type === "ais_fetch") {
+             const received = data.data?.received;
+             const processed = data.data?.processed;
+             const trigger = data.data?.trigger === "manual" ? "Manual fetch" : "Scheduled poll";
+             newFeedItem = { time: timeStr, kind: "dark", title: "Live AIS Fetch Complete",
+               body: Number(received) < 0
+                 ? (data.data?.detail || "Continuous stream active")
+                 : `${trigger}: ${received ?? "?"} positions received, ${processed ?? "?"} ingested` };
+          } else if (data.type === "dark_vessel") {
+             newFeedItem = { time: timeStr, kind: "dark", title: "Dark Vessel Detected",
+               body: data.data?.matched_mmsi ? `Vessel ${data.data.matched_mmsi} went dark` : `Unidentified target at ${Number(data.data?.latitude || 0).toFixed(2)}N ${Number(data.data?.longitude || 0).toFixed(2)}E` };
+          } else if (data.type === "system") {
+             newFeedItem = { time: timeStr, kind: "system", title: "System Event", body: data.data?.detail || data.data?.event || "" };
+          } else if (data.type === "sts") {
+             newFeedItem = { time: timeStr, kind: "dark", title: "STS Encounter", body: `Vessels ${data.data?.vessel_a_mmsi} ↔ ${data.data?.vessel_b_mmsi}` };
           } else if (data.type === "sar_tasking") {
              const stepMap: Record<string, string> = {
                sar_tasking: "Acquiring SAR",
@@ -76,7 +105,13 @@ export function useLiveFeeds(historicalFeed: FeedItem[] = []) {
       };
 
       ws.onclose = () => {
-        if (isSubscribed) reconnectTimeout = setTimeout(connect, 3000);
+        if (!isSubscribed) return;
+        setStatus("reconnecting");
+        reconnectTimeout = setTimeout(connect, RECONNECT_DELAY_MS);
+      };
+
+      ws.onerror = () => {
+        try { ws.close(); } catch {}
       };
     }
 
@@ -84,10 +119,11 @@ export function useLiveFeeds(historicalFeed: FeedItem[] = []) {
 
     return () => {
       isSubscribed = false;
+      closedPermanently = true;
       if (ws) ws.close();
       clearTimeout(reconnectTimeout);
     };
   }, []);
 
-  return { feed, liveEvent };
+  return { feed, liveEvent, connectionStatus: status };
 }

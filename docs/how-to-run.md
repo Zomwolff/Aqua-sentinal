@@ -363,6 +363,7 @@ cat infra/postgres/migrate_stage2.sql | docker compose exec -T postgres psql -U 
 cat infra/postgres/migrate_stage3.sql | docker compose exec -T postgres psql -U postgres -d maritime_oilspill
 cat infra/postgres/migrate_stage4.sql | docker compose exec -T postgres psql -U postgres -d maritime_oilspill
 cat infra/postgres/migrate_stage5.sql | docker compose exec -T postgres psql -U postgres -d maritime_oilspill
+cat infra/postgres/migrate_research_fixes.sql | docker compose exec -T postgres psql -U postgres -d maritime_oilspill
 
 # Verify the full standard schema programmatically
 pip3 install -r scripts/requirements.txt
@@ -1429,9 +1430,52 @@ external dependencies. Gaps:
 - **The 4 skeleton services (8011–8014)** are heartbeat shells; their legacy tables are
   only filled by `scripts/seed_demo_data.py`.
 - **`simulator` does not push data** into the pipeline (it prints and sleeps).
-- **`secrets/gee-key.json` is required for the `data-ingestion` bind-mount** — if absent,
+- **`secret/gee-key.json` is required for the `data-ingestion` bind-mount** — if absent,
   compose fails to start that container even for AIS-only use. Provide the real key or a
   placeholder file before `docker compose up`.
 
 Do **not** claim the full stack works for real oil-spill detection: the implemented,
 verified path is the **synthetic demo** (Run B) and the **AIS/vessel pipeline**.
+
+---
+
+## Appendix — Dashboard features & integrity fixes
+
+### Dashboard additions
+- **"⟳ FETCH AIS" button** (header): POSTs `/api/ingest/ais/fetch-now`; the gateway
+  publishes on Redis channel `control.fetch_ais`, the ais-reader interrupts its polling
+  sleep and fetches immediately. Positions flow through the normal pipeline and appear
+  in the live signal feed (`ais` events) plus an `ais_fetch` summary event.
+- **Dark-vessel map layer**: `/api/dark-vessels` polled every 30 s + pushed live via
+  the `dark.vessel.events` WS relay; toggle with the "Dark vessels" legend chip.
+- **Protected zones from DB**: `/api/protected-areas` replaces the hardcoded polygon
+  once loaded (fallback polygon kept for offline dev).
+- **Vessel track**: opening a flagged vessel draws its 24 h GPS track and a real
+  speed sparkline in the popover; forecast-bar confidence now uses the drift model's
+  per-horizon confidence (and shows the model version, e.g. `2.0-particle-ensemble`).
+- **Spot vessel on map**: an opened incident's attribution list has a
+  "◎ Spot vessel on map" button that jumps back to the operational picture centered
+  on that vessel with its profile open.
+- **SAR tasking transparency**: vessel/incident pages show *why* SAR was tasked
+  (contributing risk factors captured at task time), per-stage progress with plain-
+  language descriptions, requested/completed timestamps, and honest statuses
+  (`PENDING → awaiting Sentinel-1 revisit…`, never a bare "PENDING").
+
+### Integrity fixes applied (see `infra/postgres/migrate_research_fixes.sql`)
+- Synthetic slick injection defaults to **off** (`INJECT_SYNTHETIC=false`) and rows are
+  labelled `source='synthetic'`; SAR mock fallback requires explicit opt-in
+  (`SAR_ALLOW_MOCK_FALLBACK=false`).
+- Lee despeckling now runs in the physically correct linear-power domain
+  (`domain="linear"`); CFAR threshold k is env-tunable (`SAR_CFAR_K`).
+- Drift forecasts use a Lagrangian particle ensemble with time-varying forcing when
+  environmental samples allow (`2.0-particle-ensemble`), falling back to the analytic
+  single-vector model otherwise.
+- Evidence-fusion forwards each candidate's **real geometry** (lat/lon/area/GeoJSON)
+  end-to-end; source-attribution stores the actual slick polygon instead of a generic
+  1 km circle.
+- Dark-vessel correlation consumes vectorized bright-target detections
+  (`sar.objects`) so uncorrelated SAR objects become dark-vessel candidates with real
+  coordinates; risk-engine dark-vessel matching uses `detected_at` + attribution fields.
+- Satellite tasking requests are deduplicated per vessel (`TASKING_DEDUP_HOURS`).
+- The GEE service-account key moved to `secret/gee-key.json` (git-ignored); no API keys
+  are hardcoded anywhere — provide them via `.env`.

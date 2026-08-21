@@ -52,3 +52,30 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .maplibregl-ctrl-group { background: #142221 !important; border: 1px solid var(--line) !important; border-radius: 0 !important; }.maplibregl-ctrl button { filter: invert(1); opacity: .65; }
 @keyframes pulse { 50% { box-shadow: 0 0 0 7px rgba(124, 201, 155, 0); } }
 @media (max-width: 1200px) { .workspace { grid-template-columns: minmax(0, 1fr) 330px; }.detail-panel { left: 18px; }.topbar { padding: 0 20px; }.header-center { display: none; } }
+
+/* ── Connection status states (live feed badge) ─────────────────────────── */
+.connection.connected { color: #85bd9a; border-color: rgba(133, 189, 154, .28); }
+.connection.connecting { color: #e5b75d; border-color: rgba(229, 183, 93, .35); }
+.connection.reconnecting { color: #ef9259; border-color: rgba(239, 146, 89, .35); animation: conn-blink 1.2s infinite; }
+.connection.offline { color: #ed684c; border-color: rgba(237, 104, 76, .4); }
+@keyframes conn-blink { 50% { opacity: .45; } }
+
+/* ── Manual live-AIS fetch button (header) ──────────────────────────────── */
+.ais-fetch-btn { border: 1px solid #3d5a52; background: rgba(24, 42, 40, .8); color: #9fd0b4; font: 10px 'DM Mono', monospace; letter-spacing: .08em; padding: 8px 12px; cursor: pointer; transition: all .2s ease; white-space: nowrap; }
+.ais-fetch-btn:hover:not(:disabled) { background: rgba(38, 68, 62, .85); color: #cfe9d8; border-color: #54786c; }
+.ais-fetch-btn:disabled { cursor: wait; color: #75847b; }
+.ais-fetch-btn.busy { border-color: rgba(229, 183, 93, .5); color: #e5b75d; }
+
+/* ── Threat intelligence section (STS / spoofing) ───────────────────────── */
+.intel-list { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; overflow-y: auto; }
+.intel-row { display: flex; gap: 10px; align-items: flex-start; padding: 8px 0; border-bottom: 1px solid #263635; }
+.intel-row:last-child { border-bottom: none; }
+.intel-row b { display: block; font-size: 10px; color: #dce5db; margin-bottom: 2px; }
+.intel-row p { margin: 0; font-size: 10px; color: #7f8d84; line-height: 1.4; }
+.intel-row.empty b { color: #7f8d84; }
+.intel-tag { flex-shrink: 0; font: 8px 'DM Mono', monospace; letter-spacing: .08em; padding: 4px 6px; border: 1px solid; margin-top: 2px; }
+.intel-tag.sts { color: #f4bd68; border-color: #8c7648; }
+.intel-tag.spoof { color: #ed684c; border-color: #8f5143; }
+
+/* ── Real sparkline in vessel popover ───────────────────────────────────── */
+.sparkline-svg { width: 100%; height: 34px; display: block; margin-top: 12px; background: rgba(127, 208, 232, .05); border: 1px solid #263635; }

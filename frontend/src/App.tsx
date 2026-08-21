@@ -1,17 +1,29 @@
 import { useEffect, useRef, useState } from "react";
 import maplibregl, { Map as MapLibreMap } from "maplibre-gl";
-import { fetchVessels, fetchIncidents, fetchIncidentDetail, fetchVesselDetail } from "./lib/api";
+import {
+  fetchVessels, fetchIncidents, fetchIncidentDetail, fetchVesselDetail,
+  fetchVesselTrack, triggerLiveAisFetch, fetchProtectedAreas,
+  fetchDarkVessels, fetchStsEvents, fetchSpoofingSuspects,
+} from "./lib/api";
 import { useLiveFeeds } from "./hooks/useLiveFeeds";
 import { SARTaskingPipeline } from "./components/SARTaskingPipeline";
 import { IncidentDetailsPage } from "./components/IncidentDetailsPage";
 import { VesselDetailsPage } from "./components/VesselDetailsPage";
 
 type Severity = "critical" | "high" | "medium" | "low";
-type Vessel = { id: string; name: string; mmsi: string; type: string; risk: Severity; score: number; coordinates: [number, number]; detail: string };
+type Vessel = { id: string; name: string; mmsi: string; type: string; risk: Severity; score: number; coordinates: [number, number]; detail: string; sar_status?: string | null; detected_spill_id?: string | null };
 type Incident = { rawId: string; id: string; title: string; location: string; age: string; severity: Severity; vessel: string; area: string; exposure: string; confidence: number; coordinates: [number, number] };
 type FeedItem = { time: string; kind: "spill" | "risk" | "dark" | "system"; title: string; body: string };
 
 const severityLabel: Record<Severity, string> = { critical: "Critical", high: "High", medium: "Medium", low: "Low" };
+
+// Fallback protected zone (Konkan sector) used only until the DB-backed
+// /protected-areas endpoint responds; replaced by real geometries on load.
+const PROTECTED_FALLBACK: any = {
+  type: "Feature",
+  geometry: { type: "Polygon", coordinates: [[[73.42, 15.02], [73.8, 15.0], [73.85, 15.3], [73.45, 15.38], [73.42, 15.02]]] },
+  properties: {},
+};
 
 function App() {
   const mapNode = useRef<HTMLDivElement>(null);
@@ -24,13 +36,19 @@ function App() {
   const [mapLoaded, setMapLoaded] = useState(false);
 
   const [historicalFeed, setHistoricalFeed] = useState<FeedItem[]>([]);
-  const { feed, liveEvent } = useLiveFeeds(historicalFeed);
+  const { feed, liveEvent, connectionStatus } = useLiveFeeds(historicalFeed);
   const [vessels, setVessels] = useState<Vessel[]>([]);
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [activeCount, setActiveCount] = useState(0);
   const [historicalSceneId, setHistoricalSceneId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<"map" | "incident" | "vessel">("map");
   const [vesselDetail, setVesselDetail] = useState<any>(null);
+  const [aisFetching, setAisFetching] = useState(false);
+  const [protectedAreas, setProtectedAreas] = useState<any[]>([]);
+  const [darkVessels, setDarkVessels] = useState<any[]>([]);
+  const [intelSts, setIntelSts] = useState<any[]>([]);
+  const [intelSpoof, setIntelSpoof] = useState<any[]>([]);
+  const [trackPoints, setTrackPoints] = useState<{ lon: number; lat: number; speed: number | null }[]>([]);
 
   useEffect(() => {
     let mounted = true;
@@ -125,6 +143,10 @@ function App() {
             };
             return updated;
         });
+        // Keep the open vessel's track/sparkline current.
+        if (selectedVessel && String(liveEvent.data.mmsi) === selectedVessel.mmsi && liveEvent.data.speed_knots !== undefined) {
+            setTrackPoints(prev => [...prev, { lon: Number(liveEvent.data.lon), lat: Number(liveEvent.data.lat), speed: liveEvent.data.speed_knots === "" ? null : Number(liveEvent.data.speed_knots) }].slice(-60));
+        }
     } else if (liveEvent.type === "risk") {
         setVessels(curr => {
             const idx = curr.findIndex(v => v.mmsi === String(liveEvent.data.mmsi));
@@ -137,8 +159,31 @@ function App() {
             };
             return updated;
         });
+    } else if (liveEvent.type === "dark_vessel") {
+        // A new dark-vessel detection arrived — refresh the layer data.
+        fetchDarkVessels(24).then((d: any) => setDarkVessels(d.dark_vessels || [])).catch(() => {});
+    } else if (liveEvent.type === "ais_fetch") {
+        // Fetch cycle completed — the button can be re-enabled.
+        setAisFetching(false);
     }
   }, [liveEvent]);
+
+  // Reference layers & intelligence panels: dark vessels / STS / spoofing
+  // refresh on a slow poll; protected areas load once (they are static).
+  useEffect(() => {
+    let mounted = true;
+    fetchProtectedAreas()
+      .then((d: any) => { if (mounted) setProtectedAreas(d.protected_areas || []); })
+      .catch(() => {});
+    const loadIntel = () => {
+      fetchDarkVessels(24).then((d: any) => { if (mounted) setDarkVessels(d.dark_vessels || []); }).catch(() => {});
+      fetchStsEvents(48).then((d: any) => { if (mounted) setIntelSts(d.events || d.sts_events || []); }).catch(() => {});
+      fetchSpoofingSuspects(0.5).then((d: any) => { if (mounted) setIntelSpoof(d.suspects || []); }).catch(() => {});
+    };
+    loadIntel();
+    const timer = setInterval(loadIntel, 30000);
+    return () => { mounted = false; clearInterval(timer); };
+  }, []);
 
   // Keep selectedVessel in sync with vessels array updates
   useEffect(() => {
@@ -224,6 +269,7 @@ function App() {
       attributionControl: { compact: true },
     });
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "bottom-right");
+    map.addControl(new maplibregl.ScaleControl({ maxWidth: 120, unit: "nautical" }), "bottom-left");
     mapRef.current = map;
     map.on("load", () => {
       map.addSource("navigation-grid", { type: "geojson", data: { type: "FeatureCollection" as const, features: [
@@ -254,9 +300,38 @@ function App() {
         } 
       }, "vessel-points");
 
-      map.addSource("protected", { type: "geojson", data: { type: "Feature", geometry: { type: "Polygon", coordinates: [[[73.42, 15.02], [73.8, 15.0], [73.85, 15.3], [73.45, 15.38], [73.42, 15.02]]] }, properties: {} } });
+      map.addSource("protected", { type: "geojson", data: PROTECTED_FALLBACK });
       map.addLayer({ id: "protected-fill", type: "fill", source: "protected", paint: { "fill-color": "#4e9a91", "fill-opacity": 0.16 } });
       map.addLayer({ id: "protected-outline", type: "line", source: "protected", paint: { "line-color": "#66b9a7", "line-width": 1, "line-dasharray": [3, 3] } });
+
+      // Dark-vessel detections (AIS-gap analysis + SAR correlation)
+      map.addSource("dark-vessels", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+      map.addLayer({
+        id: "dark-vessel-halo", type: "circle", source: "dark-vessels",
+        paint: { "circle-radius": 16, "circle-color": "rgba(237,104,76,0.12)", "circle-stroke-color": "#ed684c", "circle-stroke-width": 1, "circle-stroke-opacity": 0.5 }
+      });
+      map.addLayer({
+        id: "dark-vessel-points", type: "circle", source: "dark-vessels",
+        paint: { "circle-radius": 6, "circle-color": "#ed684c", "circle-stroke-color": "#f5efe2", "circle-stroke-width": 1.5 }
+      });
+
+      // Historical track of the selected vessel
+      map.addSource("vessel-track", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+      map.addLayer({
+        id: "vessel-track-line", type: "line", source: "vessel-track",
+        paint: { "line-color": "#7fd0e8", "line-width": 2, "line-opacity": 0.85 }
+      });
+      map.addLayer({
+        id: "vessel-track-dots", type: "circle", source: "vessel-track",
+        paint: { "circle-radius": 2.5, "circle-color": "#7fd0e8", "circle-opacity": 0.7 }
+      });
+
+      // Pulsing highlight ring around a spotted/selected vessel
+      map.addSource("spot-highlight", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+      map.addLayer({
+        id: "spot-highlight-ring", type: "circle", source: "spot-highlight",
+        paint: { "circle-radius": 22, "circle-color": "transparent", "circle-stroke-color": "#f4bd68", "circle-stroke-width": 2.5, "circle-stroke-opacity": 0.9 }
+      });
       
       map.on("click", "vessel-points", (event) => {
         const feature = event.features?.[0];
@@ -283,11 +358,93 @@ function App() {
             map.setLayoutProperty(id, "visibility", (id.startsWith("vessel") ? layers.vessels : layers.protected) ? "visible" : "none");
         }
     });
+    // Dark-vessel layer toggle now controls the real detection markers.
+    ["dark-vessel-points", "dark-vessel-halo"].forEach((id) => {
+        if (map.getLayer(id)) {
+            map.setLayoutProperty(id, "visibility", layers.dark ? "visible" : "none");
+        }
+    });
   }, [layers]);
+
+  // Push fetched protected areas into the map (replaces the fallback polygon
+  // once real geometries arrive; keeps the fallback if the endpoint is empty).
+  useEffect(() => {
+    if (!mapLoaded || !mapRef.current || protectedAreas.length === 0) return;
+    const src = mapRef.current.getSource("protected") as maplibregl.GeoJSONSource;
+    if (!src) return;
+    const features = protectedAreas
+      .filter((p: any) => p.geometry)
+      .map((p: any) => ({ type: "Feature", geometry: p.geometry, properties: { name: p.name, type: p.type } }));
+    if (features.length > 0) src.setData({ type: "FeatureCollection", features } as any);
+  }, [protectedAreas, mapLoaded]);
+
+  // Push dark-vessel detections into their layer.
+  useEffect(() => {
+    if (!mapLoaded || !mapRef.current) return;
+    const src = mapRef.current.getSource("dark-vessels") as maplibregl.GeoJSONSource;
+    if (!src) return;
+    src.setData({
+      type: "FeatureCollection",
+      features: darkVessels
+        .filter(d => d.latitude != null && d.longitude != null)
+        .map(d => ({
+          type: "Feature",
+          geometry: { type: "Point", coordinates: [Number(d.longitude), Number(d.latitude)] },
+          properties: { mmsi: d.matched_mmsi || "", sensor: d.sensor || "" },
+        })),
+    });
+  }, [darkVessels, mapLoaded]);
+
+  // Draw the selected vessel's historical track + spot-highlight ring.
+  useEffect(() => {
+    if (!mapLoaded || !mapRef.current) return;
+    const trackSrc = mapRef.current.getSource("vessel-track") as maplibregl.GeoJSONSource;
+    const spotSrc = mapRef.current.getSource("spot-highlight") as maplibregl.GeoJSONSource;
+    const validTrack = trackPoints.filter(p => Number.isFinite(p.lon) && Number.isFinite(p.lat));
+    if (trackSrc && selectedVessel && validTrack.length >= 2) {
+      trackSrc.setData({
+        type: "FeatureCollection",
+        features: [{
+          type: "Feature",
+          geometry: { type: "LineString", coordinates: validTrack.map(p => [p.lon, p.lat]) },
+          properties: {},
+        }],
+      });
+    } else if (trackSrc) {
+      trackSrc.setData({ type: "FeatureCollection", features: [] });
+    }
+    if (spotSrc && selectedVessel) {
+      spotSrc.setData({
+        type: "FeatureCollection",
+        features: [{
+          type: "Feature",
+          geometry: { type: "Point", coordinates: selectedVessel.coordinates },
+          properties: {},
+        }],
+      });
+    } else if (spotSrc) {
+      spotSrc.setData({ type: "FeatureCollection", features: [] });
+    }
+  }, [selectedVessel, trackPoints, mapLoaded]);
+
+  const loadVesselTrack = async (mmsi: string) => {
+    try {
+      const data = await fetchVesselTrack(mmsi, 24);
+      const points = (data.track || data.positions || []).map((p: any) => ({
+        lon: Number(p.lon ?? p.longitude),
+        lat: Number(p.lat ?? p.latitude),
+        speed: p.speed_knots != null && p.speed_knots !== "" ? Number(p.speed_knots) : null,
+      })).filter((p: any) => Number.isFinite(p.lon) && Number.isFinite(p.lat));
+      setTrackPoints(points);
+    } catch {
+      setTrackPoints([]);
+    }
+  };
 
   const focusIncident = async (incident: Incident) => {
     setSelectedIncident(incident);
     setSelectedVessel(null);
+    setTrackPoints([]);
     setViewMode("incident");
     mapRef.current?.flyTo({ center: incident.coordinates, zoom: 8.4, duration: 1000 });
     try {
@@ -303,6 +460,7 @@ function App() {
     setSelectedIncident(null);
     setViewMode("vessel");
     mapRef.current?.flyTo({ center: vessel.coordinates, zoom: 8.4, duration: 1000 });
+    loadVesselTrack(vessel.mmsi);
     try {
        const data = await fetchVesselDetail(vessel.mmsi);
        setVesselDetail(data);
@@ -311,28 +469,83 @@ function App() {
     }
   };
 
+  // "Spot this vessel on the map" from an opened incident: jump back to the
+  // operational picture centered on the attributed vessel with its popover.
+  const spotVesselOnMap = async (mmsi: string) => {
+    let vessel = vessels.find(v => v.mmsi === String(mmsi));
+    if (!vessel) {
+      try {
+        const d = await fetchVesselDetail(mmsi);
+        const lon = d.vessel?.last_lon;
+        const lat = d.vessel?.last_lat;
+        if (lon == null || lat == null) return;
+        vessel = {
+          id: `v-${mmsi}`,
+          name: d.vessel?.name || `Vessel ${mmsi}`,
+          mmsi: String(mmsi),
+          type: d.vessel?.vessel_type || "Unknown",
+          risk: ((d.risk?.tier || "LOW").toLowerCase()) as Severity,
+          score: Math.round(d.risk?.score || 0),
+          coordinates: [Number(lon), Number(lat)],
+          detail: "Located from incident attribution",
+        };
+        setVessels(curr => (curr.some(v => v.mmsi === vessel!.mmsi) ? curr : [...curr, vessel!]));
+      } catch {
+        return;
+      }
+    }
+    setSelectedIncident(null);
+    setIncidentDetail(null);
+    setSelectedVessel(vessel);
+    setViewMode("map");
+    mapRef.current?.flyTo({ center: vessel.coordinates, zoom: 9.2, duration: 1200 });
+  };
+
+  // Manual live-AIS fetch: the reader interrupts its polling sleep and the
+  // resulting positions stream into the live feed via /live.
+  const handleFetchAis = async () => {
+    if (aisFetching) return;
+    setAisFetching(true);
+    try { await triggerLiveAisFetch(); } catch { setAisFetching(false); }
+    // Re-enable after a grace period even if no ais_fetch event arrives
+    // (e.g. provider misconfigured), so the button never sticks disabled.
+    setTimeout(() => setAisFetching(false), 15000);
+  };
+
+  // Real model confidence for the selected forecast horizon (from the drift
+  // engine's per-horizon confidence field); falls back to the legacy formula
+  // only when no forecast rows exist yet.
+  const forecastsList = incidentDetail?.forecasts || [];
+  const activeForecast =
+    forecastsList.find((f: any) => Number(f.horizon_hours) === horizon) ||
+    (horizon === 0 ? forecastsList[0] : null);
+  const modelConfidence = activeForecast?.confidence != null
+    ? Math.round(Number(activeForecast.confidence) * 100)
+    : Math.round(Math.max(48, 92 - horizon / 2));
+
+  const connectionLabel = { connected: "CONNECTED", connecting: "CONNECTING", reconnecting: "RECONNECTING", offline: "OFFLINE" }[connectionStatus];
+
   return (
     <div className="app-shell">
       <header className="topbar">
         <div className="brand"><div className="brand-mark"><span /></div><div><strong>AQUA SENTINEL</strong><small>MARITIME INTELLIGENCE NETWORK</small></div></div>
         <div className="header-center"><span className="live-dot" /> <span>LIVE OPERATIONS</span><i /> <span className="muted">{new Date().toUTCString()}</span></div>
-        <div className="header-meta"><div><small>ACTIVE INCIDENTS</small><b>{activeCount < 10 ? `0${activeCount}` : activeCount}</b></div><div><small>VESSELS TRACKED</small><b>{vessels.length}</b></div><button className="icon-button" aria-label="Open settings">•••</button></div>
+        <div className="header-meta"><div><small>ACTIVE INCIDENTS</small><b>{activeCount < 10 ? `0${activeCount}` : activeCount}</b></div><div><small>VESSELS TRACKED</small><b>{vessels.length}</b></div><button className={`ais-fetch-btn ${aisFetching ? "busy" : ""}`} onClick={handleFetchAis} disabled={aisFetching} title="Trigger an immediate live-AIS poll; results appear in the live signal feed">{aisFetching ? "FETCHING…" : "⟳ FETCH AIS"}</button><button className="icon-button" aria-label="Open settings">•••</button></div>
       </header>
       <main className="workspace">
         <section className="map-pane">
           <div className="map-frame"><div ref={mapNode} className="map-container" /></div>
           <div className="map-vignette" />
           <div className="map-label map-title"><small>OPERATIONAL PICTURE</small><h1>Konkan Coast / Sector 04</h1><span>Live vessel telemetry and fused SAR intelligence</span></div>
-          <div className="map-legend"><small>LAYERS</small>{([['vessels', 'AIS vessels'], ['protected', 'Protected zones']] as const).map(([key, label]) => <button key={key} className={`legend-item ${layers[key as keyof typeof layers] ? "active" : ""}`} onClick={() => setLayers((state) => ({ ...state, [key]: !state[key as keyof typeof layers] }))}><span className={`legend-swatch ${key}`} />{label}</button>)}</div>
-          <div className="map-scale"><span className="scale-line" /><span>10 nm</span></div>
+          <div className="map-legend"><small>LAYERS</small>{([['vessels', 'AIS vessels'], ['dark', 'Dark vessels'], ['protected', 'Protected zones']] as const).map(([key, label]) => <button key={key} className={`legend-item ${layers[key as keyof typeof layers] ? "active" : ""}`} onClick={() => setLayers((state) => ({ ...state, [key]: !state[key as keyof typeof layers] }))}><span className={`legend-swatch ${key}`} />{label}</button>)}</div>
           {selectedIncident && <div className="coordinate">{selectedIncident.coordinates[1].toFixed(2)}° N &nbsp; {selectedIncident.coordinates[0].toFixed(2)}° E</div>}
           {(viewMode === "incident" || (viewMode === "vessel" && selectedVessel?.detected_spill_id)) && (
-            <div className="forecast-bar"><div><small>FORECAST HORIZON</small><strong>{horizon === 0 ? "NOW" : `+${horizon}H`}</strong></div><div className="horizon-track">{[0, 3, 6, 12, 24].map((value) => <button key={value} className={horizon === value ? "chosen" : ""} onClick={() => setHorizon(value)}><span>{value === 0 ? "Now" : `+${value}h`}</span></button>)}</div><div className="forecast-confidence"><small>MODEL CONFIDENCE</small><strong>{Math.max(48, 92 - horizon / 2)}%</strong></div></div>
+            <div className="forecast-bar"><div><small>FORECAST HORIZON</small><strong>{horizon === 0 ? "NOW" : `+${horizon}H`}</strong></div><div className="horizon-track">{[0, 3, 6, 12, 24].map((value) => <button key={value} className={horizon === value ? "chosen" : ""} onClick={() => setHorizon(value)}><span>{value === 0 ? "Now" : `+${value}h`}</span></button>)}</div><div className="forecast-confidence"><small>MODEL CONFIDENCE{activeForecast?.model_version ? ` · ${String(activeForecast.model_version)}` : ""}</small><strong>{modelConfidence}%</strong></div></div>
           )}
         </section>
         <aside className="sidebar">
           <section className="side-section feed-section">
-             <div className="section-head"><div><small>STREAM / 04</small><h2>Live signal feed</h2></div><span className="connection">CONNECTED</span></div>
+             <div className="section-head"><div><small>STREAM / 04</small><h2>Live signal feed</h2></div><span className={`connection ${connectionStatus}`}>{connectionLabel}</span></div>
              <div className="feed-list">
                 {feed.map((item, idx) => <div className="feed-item" key={idx}><span className={`feed-icon ${item.kind}`}>{item.kind === "spill" ? "!" : item.kind === "risk" ? "↗" : item.kind === "dark" ? "◌" : "·"}</span><div><b>{item.title}</b><p>{item.body}</p></div><time>{item.time}</time></div>)}
              </div>
@@ -365,31 +578,54 @@ function App() {
                       <span className="row-arrow">↗</span>
                     </button>
                   ))}
-               </div>
-            </section>
-          </div>
-        </aside>
+                </div>
+             </section>
+
+             <section className="side-section intel-section">
+                <div className="section-head"><div><small>THREAT INTELLIGENCE</small><h2>STS &amp; Spoofing <em>{intelSts.length + intelSpoof.length}</em></h2></div></div>
+                <div className="intel-list">
+                   {intelSts.slice(0, 3).map((e: any, i: number) => (
+                     <div className="intel-row" key={`sts-${i}`}>
+                       <span className="intel-tag sts">STS</span>
+                       <div><b>{String(e.vessel_a_mmsi)} ↔ {String(e.vessel_b_mmsi)}</b><p>{e.start_time ? new Date(e.start_time).toLocaleTimeString("en-US", { hour12: false, timeZone: "UTC" }) : ""} · {Number(e.duration_minutes || 0).toFixed(0)} min · {Number(e.confidence || 0).toFixed(2)} conf</p></div>
+                     </div>
+                   ))}
+                   {intelSpoof.slice(0, 3).map((s: any, i: number) => (
+                     <div className="intel-row" key={`spf-${i}`}>
+                       <span className="intel-tag spoof">SPOOF</span>
+                       <div><b>MMSI {s.mmsi}</b><p>trust {(s.rolling_trust_score ?? 1).toFixed?.(2) ?? s.rolling_trust_score} {s.flag ? `· flag ${s.flag}` : ""}{s.last_seen ? ` · seen ${new Date(s.last_seen).toLocaleTimeString("en-US", { hour12: false, timeZone: "UTC" })}` : ""}</p></div>
+                     </div>
+                   ))}
+                   {intelSts.length === 0 && intelSpoof.length === 0 && (
+                     <div className="intel-row empty"><div><b>No active STS or spoofing signals</b><p>Threat intelligence clear in the current window</p></div></div>
+                   )}
+                </div>
+             </section>
+           </div>
+         </aside>
       </main>
       
       {viewMode === "incident" && (
-         <IncidentDetailsPage 
-            incidentDetail={incidentDetail} 
+         <IncidentDetailsPage
+            incidentDetail={incidentDetail}
             onBack={() => {
                setViewMode("map");
                setSelectedIncident(null);
                setIncidentDetail(null);
-            }} 
+            }}
+            onSpotVessel={spotVesselOnMap}
          />
       )}
-      
+
       {viewMode === "vessel" && (
-         <VesselDetailsPage 
-            vesselDetail={vesselDetail} 
+         <VesselDetailsPage
+            vesselDetail={vesselDetail}
             onBack={() => {
                setViewMode("map");
                setSelectedVessel(null);
                setVesselDetail(null);
-            }} 
+            }}
+            liveEvent={liveEvent}
          />
       )}
       
@@ -416,12 +652,33 @@ function App() {
                 <span className="live-dot" style={{ background: "#e5b75d" }} /> SATELLITE TASKING REQUESTED
              </div>
          ) : null}
-         <div className="sparkline"><i /><i /><i /><i /><i /><i /><i /><i /></div>
-         <p className="vessel-detail">{selectedVessel.detail}</p>
+         {trackPoints.length >= 2 ? (
+           <svg className="sparkline-svg" viewBox="0 0 120 32" preserveAspectRatio="none">
+             <polyline
+               fill="none" stroke="#7fd0e8" strokeWidth="1.5"
+               points={(() => {
+                 const speeds = trackPoints.map(p => p.speed).filter(s => s != null) as number[];
+                 if (speeds.length < 2) return "";
+                 const max = Math.max(...speeds), min = Math.min(...speeds);
+                 const range = max - min || 1;
+                 const pts = trackPoints.map((p, i) => {
+                   const x = (i / (trackPoints.length - 1)) * 120;
+                   const y = 30 - (((p.speed ?? min) - min) / range) * 28;
+                   return `${x.toFixed(1)},${y.toFixed(1)}`;
+                 }).join(" ");
+                 return pts;
+               })()}
+             />
+             <text x="2" y="10" fontSize="7" fill="#7fd0e8">{trackPoints.filter(p => p.speed != null).slice(-1)[0]?.speed?.toFixed(1) ?? ""} kn</text>
+           </svg>
+         ) : (
+           <div className="sparkline"><i /><i /><i /><i /><i /><i /><i /><i /></div>
+         )}
+          <p className="vessel-detail">{selectedVessel.detail}</p>
       </div>
       )}
 
-      <SARTaskingPipeline liveEvent={liveEvent} historicalSceneId={historicalSceneId} />
+      <SARTaskingPipeline liveEvent={liveEvent} historicalSceneId={historicalSceneId} tasking={vesselDetail?.sar_tasking} />
     </div>
   );
 }

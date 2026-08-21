@@ -283,6 +283,25 @@ async def _process(record: Dict[str, Any], pool, redis) -> None:
         log.error("Process error for MMSI %s: %s", record.get("mmsi"), e)
 
 
+CONTROL_CHANNEL = "control.fetch_ais"
+FETCH_STATUS_STREAM = "ais.fetch.status"
+
+
+async def _publish_fetch_status(redis, *, trigger: str, received: int, processed: int,
+                                detail: str = "") -> None:
+    """Publish a fetch-cycle summary so the gateway/UI can show live progress."""
+    try:
+        await publish_to_stream(redis, FETCH_STATUS_STREAM, {
+            "at": datetime.now(timezone.utc).isoformat(),
+            "trigger": trigger,
+            "received": str(received),
+            "processed": str(processed),
+            "detail": detail,
+        })
+    except Exception as exc:
+        log.warning("Failed to publish %s: %s", FETCH_STATUS_STREAM, exc)
+
+
 async def _run_vesselapi(api_key: str, pool, redis) -> None:
     interval = max(15, int(os.environ.get("VESSELAPI_POLL_INTERVAL_SECONDS", "60")))
     bbox = _vesselapi_bbox_from_env()
@@ -290,6 +309,32 @@ async def _run_vesselapi(api_key: str, pool, redis) -> None:
         "VesselAPI polling enabled every %ss. Bbox: lat[%.2f-%.2f] lon[%.2f-%.2f].",
         interval, bbox["lat_bottom"], bbox["lat_top"], bbox["lon_left"], bbox["lon_right"],
     )
+
+    # Manual-fetch support: a message on control.fetch_ais interrupts the sleep
+    # and triggers an immediate poll cycle (UI "Fetch Live AIS" button).
+    trigger_event: asyncio.Event = asyncio.Event()
+    pubsub = None
+    try:
+        pubsub = redis.pubsub(ignore_subscribe_messages=True)
+        await pubsub.subscribe(CONTROL_CHANNEL)
+    except Exception as exc:
+        log.warning("Control channel subscribe failed (%s) — manual fetch disabled.", exc)
+
+    async def _control_listener() -> None:
+        if pubsub is None:
+            return
+        try:
+            async for msg in pubsub.listen():
+                if msg and msg.get("type") == "message":
+                    trigger_event.set()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("Control channel listener error: %s", exc)
+
+    listener_task = asyncio.create_task(_control_listener()) if pubsub else None
+
+    triggered = False
     while True:
         try:
             items = await asyncio.to_thread(_fetch_vesselapi_page, api_key)
@@ -299,12 +344,36 @@ async def _run_vesselapi(api_key: str, pool, redis) -> None:
                 if record:
                     processed += 1
                     await _process(record, pool, redis)
-            log.info("VesselAPI poll received %d positions; processed %d.", len(items), processed)
+            log.info(
+                "VesselAPI poll received %d positions; processed %d (%s).",
+                len(items), processed, "manual" if triggered else "scheduled",
+            )
+            await _publish_fetch_status(
+                redis,
+                trigger="manual" if triggered else "scheduled",
+                received=len(items),
+                processed=processed,
+            )
         except asyncio.CancelledError:
+            if listener_task:
+                listener_task.cancel()
             raise
         except Exception as exc:
             log.warning("VesselAPI poll failed: %s", exc)
-        await asyncio.sleep(interval)
+            await _publish_fetch_status(
+                redis, trigger="manual" if triggered else "scheduled",
+                received=0, processed=0, detail=str(exc),
+            )
+        triggered = False
+
+        # Interruptible sleep: wake early when a manual fetch is requested.
+        try:
+            await asyncio.wait_for(trigger_event.wait(), timeout=interval)
+            trigger_event.clear()
+            triggered = True
+            log.info("Manual AIS fetch requested — polling VesselAPI now.")
+        except asyncio.TimeoutError:
+            pass
 
 
 async def main() -> None:
@@ -328,6 +397,25 @@ async def main() -> None:
         return
 
     import websockets  # noqa
+
+    # In continuous-stream mode a manual fetch request cannot "poll again" —
+    # acknowledge it on the status stream so the UI feed reflects the action.
+    async def _control_ack() -> None:
+        try:
+            pubsub = redis.pubsub(ignore_subscribe_messages=True)
+            await pubsub.subscribe(CONTROL_CHANNEL)
+            async for msg in pubsub.listen():
+                if msg and msg.get("type") == "message":
+                    await _publish_fetch_status(
+                        redis, trigger="manual", received=-1, processed=0,
+                        detail="continuous stream active — live telemetry already flowing",
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("Control ack listener error: %s", exc)
+
+    ack_task = asyncio.create_task(_control_ack())
 
     subscription = _build_subscription(api_key)
     backoff = 5

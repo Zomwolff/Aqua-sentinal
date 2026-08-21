@@ -1,18 +1,31 @@
 import React, { useEffect, useState } from "react";
-import "./IncidentDetailsPage.css"; 
+import "./IncidentDetailsPage.css";
+import { ARTIFACTS_BASE } from "../lib/api";
 
 interface Props {
   vesselDetail: any;
   onBack: () => void;
+  liveEvent?: any;
 }
 
-export function VesselDetailsPage({ vesselDetail, onBack }: Props) {
+const SAR_STEPS = [
+  { id: "sar_tasking", label: "Acquiring SAR", detail: "Sentinel-1 scene selected over the vessel's position" },
+  { id: "sar_fetching", label: "Downloading Scene", detail: "GeoTIFF download via Google Earth Engine" },
+  { id: "sar_despeckling", label: "Despeckling Filter", detail: "Lee filter in linear-power domain" },
+  { id: "sar_cfar", label: "CFAR Object Detection", detail: "Dark-pixel anomaly detection" },
+  { id: "sar_morphology", label: "Morphological Cleaning", detail: "Opening/closing of the candidate mask" },
+  { id: "sar_polygonize", label: "Polygon Extraction", detail: "Connected components to spill polygons" },
+  { id: "sar_complete", label: "Spill Processing Complete", detail: "Candidates persisted and fused" },
+];
+
+export function VesselDetailsPage({ vesselDetail, onBack, liveEvent }: Props) {
   const [images, setImages] = useState<Record<string, string>>({});
+  const [liveStep, setLiveStep] = useState<string | null>(null);
 
   useEffect(() => {
     if (vesselDetail?.sar_tasking?.scene_id) {
       const sceneId = vesselDetail.sar_tasking.scene_id;
-      const baseUrl = `http://${window.location.hostname}:8015/artifacts/` + sceneId;
+      const baseUrl = `${ARTIFACTS_BASE}/` + sceneId.replace(/\//g, "_");
       setImages({
         raw: baseUrl + "/raw_image.png",
         filtered: baseUrl + "/filtered_image.png",
@@ -21,6 +34,15 @@ export function VesselDetailsPage({ vesselDetail, onBack }: Props) {
       });
     }
   }, [vesselDetail]);
+
+  // Track pipeline progress for THIS vessel's scene while it streams.
+  useEffect(() => {
+    if (!liveEvent || liveEvent.type !== "sar_tasking") return;
+    if (vesselDetail?.sar_tasking && liveEvent.data?.scene_id === vesselDetail.sar_tasking.scene_id) {
+      setLiveStep(liveEvent.data.step);
+      if (liveEvent.data.step === "sar_complete") setImages((prev) => ({ ...prev }));
+    }
+  }, [liveEvent, vesselDetail]);
 
   if (!vesselDetail) {
     return (
@@ -33,6 +55,33 @@ export function VesselDetailsPage({ vesselDetail, onBack }: Props) {
 
   const { vessel, risk, sar_tasking } = vesselDetail;
   const riskTier = risk?.tier?.toLowerCase() || 'low';
+
+  // Honest step state derivation: fulfilled -> all done; failed -> stopped;
+  // pending -> acquisition active; otherwise follow the live stream.
+  const isFulfilled = sar_tasking?.status === "fulfilled" || liveStep === "sar_complete";
+  const isFailed = sar_tasking?.status === "failed";
+  const currentIdx = (() => {
+    if (isFulfilled) return SAR_STEPS.length - 1;
+    if (isFailed) return -1;
+    if (liveStep) {
+      const idx = SAR_STEPS.findIndex((s) => s.id === liveStep);
+      if (idx >= 0) return idx;
+    }
+    if (sar_tasking) return 0; // pending: awaiting acquisition
+    return -1;
+  })();
+
+  const reasonFactors: any[] = Array.isArray(sar_tasking?.reason?.contributing_factors)
+    ? sar_tasking.reason.contributing_factors
+    : [];
+
+  const stageText = isFailed
+    ? "Acquisition failed — no mock fallback configured; a new request will be issued on next risk recomputation"
+    : isFulfilled
+      ? "Scene processed"
+      : sar_tasking
+        ? `Stage ${currentIdx + 1} of ${SAR_STEPS.length}: ${SAR_STEPS[currentIdx]?.label}`
+        : "";
 
   return (
     <div className="incident-details-page">
@@ -131,7 +180,18 @@ export function VesselDetailsPage({ vesselDetail, onBack }: Props) {
             ) : vesselDetail.verdict?.status === "pending" ? (
               <div style={{ padding: '16px', background: 'rgba(229, 183, 93, 0.1)', border: '1px solid rgba(229, 183, 93, 0.3)', borderRadius: '4px', marginTop: '10px' }}>
                 <div style={{ color: "#e5b75d", fontWeight: 700, fontSize: "16px", marginBottom: "4px" }}>SAR PENDING</div>
-                <div style={{ color: "#e8ede7", fontSize: "12px", opacity: 0.8 }}>Awaiting satellite tasking completion.</div>
+                <div style={{ color: "#e8ede7", fontSize: "12px", opacity: 0.8 }}>
+                  {sar_tasking?.requested_at
+                    ? `Tasking requested ${new Date(sar_tasking.requested_at).toLocaleTimeString("en-US", { hour12: false, timeZone: "UTC" })} UTC · awaiting Sentinel-1 revisit (orbit-dependent)`
+                    : "Awaiting satellite tasking completion."}
+                </div>
+                {reasonFactors.length > 0 && (
+                  <ul style={{ margin: "8px 0 0", paddingLeft: "16px", color: "#e8ede7", fontSize: "11px", opacity: 0.85 }}>
+                    {reasonFactors.map((f: any, i: number) => (
+                      <li key={i}><b>{String(f.factor).replace(/_/g, " ")}</b>{f.contribution != null ? ` — contributed ${Number(f.contribution).toFixed(1)} pts` : ""}</li>
+                    ))}
+                  </ul>
+                )}
               </div>
             ) : (
               <div style={{ padding: '16px', background: 'rgba(255, 255, 255, 0.05)', border: '1px solid rgba(255, 255, 255, 0.1)', borderRadius: '4px', marginTop: '10px' }}>
@@ -147,43 +207,87 @@ export function VesselDetailsPage({ vesselDetail, onBack }: Props) {
             <div className="idp-card full-height">
               <div className="sar-header-flex">
                 <h3>SAR Processing Pipeline</h3>
-                <span className="idp-id-badge">TASKING {sar_tasking.status?.toUpperCase()} | SCENE: {sar_tasking.scene_id}</span>
+                <span className="idp-id-badge">
+                  {isFailed ? "FAILED" : isFulfilled ? "FULFILLED" : "PENDING"}
+                  {" | SCENE: "}
+                  {sar_tasking.scene_id || "—"}
+                </span>
               </div>
-              
+
+              {/* Why this vessel was tasked */}
+              {reasonFactors.length > 0 && (
+                <div className="tasking-reason" style={{ marginBottom: "12px" }}>
+                  <div className="reason-title">Why SAR was tasked</div>
+                  <ul>
+                    {reasonFactors.map((f: any, i: number) => (
+                      <li key={i}>
+                        <b>{String(f.factor || "").replace(/_/g, " ")}</b>
+                        {f.contribution != null && <span className="reason-weight"> · contribution {Number(f.contribution).toFixed(1)}</span>}
+                        {f.description && <p>{String(f.description)}</p>}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {(sar_tasking.requested_at || stageText) && (
+                <div style={{ fontSize: "11px", opacity: 0.75, marginBottom: "10px" }}>
+                  {stageText}
+                  {sar_tasking.requested_at && <> · requested {new Date(sar_tasking.requested_at).toLocaleTimeString("en-US", { hour12: false, timeZone: "UTC" })} UTC</>}
+                  {sar_tasking.completed_at && <> · completed {new Date(sar_tasking.completed_at).toLocaleTimeString("en-US", { hour12: false, timeZone: "UTC" })} UTC</>}
+                </div>
+              )}
+
+              <div className="steps-container" style={{ margin: "0 0 12px" }}>
+                {SAR_STEPS.map((step, index) => {
+                  const isCompleted = index < currentIdx;
+                  const isActive = !isFulfilled && !isFailed && index === currentIdx && !(currentIdx === SAR_STEPS.length - 1 && !isFulfilled);
+                  return (
+                    <div key={step.id} className={`step-item ${isCompleted ? "completed" : (isActive || (isFulfilled && index === SAR_STEPS.length - 1)) ? "active" : "pending"}`}>
+                      <div className="step-circle"></div>
+                      <div className="step-copy">
+                        <span className="step-label">{step.label}</span>
+                        <small className="step-detail">{step.detail}</small>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
               <div className="idp-sar-grid">
                 <div className="sar-artifact">
                   <div className="sar-label">1. RAW SAR IMAGE</div>
                   <div className="sar-img-wrapper">
                     {images.raw ? (
-                      <img src={images.raw} alt="Raw SAR" />
-                    ) : <span className="sar-placeholder">PENDING</span>}
+                      <img src={images.raw} alt="Raw SAR" onError={(e) => (e.currentTarget.style.opacity = "0")} />
+                    ) : <span className="sar-placeholder">{isFailed ? "UNAVAILABLE" : isFulfilled ? "NOT RETAINED" : "AWAITING ACQUISITION"}</span>}
                   </div>
                 </div>
-                
+
                 <div className="sar-artifact">
                   <div className="sar-label">2. DESPECKLED FILTER</div>
                   <div className="sar-img-wrapper">
                     {images.filtered ? (
-                      <img src={images.filtered} alt="Despeckled" />
-                    ) : <span className="sar-placeholder">PENDING</span>}
+                      <img src={images.filtered} alt="Despeckled" onError={(e) => (e.currentTarget.style.opacity = "0")} />
+                    ) : <span className="sar-placeholder">{isFailed ? "UNAVAILABLE" : `STAGE ${Math.min(currentIdx + 1, 4)} OF 7`}</span>}
                   </div>
                 </div>
-                
+
                 <div className="sar-artifact">
                   <div className="sar-label">3. CFAR OBJECT DETECTION</div>
                   <div className="sar-img-wrapper">
                     {images.cfar ? (
-                      <img src={images.cfar} alt="CFAR Mask" />
-                    ) : <span className="sar-placeholder">PENDING</span>}
+                      <img src={images.cfar} alt="CFAR Mask" onError={(e) => (e.currentTarget.style.opacity = "0")} />
+                    ) : <span className="sar-placeholder">{isFailed ? "UNAVAILABLE" : `STAGE ${Math.min(Math.max(currentIdx - 2, 1), 4)} OF 7`}</span>}
                   </div>
                 </div>
-                
+
                 <div className="sar-artifact">
                   <div className="sar-label">4. CLEANED POLYGON</div>
                   <div className="sar-img-wrapper">
                     {images.final ? (
-                      <img src={images.final} alt="Polygon" />
-                    ) : <span className="sar-placeholder">PENDING</span>}
+                      <img src={images.final} alt="Polygon" onError={(e) => (e.currentTarget.style.opacity = "0")} />
+                    ) : <span className="sar-placeholder">{isFailed ? "UNAVAILABLE" : `STAGE ${Math.min(Math.max(currentIdx - 3, 1), 4)} OF 7`}</span>}
                   </div>
                 </div>
               </div>

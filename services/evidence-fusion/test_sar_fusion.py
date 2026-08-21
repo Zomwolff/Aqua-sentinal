@@ -205,9 +205,13 @@ async def _run(worker, payload, pool):
 
 class TestWorkerFusion:
     def _candidate_row(self, candidate_id="candidate-101"):
+        # Mirrors the extended candidate_lookup_sql(): centroid, geodesic area,
+        # GeoJSON geometry and acquisition time.
         return {
             "centroid_lon": 72.78195,
             "centroid_lat": 19.11805,
+            "area_m2": 2_500_000.0,
+            "geom_geojson": '{"type":"Polygon","coordinates":[[[72.78,19.11],[72.79,19.11],[72.79,19.12],[72.78,19.11]]]}',
             "acquisition_time": T0,
         }
 
@@ -227,6 +231,11 @@ class TestWorkerFusion:
         assert event["confidence"] == 0.63
         assert event["classification_label"] == "possible_oil_spill"
         assert event["correlated_vessel_id"] == 42
+        # Real candidate geometry must be forwarded to downstream consumers.
+        assert event["lat"] == 19.11805
+        assert event["lon"] == 72.78195
+        assert abs(event["area_km2"] - 2.5) < 1e-9
+        assert event["geom_geojson"].startswith('{"type":"Polygon"')
 
     def test_sar_with_no_nearby_vessel_still_fused(self):
         worker = _load_worker()

@@ -94,6 +94,7 @@ services:
       AIS_PROVIDER: none          # HTTP-only; actual AIS reading is done by ais-reader
       AISSTREAM_API_KEY: ${AISSTREAM_API_KEY:-}
       INJECT_SYNTHETIC: ${INJECT_SYNTHETIC:-false}
+      SAR_ALLOW_MOCK_FALLBACK: ${SAR_ALLOW_MOCK_FALLBACK:-false}
       # Earth Engine service-account credentials (GEE). The secret value is read
       # from .env (git-ignored); the key file is mounted read-only at runtime.
       GEE_SERVICE_ACCOUNT: ${GEE_SERVICE_ACCOUNT:-}
@@ -125,7 +126,7 @@ services:
       <<: *backend-env
       SERVICE_NAME: ais-reader
       AIS_PROVIDER: ${AIS_PROVIDER:-aisstream}
-      AISSTREAM_API_KEY: ${AISSTREAM_API_KEY:-8b2b46c7433daad5830de215061d33ca1a792f1a}
+      AISSTREAM_API_KEY: ${AISSTREAM_API_KEY:-}   # secret — provide via .env only
       VESSELAPI_API_KEY: ${VESSELAPI_API_KEY:-}
       VESSELAPI_BBOX_MIN_LAT: ${VESSELAPI_BBOX_MIN_LAT:-18.4}
       VESSELAPI_BBOX_MIN_LON: ${VESSELAPI_BBOX_MIN_LON:-71.5}
@@ -222,6 +223,7 @@ services:
       SAR_MIN_AREA_M2: ${SAR_MIN_AREA_M2:-}
       SAR_BRIGHT_TARGET_THRESHOLD: ${SAR_BRIGHT_TARGET_THRESHOLD:-}
       SAR_ARTIFACT_ROOT: ${SAR_ARTIFACT_ROOT:-/data/artifacts}
+      SAR_CFAR_K: ${SAR_CFAR_K:-2.5}
     # Override the default ./services/shared:/app/shared mount: the SAR service
     # needs the canonical top-level shared package (shared/spatial, shared/db)
     # together with the AIS-pipeline shared modules, merged into one /app/shared.
@@ -366,6 +368,7 @@ services:
     environment:
       <<: *backend-env
       SERVICE_NAME: api-gateway
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-*}
     volumes:
       - ./shared/spatial:/app/shared/spatial:ro
       - sar-scene-artifacts:/data/artifacts:ro

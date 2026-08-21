@@ -141,6 +141,8 @@ async def _alert_pusher():
         "spill.severity":           "$",
         "spill.response":           "$",
         "sar.tasking.events":       "$",
+        "dark.vessel.events":       "$",
+        "ais.fetch.status":         "$",
     }
     # Map stream name → WS event type
     _TYPE_MAP = {
@@ -154,6 +156,8 @@ async def _alert_pusher():
         "spill.severity":            "spill_severity",
         "spill.response":            "spill_response",
         "sar.tasking.events":        "sar_tasking",
+        "dark.vessel.events":        "dark_vessel",
+        "ais.fetch.status":          "ais_fetch",
     }
     log.info("Alert pusher started (watching %d streams).", len(last_ids))
     
@@ -210,9 +214,15 @@ app = FastAPI(
     version="1.0.0",
     lifespan=_lifespan,
 )
+# CORS: configurable via ALLOWED_ORIGINS (comma-separated). Default "*" keeps
+# local development working; when a wildcard is used, credentials are disabled
+# per the CORS spec (allow_credentials=True + "*" is an invalid combination).
+_allowed_origins = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "*").split(",") if o.strip()]
+_wildcard = "*" in _allowed_origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True,
+    allow_origins=_allowed_origins,
+    allow_credentials=not _wildcard,
     allow_methods=["*"], allow_headers=["*"],
 )
 
@@ -466,9 +476,10 @@ async def get_vessel_detail(mmsi: int):
     if trust and trust.get("timestamp"):
         trust["timestamp"] = trust["timestamp"].isoformat()
 
-    # SAR Tasking Request & Verdict
+    # SAR Tasking Request & Verdict (incl. the reasoning captured at task time)
     sar_tasking_row = await pool.fetchrow(
-        "SELECT id, status, requested_at, scene_id FROM satellite_tasking_requests "
+        "SELECT id, status, requested_at, scene_id, completed_at, risk_score, risk_tier, reason "
+        "FROM satellite_tasking_requests "
         "WHERE mmsi=$1 ORDER BY requested_at DESC LIMIT 1", str(mmsi)
     )
     sar_tasking = None
@@ -1098,11 +1109,12 @@ async def get_spill_incident(spill_id: str):
         for r in attr_rows
     ]
 
-    # Forecast polygons
+    # Forecast polygons (incl. model confidence + version for the UI)
     forecast_rows = await pool.fetch(
         """
         SELECT id, horizon_hours,
-               ST_AsGeoJSON(geom) AS geometry, generated_at
+               ST_AsGeoJSON(geom) AS geometry, generated_at,
+               confidence, model_version
         FROM forecasts WHERE spill_id = $1 ORDER BY horizon_hours ASC
         """,
         spill_id,
@@ -1237,6 +1249,103 @@ async def get_spill_recommendations(spill_id: str):
             for r in rows
         ],
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LIVE DATA TRIGGER + REFERENCE / DARK-VESSEL ENDPOINTS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/ingest/ais/fetch-now", tags=["Ingestion"])
+async def trigger_live_ais_fetch():
+    """
+    Request an immediate live-AIS poll from the ais-reader service.
+
+    The request is published on the `control.fetch_ais` Redis channel; the
+    reader interrupts its polling sleep, fetches from the configured provider
+    (VesselAPI / AISStream), and the resulting positions flow through the
+    normal pipeline — appearing in this gateway's /live WebSocket feed as
+    `ais` events plus a summary `ais_fetch` event.
+    """
+    redis = await _get_redis()
+    await redis.publish("control.fetch_ais", json.dumps({
+        "requested_by": "ui",
+        "at": datetime.now(timezone.utc).isoformat(),
+    }))
+    # Immediate UI feedback: the fetch has been requested.
+    await ws_manager.broadcast({
+        "type": "system",
+        "stream": "control",
+        "data": {"event": "ais_fetch_requested", "detail": "Manual live-AIS fetch requested"},
+        "at": datetime.now(timezone.utc).isoformat(),
+    })
+    return {
+        "status": "accepted",
+        "detail": "Live AIS fetch requested. Positions will appear in the live feed shortly.",
+        "at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.get("/protected-areas", tags=["Reference"])
+async def list_protected_areas():
+    """Protected maritime zones (marine protected areas, mangroves, ports…)
+    rendered as map layers and used by the severity engine."""
+    pool = await _get_pool()
+    rows = await pool.fetch("""
+        SELECT id, name, area_type AS type,
+               ST_AsGeoJSON(geom) AS geometry
+        FROM protected_areas
+        ORDER BY name ASC
+    """)
+    features = []
+    for r in rows:
+        rec = dict(r)
+        geometry = None
+        if rec.get("geometry"):
+            try:
+                geometry = json.loads(rec["geometry"])
+            except (TypeError, ValueError):
+                geometry = None
+        features.append({
+            "id": str(rec["id"]),
+            "name": rec.get("name"),
+            "type": rec.get("type"),
+            "geometry": geometry,
+        })
+    return {"count": len(features), "protected_areas": features}
+
+
+@app.get("/dark-vessels", tags=["DarkVessel"])
+async def list_dark_vessels(
+    since_hours: int = Query(24, ge=1, le=720),
+    limit: int = Query(200, le=1000),
+):
+    """Recent dark-vessel detections (AIS-gap analysis + SAR correlation)."""
+    pool = await _get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT dve.id, dve.detected_at, dve.latitude, dve.longitude,
+               dve.image_source, dve.sensor, dve.confidence,
+               dve.length_est_m, dve.matched_mmsi,
+               v.name AS matched_vessel_name
+        FROM dark_vessel_events dve
+        LEFT JOIN vessels v ON v.id = dve.matched_vessel_id
+        WHERE dve.detected_at >= NOW() - ($1 || ' hours')::INTERVAL
+        ORDER BY dve.detected_at DESC
+        LIMIT $2
+        """,
+        str(since_hours), limit,
+    )
+    result = []
+    for r in rows:
+        rec = dict(r)
+        rec["id"] = str(rec["id"])
+        if isinstance(rec.get("detected_at"), datetime):
+            rec["detected_at"] = rec["detected_at"].isoformat()
+        for key in ("confidence", "length_est_m"):
+            if rec.get(key) is not None:
+                rec[key] = float(rec[key])
+        result.append(rec)
+    return {"count": len(result), "dark_vessels": result}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

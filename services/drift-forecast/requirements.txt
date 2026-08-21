@@ -3,3 +3,4 @@ uvicorn[standard]
 redis[hiredis]
 asyncpg
 pydantic>=2.0
+numpy>=1.26

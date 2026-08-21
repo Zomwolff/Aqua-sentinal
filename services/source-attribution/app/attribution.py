@@ -22,11 +22,18 @@ ATTRIBUTION_SPATIAL_WINDOW_M  = float(os.environ.get("ATTRIBUTION_SPATIAL_WINDOW
 ATTRIBUTION_TEMPORAL_WINDOW_H = float(os.environ.get("ATTRIBUTION_TEMPORAL_WINDOW_H", 6.0))
 MODEL_VERSION = "1.1"
 
-W_DISTANCE   = 0.25
-W_TRAJECTORY = 0.25
-W_TIME       = 0.20
-W_BEHAVIOR   = 0.15
-W_WIND       = 0.15
+W_DISTANCE   = float(os.environ.get("ATTRIBUTION_W_DISTANCE", 0.25))
+W_TRAJECTORY = float(os.environ.get("ATTRIBUTION_W_TRAJECTORY", 0.25))
+W_TIME       = float(os.environ.get("ATTRIBUTION_W_TIME", 0.20))
+W_BEHAVIOR   = float(os.environ.get("ATTRIBUTION_W_BEHAVIOR", 0.15))
+W_WIND       = float(os.environ.get("ATTRIBUTION_W_WIND", 0.15))
+
+# Normalise so the score stays on [0,1] even if operators override weights.
+_TOTAL_W = W_DISTANCE + W_TRAJECTORY + W_TIME + W_BEHAVIOR + W_WIND
+if _TOTAL_W > 0:
+    W_DISTANCE, W_TRAJECTORY, W_TIME, W_BEHAVIOR, W_WIND = (
+        w / _TOTAL_W for w in (W_DISTANCE, W_TRAJECTORY, W_TIME, W_BEHAVIOR, W_WIND)
+    )
 
 
 def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:

@@ -131,3 +131,60 @@
   border: 1px solid rgba(255, 255, 255, 0.1);
   background: #000;
 }
+
+/* ── Step copy: label + explanation ───────────────────────────────────────── */
+.step-copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.step-detail {
+  font-size: 0.7rem;
+  color: #8a968f;
+  font-weight: 400;
+  margin-top: 2px;
+}
+.step-item.completed .step-detail { color: #6fae94; }
+.step-item.active .step-detail { color: #9db4d6; }
+
+.tasking-reason {
+  background: rgba(244, 189, 104, 0.07);
+  border: 1px solid rgba(244, 189, 104, 0.25);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+.tasking-reason .reason-title {
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #f4bd68;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.tasking-reason ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.tasking-reason li b {
+  font-size: 0.78rem;
+  text-transform: capitalize;
+  color: #efe9dc;
+}
+.tasking-reason .reason-weight { font-size: 0.7rem; color: #b8a06a; }
+.tasking-reason li p {
+  margin: 1px 0 0;
+  font-size: 0.72rem;
+  color: #a8b3ac;
+}
+
+.scene-id.tasking-status b.failed { color: #ed684c; }
+.scene-id.tasking-status b.pending { color: #e5b75d; }
+.scene-id.tasking-status b.ok { color: #76bc99; }

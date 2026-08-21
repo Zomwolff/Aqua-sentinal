@@ -2,6 +2,8 @@ import asyncio
 import json
 import asyncpg
 
+import random
+
 async def seed():
     conn = await asyncpg.connect(
         user="postgres",
@@ -12,18 +14,21 @@ async def seed():
     )
     
     print("Fetching a real vessel from the database...")
-    row = await conn.fetchrow("""
+    rows = await conn.fetch("""
         SELECT v.id as vessel_id, v.mmsi, p.latitude, p.longitude 
         FROM vessel_positions p 
         JOIN vessels v ON p.vessel_id = v.id 
+        WHERE p.latitude IS NOT NULL AND p.longitude IS NOT NULL
         ORDER BY p.timestamp DESC 
-        LIMIT 1
+        LIMIT 50
     """)
     
-    if not row:
+    if not rows:
         print("No vessels found with positions!")
         return
         
+    row = random.choice(rows)
+    
     vessel_id = row['vessel_id']
     mmsi = row['mmsi']
     lat = row['latitude']
