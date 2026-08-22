@@ -91,4 +91,11 @@ def dark_region_mask(
         threshold = 0.5 * (float(np.max(lower)) + median)
     else:
         threshold = threshold_otsu(lower)
+        
+    # A valid oil spill must have backscatter significantly darker than the median
+    # sea surface. If the Otsu threshold is too close to the median (e.g. < 2.0 dB difference),
+    # it is merely splitting uniform noise, so there is no distinct dark population.
+    if (median - float(threshold)) < 2.0:
+        return np.zeros_like(finite, dtype=bool)
+
     return finite & (values < float(threshold))

@@ -11,3 +11,6 @@ dist/
 node_modules/
 secret/
 secrets/
+venv/
+tiff_data/
+*.zip

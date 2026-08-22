@@ -112,21 +112,37 @@ def compute_shape_descriptors(candidate: Dict[str, Any], mask_region) -> Dict[st
     }
 
 
-def _internal_contrast(intensity: np.ndarray, dark_mask: np.ndarray) -> float:
-    """Coefficient of variation of backscatter inside the dark region.
+def _edge_gradient(intensity: np.ndarray, dark_mask: np.ndarray) -> float:
+    """Ratio of mean backscatter outside the dark region to inside the dark region.
 
-    Values near 0 mean the region is internally uniform (calm water). Returns
-    1.0 when there is no usable data so an empty patch is never mistaken for
-    calm water.
+    Values near 1.0 mean a diffuse boundary (wind shadow/calm water). High values
+    indicate a sharp drop in backscatter typical of true oil slicks. Returns
+    0.0 when there is no usable data.
     """
-    values = np.asarray(intensity, dtype=np.float64)[np.asarray(dark_mask, bool)]
-    finite = values[np.isfinite(values)]
-    if finite.size == 0:
-        return 1.0
-    mean = float(np.mean(finite))
-    if abs(mean) <= _EPS:
-        return 1.0
-    return float(np.std(finite)) / abs(mean)
+    from skimage.morphology import dilation, erosion, disk
+
+    dark = np.asarray(dark_mask, dtype=bool)
+    int_arr = np.asarray(intensity, dtype=np.float64)
+
+    dilated = dilation(dark, footprint=disk(3))
+    eroded = erosion(dark, footprint=disk(3))
+
+    boundary_outer = dilated & ~dark
+    boundary_inner = dark & ~eroded
+
+    val_outer = int_arr[boundary_outer]
+    val_inner = int_arr[boundary_inner]
+
+    val_outer_finite = val_outer[np.isfinite(val_outer)]
+    val_inner_finite = val_inner[np.isfinite(val_inner)]
+
+    if val_outer_finite.size == 0 or val_inner_finite.size == 0:
+        return 0.0
+
+    mean_outer = float(np.mean(val_outer_finite))
+    mean_inner = float(np.mean(val_inner_finite))
+
+    return mean_outer - mean_inner
 
 
 def is_likely_ship_shadow(
@@ -179,7 +195,7 @@ def is_likely_ship_shadow(
 def is_likely_calm_water(
     candidate: Dict[str, Any],
     mask_region,
-    contrast_threshold: float = 0.15,
+    max_edge_gradient: float = 1.5,
     *,
     dark_mask: Optional[np.ndarray] = None,
     min_area_px: Optional[int] = None,
@@ -188,7 +204,7 @@ def is_likely_calm_water(
     """True when a large, internally uniform, diffuse dark region looks like calm water.
 
     ``mask_region`` must provide the SAR intensity/backscatter values needed to
-    measure internal contrast (it is the intensity crop, NOT a boolean mask).
+    measure edge gradient (it is the intensity crop, NOT a boolean mask).
     ``dark_mask`` is explicitly required to segment the candidate's own pixels.
 
     Thresholds are explicit and configurable; no "oil is X m²" assumption is
@@ -196,7 +212,7 @@ def is_likely_calm_water(
     """
     if dark_mask is None:
         raise ValueError(
-            "dark_mask is required to measure internal contrast; it must be "
+            "dark_mask is required to measure edge gradient; it must be "
             "supplied explicitly."
         )
     dark = _as_bool2d("dark_mask", dark_mask)
@@ -216,7 +232,7 @@ def is_likely_calm_water(
     if descriptors["perimeter_area_ratio"] > max_perimeter_area_ratio:
         return False
 
-    return _internal_contrast(intensity, dark) <= float(contrast_threshold)
+    return _edge_gradient(intensity, dark) <= float(max_edge_gradient)
 
 
 def classify_candidate(
@@ -227,7 +243,7 @@ def classify_candidate(
     adjacency_px: int = 5,
     min_elongation: float = 2.0,
     min_bright_target_px: int = 3,
-    contrast_threshold: float = 0.15,
+    max_edge_gradient: float = 1.5,
     min_area_px: Optional[int] = None,
     max_perimeter_area_ratio: float = 0.8,
 ) -> str:
@@ -264,7 +280,7 @@ def classify_candidate(
     if is_likely_calm_water(
         candidate,
         mask_region["intensity"],
-        contrast_threshold=contrast_threshold,
+        max_edge_gradient=max_edge_gradient,
         dark_mask=mask_region["dark_mask"],
         min_area_px=min_area_px,
         max_perimeter_area_ratio=max_perimeter_area_ratio,

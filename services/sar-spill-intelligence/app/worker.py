@@ -246,7 +246,10 @@ async def _process_sar_message(
     scene_id = None
     try:
         if not isinstance(raster_path, str) or not raster_path:
-            raise ValueError("sar.clean message is missing raster_path.")
+            if "_init" in data:
+                return # Ignore old init messages
+            log.warning("sar.clean message is missing raster_path. Ignoring.")
+            return
 
         scene_metadata = _parse_scene_metadata(data.get("scene_metadata"))
         scene_id = scene_metadata.get("scene_id")
@@ -259,11 +262,11 @@ async def _process_sar_message(
         min_area_m2 = _min_area_m2_config()
         bright_threshold = _bright_target_threshold_config()
 
-        await redis.publish("sar.tasking.events", json.dumps({"scene_id": scene_id, "step": "sar_tasking"}))
+        await publish_to_stream(redis, "sar.tasking.events", {"scene_id": scene_id, "step": "sar_tasking"})
         await asyncio.sleep(0.5)
 
         # STEP 1: Fetching / Reading
-        await redis.publish("sar.tasking.events", json.dumps({"scene_id": scene_id, "step": "sar_fetching"}))
+        await publish_to_stream(redis, "sar.tasking.events", {"scene_id": scene_id, "step": "sar_fetching"})
         
         def _read_raster():
             with rasterio.open(raster_path) as dataset:
@@ -293,7 +296,7 @@ async def _process_sar_message(
         # STEP 2: Despeckling — intensity (linear-power) domain Lee filter;
         # speckle is multiplicative in power, so the Lee MMSE model is applied
         # there and the result converted back to dB.
-        await redis.publish("sar.tasking.events", json.dumps({"scene_id": scene_id, "step": "sar_despeckling"}))
+        await publish_to_stream(redis, "sar.tasking.events", {"scene_id": scene_id, "step": "sar_despeckling"})
         filtered_image = await asyncio.to_thread(lee_filter, working_image, 5, "linear")
         await asyncio.sleep(0.5)
 
@@ -302,14 +305,14 @@ async def _process_sar_message(
         # so it can be calibrated against real Mumbai Sentinel-1 scenes without
         # a code change.
         cfar_k = float(os.environ.get("SAR_CFAR_K", 2.5))
-        await redis.publish("sar.tasking.events", json.dumps({"scene_id": scene_id, "step": "sar_cfar"}))
+        await publish_to_stream(redis, "sar.tasking.events", {"scene_id": scene_id, "step": "sar_cfar"})
         dark_mask = await asyncio.to_thread(dark_region_mask, filtered_image)
         anomaly_mask = await asyncio.to_thread(cfar_detect, filtered_image, 3, 15, cfar_k)
         binary_mask = (dark_mask | anomaly_mask) & finite
         await asyncio.sleep(0.5)
 
         # STEP 3 Step A — morphological cleaning
-        await redis.publish("sar.tasking.events", json.dumps({"scene_id": scene_id, "step": "sar_morphology"}))
+        await publish_to_stream(redis, "sar.tasking.events", {"scene_id": scene_id, "step": "sar_morphology"})
         cleaned_mask = await asyncio.to_thread(
             clean_mask,
             binary_mask,
@@ -319,7 +322,7 @@ async def _process_sar_message(
         await asyncio.sleep(0.5)
 
         # STEP 3 Step B — connected-component polygonization
-        await redis.publish("sar.tasking.events", json.dumps({"scene_id": scene_id, "step": "sar_polygonize"}))
+        await publish_to_stream(redis, "sar.tasking.events", {"scene_id": scene_id, "step": "sar_polygonize"})
         candidates = await asyncio.to_thread(
             extract_candidates,
             mask=cleaned_mask,
@@ -411,7 +414,7 @@ async def _process_sar_message(
             scene_id,
         )
 
-        await redis.publish("sar.tasking.events", json.dumps({"scene_id": scene_id, "step": "sar_complete", "candidates": len(candidates)}))
+        await publish_to_stream(redis, "sar.tasking.events", {"scene_id": scene_id, "step": "sar_complete", "candidates": len(candidates)})
 
         STATE["scenes_processed"] += 1
         STATE["last_scene_id"] = scene_id

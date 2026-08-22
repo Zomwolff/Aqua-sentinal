@@ -119,7 +119,13 @@ export function useLiveFeeds(historicalFeed: FeedItem[] = []) {
     return () => {
       isSubscribed = false;
       closedPermanently = true;
-      if (ws) ws.close();
+      if (ws) {
+        ws.onopen = null;
+        ws.onmessage = null;
+        ws.onerror = null;
+        ws.onclose = null;
+        ws.close();
+      }
       clearTimeout(reconnectTimeout);
     };
   }, []);

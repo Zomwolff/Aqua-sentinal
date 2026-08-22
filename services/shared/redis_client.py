@@ -94,14 +94,7 @@ async def ensure_consumer_group(
 ) -> None:
     """
     Create a consumer group on the stream, starting from the beginning of time.
-    If the stream doesn't exist yet, create it with a dummy entry so XGROUP CREATE works.
-    Idempotent — safe to call multiple times.
     """
-    try:
-        # Create stream if it doesn't exist
-        await client.xadd(stream, {"_init": "1"}, maxlen=1)
-    except Exception:
-        pass
 
     try:
         await client.xgroup_create(stream, group, id="0", mkstream=True)

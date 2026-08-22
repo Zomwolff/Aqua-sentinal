@@ -63,14 +63,18 @@ def save_scene_artifact(
         v_min, v_max = np.nanpercentile(img, (2, 98))
         if v_max > v_min:
             img_norm = np.clip((img - v_min) / (v_max - v_min), 0, 1)
-            imsave(os.path.join(path, "raw_image.png"), (img_norm * 255).astype(np.uint8), check_contrast=False)
+        else:
+            img_norm = np.zeros_like(img, dtype=float)
+        imsave(os.path.join(path, "raw_image.png"), (img_norm * 255).astype(np.uint8), check_contrast=False)
 
     np.save(os.path.join(path, "filtered_image.npy"), np.asarray(filtered_image))
     img = np.asarray(filtered_image)
     v_min, v_max = np.nanpercentile(img, (2, 98))
     if v_max > v_min:
         img_norm = np.clip((img - v_min) / (v_max - v_min), 0, 1)
-        imsave(os.path.join(path, "filtered_image.png"), (img_norm * 255).astype(np.uint8), check_contrast=False)
+    else:
+        img_norm = np.zeros_like(img, dtype=float)
+    imsave(os.path.join(path, "filtered_image.png"), (img_norm * 255).astype(np.uint8), check_contrast=False)
 
     np.save(os.path.join(path, "cleaned_mask.npy"), np.asarray(cleaned_mask))
     imsave(os.path.join(path, "cleaned_mask.png"), (np.asarray(cleaned_mask) * 255).astype(np.uint8), check_contrast=False)

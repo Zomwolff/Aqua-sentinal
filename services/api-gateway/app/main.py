@@ -520,17 +520,26 @@ async def get_vessel_detail(mmsi: int):
                     sar_tasking_row["scene_id"],
                 )
 
-            # Retain attribution as a fallback for automatically tasked scenes.
-            attr_row = scene_spill or await pool.fetchrow(
-                "SELECT ar.spill_id FROM attribution_results ar "
-                "JOIN vessels v ON v.id = ar.vessel_id "
-                "WHERE v.mmsi=$1 ORDER BY ar.computed_at DESC LIMIT 1", str(mmsi)
-            )
-            if attr_row:
-                verdict["status"] = "spill_detected"
-                verdict["spill_id"] = str(attr_row["spill_id"])
+            # If the tasking explicitly requested a scene and it finished processing,
+            # its verdict is strictly based on whether a spill was detected IN THAT SCENE.
+            # Only use historical attributions as a fallback if no specific scene is tied to the request.
+            if sar_tasking_row["scene_id"]:
+                if scene_spill:
+                    verdict["status"] = "spill_detected"
+                    verdict["spill_id"] = str(scene_spill["spill_id"])
+                else:
+                    verdict["status"] = "no_spill_detected"
             else:
-                verdict["status"] = "no_spill_detected"
+                attr_row = await pool.fetchrow(
+                    "SELECT ar.spill_id FROM attribution_results ar "
+                    "JOIN vessels v ON v.id = ar.vessel_id "
+                    "WHERE v.mmsi=$1 ORDER BY ar.computed_at DESC LIMIT 1", str(mmsi)
+                )
+                if attr_row:
+                    verdict["status"] = "spill_detected"
+                    verdict["spill_id"] = str(attr_row["spill_id"])
+                else:
+                    verdict["status"] = "no_spill_detected"
 
     return {
         "vessel": vessel,
