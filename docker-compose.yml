@@ -369,7 +369,7 @@ services:
       <<: *backend-env
       SERVICE_NAME: api-gateway
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-*}
-      DASHBOARD_ORIGINS: ${DASHBOARD_ORIGINS:-http://localhost:3000}
+      DASHBOARD_ORIGINS: "*"
     volumes:
       - ./shared/spatial:/app/shared/spatial:ro
       - sar-scene-artifacts:/data/artifacts:ro
