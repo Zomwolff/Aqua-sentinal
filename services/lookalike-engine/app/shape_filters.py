@@ -195,7 +195,7 @@ def is_likely_ship_shadow(
 def is_likely_calm_water(
     candidate: Dict[str, Any],
     mask_region,
-    max_edge_gradient: float = 1.5,
+    max_edge_gradient: float = 3.0,
     *,
     dark_mask: Optional[np.ndarray] = None,
     min_area_px: Optional[int] = None,
@@ -243,7 +243,7 @@ def classify_candidate(
     adjacency_px: int = 5,
     min_elongation: float = 2.0,
     min_bright_target_px: int = 3,
-    max_edge_gradient: float = 1.5,
+    max_edge_gradient: float = 3.0,
     min_area_px: Optional[int] = None,
     max_perimeter_area_ratio: float = 0.8,
 ) -> str:
