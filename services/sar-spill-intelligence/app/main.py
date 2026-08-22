@@ -26,7 +26,7 @@ from app.worker import STATE, run_sar_worker
 SERVICE_NAME = "sar-spill-intelligence"
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 log = logging.getLogger(SERVICE_NAME)
@@ -164,13 +164,18 @@ async def upload_sar(mmsi: int, image: UploadFile = File(...)):
     """Persist and enqueue a user SAR image through the production worker."""
     filename = Path(image.filename or "").name
     suffix = Path(filename).suffix.lower()
+    log.debug("Upload validation: filename=%s, suffix=%s", filename, suffix)
     if suffix not in _UPLOAD_EXTENSIONS:
+        log.debug("Rejected upload: unsupported file extension %s", suffix)
         raise HTTPException(status_code=400, detail="Use a GeoTIFF, TIFF, PNG, or JPEG SAR image.")
 
     payload = await image.read()
+    log.debug("Upload validation: payload size=%d bytes", len(payload))
     if not payload:
+        log.debug("Rejected upload: empty payload")
         raise HTTPException(status_code=400, detail="The uploaded SAR image is empty.")
     if len(payload) > _MAX_UPLOAD_BYTES:
+        log.debug("Rejected upload: payload exceeds max size (%d > %d)", len(payload), _MAX_UPLOAD_BYTES)
         raise HTTPException(status_code=413, detail="SAR uploads are limited to 50 MB.")
 
     pool = await create_pool()
@@ -192,7 +197,7 @@ async def upload_sar(mmsi: int, image: UploadFile = File(...)):
         raise HTTPException(status_code=404, detail="The selected vessel has no position for georeferencing this image.")
 
     scene_id = f"USER_SAR_{uuid.uuid4().hex}"
-    upload_dir = Path(os.environ.get("SAR_ARTIFACT_ROOT", "/data/artifacts")) / "sar" / "uploads"
+    upload_dir = Path(os.environ.get("SAR_ARTIFACT_ROOT", "artifacts")) / "sar" / "uploads"
     source_path = upload_dir / f"{scene_id}.source{suffix}"
     raster_path = upload_dir / f"{scene_id}.tif"
     tasking_id = None
