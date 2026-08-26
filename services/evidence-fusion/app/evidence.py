@@ -211,6 +211,7 @@ def fuse_evidence(
     centroid_lon: Optional[float] = None,
     area_m2: Optional[float] = None,
     geom_geojson: Optional[str] = None,
+    environment: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build the ``incident.fused`` payload.
 
@@ -236,6 +237,14 @@ def fuse_evidence(
         "correlated_vessel_id": None,
         "correlated_vessel": None,
         "candidates": [],
+        "environment": environment or {
+            "wind_speed_ms": 0.0,
+            "wind_dir_deg": 0.0,
+            "current_speed_ms": 0.0,
+            "current_dir_deg": 0.0,
+            "timestamp": None,
+            "source": None,
+        },
         "is_synthetic": candidate.get("is_synthetic", False),
     }
     for key in ("orbit", "polarization", "resolution"):

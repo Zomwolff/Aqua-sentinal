@@ -182,3 +182,39 @@ def test_score_behavior_uses_incoming_anomaly_counts_without_query(worker_module
     ))
     assert observed == [(2, 3)]
     assert result["behavior_score"] == 0.55
+
+
+def test_score_wind_drift_uses_incoming_environment_without_query(worker_module, monkeypatch):
+    observed = []
+    monkeypatch.setattr(
+        worker_module,
+        "score_wind_drift",
+        lambda **values: observed.append(values) or 0.45,
+    )
+
+    class NoEnvironmentQueryPool:
+        async def execute(self, *_args):
+            return None
+
+    vessel = {
+        "vessel_id": 42, "mmsi": "123456789", "pos_lat": 19.1, "pos_lon": 72.8,
+        "pos_ts": datetime(2024, 8, 20, 8, 40, tzinfo=timezone.utc),
+        "distance_m": 450.0, "closest_approach_m": 125.0, "time_gap_hours": 1.0,
+        "high_anomaly_count": 0, "medium_anomaly_count": 0,
+    }
+    environment = {
+        "wind_speed_ms": 10.0, "wind_dir_deg": 180.0,
+        "current_speed_ms": 0.4, "current_dir_deg": 90.0,
+    }
+    result = asyncio.run(worker_module._score_and_persist_vessel(
+        NoEnvironmentQueryPool(), "spill-1", 19.1, 72.8, vessel,
+        datetime(2024, 8, 20, 9, 40, tzinfo=timezone.utc), environment,
+    ))
+    assert observed == [{
+        "vessel_lat": 19.1, "vessel_lon": 72.8,
+        "spill_lat": 19.1, "spill_lon": 72.8,
+        "wind_speed_ms": 10.0, "wind_dir_deg": 180.0,
+        "current_speed_ms": 0.4, "current_dir_deg": 90.0,
+        "elapsed_hours": 1.0,
+    }]
+    assert result["wind_score"] == 0.45

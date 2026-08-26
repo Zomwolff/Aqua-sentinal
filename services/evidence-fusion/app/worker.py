@@ -101,6 +101,41 @@ async def _fetch_anomaly_counts(
     return high, medium
 
 
+async def _fetch_environment(
+    pool, spill_lat: float, spill_lon: float, acquisition_time: datetime,
+) -> Dict[str, Any]:
+    """Fetch the nearest environmental sample using the existing lookup semantics."""
+    row = await pool.fetchrow(
+        """
+        SELECT wind_speed_kmh, wind_direction_deg, current_speed_ms,
+               current_direction_deg, timestamp, source
+        FROM environmental_conditions
+        WHERE timestamp BETWEEN $3::timestamptz - INTERVAL '3 hours'
+                            AND $3::timestamptz + INTERVAL '3 hours'
+        ORDER BY geom <-> ST_SetSRID(ST_MakePoint($2, $1), 4326)
+        LIMIT 1
+        """,
+        spill_lat, spill_lon, acquisition_time,
+    )
+    if row:
+        return {
+            "wind_speed_ms": float(row["wind_speed_kmh"] or 0) / 3.6,
+            "wind_dir_deg": float(row["wind_direction_deg"] or 0),
+            "current_speed_ms": float(row["current_speed_ms"] or 0),
+            "current_dir_deg": float(row["current_direction_deg"] or 0),
+            "timestamp": row["timestamp"].isoformat() if row["timestamp"] is not None else None,
+            "source": row["source"],
+        }
+    return {
+        "wind_speed_ms": 0.0,
+        "wind_dir_deg": 0.0,
+        "current_speed_ms": 0.0,
+        "current_dir_deg": 0.0,
+        "timestamp": None,
+        "source": None,
+    }
+
+
 async def _handle_filtered_candidate(data: Dict[str, Any], pool, redis) -> None:
     """Fuse one spill.candidates.filtered message and publish incident.fused."""
     candidate = _candidate_from_payload(data)
@@ -130,6 +165,17 @@ async def _handle_filtered_candidate(data: Dict[str, Any], pool, redis) -> None:
     centroid_lon = float(row["centroid_lon"]) if row["centroid_lon"] is not None else None
     area_m2 = float(row["area_m2"]) if row["area_m2"] is not None else None
     geom_geojson = row["geom_geojson"]
+    if centroid_lat is not None and centroid_lon is not None:
+        environment = await _fetch_environment(pool, centroid_lat, centroid_lon, acq)
+    else:
+        environment = {
+            "wind_speed_ms": 0.0,
+            "wind_dir_deg": 0.0,
+            "current_speed_ms": 0.0,
+            "current_dir_deg": 0.0,
+            "timestamp": None,
+            "source": None,
+        }
 
     records = await pool.fetch(
         build_vessel_correlation_sql(),
@@ -162,6 +208,7 @@ async def _handle_filtered_candidate(data: Dict[str, Any], pool, redis) -> None:
         centroid_lon=centroid_lon,
         area_m2=area_m2,
         geom_geojson=geom_geojson,
+        environment=environment,
     )
     await publish_to_stream(redis, FUSED_STREAM, fused)
 

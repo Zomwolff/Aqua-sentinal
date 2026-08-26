@@ -205,32 +205,6 @@ async def _fetch_candidate_vessels(
     return [dict(r) for r in rows]
 
 
-async def _fetch_weather(
-    pool, spill_lat: float, spill_lon: float,
-    acquisition_time: datetime,
-) -> Dict[str, float]:
-    """Nearest environmental_conditions sample at acquisition time."""
-    row = await pool.fetchrow(
-        """
-        SELECT wind_speed_kmh, wind_direction_deg, current_speed_ms, current_direction_deg
-        FROM environmental_conditions
-        WHERE timestamp BETWEEN $3::timestamptz - INTERVAL '3 hours'
-                            AND $3::timestamptz + INTERVAL '3 hours'
-        ORDER BY geom <-> ST_SetSRID(ST_MakePoint($2, $1), 4326)
-        LIMIT 1
-        """,
-        spill_lat, spill_lon, acquisition_time,
-    )
-    if row:
-        return {
-            "wind_speed_ms":      float(row["wind_speed_kmh"] or 0) / 3.6,
-            "wind_dir_deg":       float(row["wind_direction_deg"] or 0),
-            "current_speed_ms":   float(row["current_speed_ms"] or 0),
-            "current_dir_deg":    float(row["current_direction_deg"] or 0),
-        }
-    return {"wind_speed_ms": 0.0, "wind_dir_deg": 0.0, "current_speed_ms": 0.0, "current_dir_deg": 0.0}
-
-
 async def _score_and_persist_vessel(
     pool, spill_id: str,
     spill_lat: float, spill_lon: float,
@@ -451,12 +425,17 @@ async def _process_incident_fused(
             seen[vid] = v
     unique_vessels = list(seen.values())
 
-    weather = await _fetch_weather(pool, spill_lat, spill_lon, acq)
+    environment = data.get("environment") or {
+        "wind_speed_ms": 0.0,
+        "wind_dir_deg": 0.0,
+        "current_speed_ms": 0.0,
+        "current_dir_deg": 0.0,
+    }
 
     scored = []
     for vessel in unique_vessels[:20]:  # cap at 20 candidates
         result_v = await _score_and_persist_vessel(
-            pool, spill_id, spill_lat, spill_lon, vessel, acq, weather,
+            pool, spill_id, spill_lat, spill_lon, vessel, acq, environment,
         )
         if result_v:
             scored.append(result_v)
