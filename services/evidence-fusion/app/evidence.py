@@ -194,6 +194,8 @@ def _normalise_vessel_for_event(record: Dict[str, Any]) -> Dict[str, Any]:
             if record.get("time_gap_hours") is not None
             else None
         ),
+        "high_anomaly_count": int(record.get("high_anomaly_count", 0)),
+        "medium_anomaly_count": int(record.get("medium_anomaly_count", 0)),
     }
     for key in ("risk_score", "tier", "recommended_action"):
         if key in record and record.get(key) is not None:

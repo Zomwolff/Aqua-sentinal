@@ -70,9 +70,13 @@ def test_normalise_candidate_preserves_closest_approach(worker_module):
         "distance_m": 450.0,
         "closest_approach_m": 125.0,
         "time_gap_hours": 1.5,
+        "high_anomaly_count": 2,
+        "medium_anomaly_count": 3,
     })
     assert candidate["closest_approach_m"] == 125.0
     assert candidate["time_gap_hours"] == 1.5
+    assert candidate["high_anomaly_count"] == 2
+    assert candidate["medium_anomaly_count"] == 3
 
 
 def test_score_trajectory_uses_incoming_closest_approach_without_query(worker_module, monkeypatch):
@@ -124,7 +128,6 @@ def test_score_time_uses_incoming_time_gap_without_recalculating(worker_module, 
     async def no_anomalies(*_args):
         return 0, 0
 
-    monkeypatch.setattr(worker_module, "_fetch_anomaly_counts", no_anomalies)
     monkeypatch.setattr(worker_module, "score_behavior", lambda *_args: 0.0)
     monkeypatch.setattr(worker_module, "score_wind_drift", lambda **_kwargs: 0.0)
     monkeypatch.setattr(worker_module, "compute_attribution_score", lambda *_args: 0.0)
@@ -149,3 +152,33 @@ def test_score_time_uses_incoming_time_gap_without_recalculating(worker_module, 
     ))
     assert observed == [1.5]
     assert result["time_score"] == 0.65
+
+
+def test_score_behavior_uses_incoming_anomaly_counts_without_query(worker_module, monkeypatch):
+    observed = []
+    monkeypatch.setattr(
+        worker_module,
+        "score_behavior",
+        lambda high, medium: observed.append((high, medium)) or 0.55,
+    )
+
+    class NoAnomalyQueryPool:
+        async def execute(self, *_args):
+            return None
+
+    vessel = {
+        "vessel_id": 42, "mmsi": "123456789", "pos_lat": 19.1, "pos_lon": 72.8,
+        "pos_ts": datetime(2024, 8, 20, 9, 40, tzinfo=timezone.utc),
+        "distance_m": 450.0, "closest_approach_m": 125.0, "time_gap_hours": 1.5,
+        "high_anomaly_count": 2, "medium_anomaly_count": 3,
+    }
+    weather = {
+        "wind_speed_ms": 0.0, "wind_dir_deg": 0.0,
+        "current_speed_ms": 0.0, "current_dir_deg": 0.0,
+    }
+    result = asyncio.run(worker_module._score_and_persist_vessel(
+        NoAnomalyQueryPool(), "spill-1", 19.1, 72.8, vessel,
+        datetime(2024, 8, 20, 9, 40, tzinfo=timezone.utc), weather,
+    ))
+    assert observed == [(2, 3)]
+    assert result["behavior_score"] == 0.55

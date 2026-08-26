@@ -203,6 +203,15 @@ def test_fuse_emits_time_gap_hours_for_each_candidate():
     assert event["candidates"][0]["time_gap_hours"] == 1.5
 
 
+def test_fuse_emits_anomaly_counts_for_each_candidate():
+    vessel = _vessel_record(vessel_id=10)
+    vessel["high_anomaly_count"] = 2
+    vessel["medium_anomaly_count"] = 3
+    event = fuse_evidence(_candidate_payload(), [vessel])
+    assert event["candidates"][0]["high_anomaly_count"] == 2
+    assert event["candidates"][0]["medium_anomaly_count"] == 3
+
+
 def test_fuse_never_contains_source_attribution():
     event = fuse_evidence(_candidate_payload(), _vessel_record())
     assert not set(FORBIDDEN_ATTRIBUTION_FIELDS) & set(event.keys())
@@ -275,6 +284,40 @@ def _run_worker_test(worker, payload, candidate_rows, vessel_rows, windows=(5000
     worker.correlation_windows = lambda: (windows[0], windows[1])
     asyncio.run(_run(worker, payload, pool))
     return captured
+
+
+def test_evidence_fusion_counts_only_anomalies_in_pre_acquisition_window():
+    worker = _load_worker()
+    events = [
+        {"mmsi": "123456789", "severity": "HIGH", "window_start": T0 - timedelta(hours=6)},
+        {"mmsi": "123456789", "severity": "HIGH", "window_start": T0 - timedelta(hours=1)},
+        {"mmsi": "123456789", "severity": "MEDIUM", "window_start": T0},
+        {"mmsi": "123456789", "severity": "MEDIUM", "window_start": T0 + timedelta(seconds=1)},
+        {"mmsi": "123456789", "severity": "HIGH", "window_start": T0 - timedelta(hours=7)},
+        {"mmsi": "999999999", "severity": "HIGH", "window_start": T0 - timedelta(hours=1)},
+    ]
+
+    class AnomalyPool:
+        async def fetch(self, sql, mmsi, since, acquisition_time):
+            assert "anomaly_events" in sql
+            return [
+                event for event in events
+                if event["mmsi"] == mmsi and since <= event["window_start"] <= acquisition_time
+            ]
+
+    high, medium = asyncio.run(worker._fetch_anomaly_counts(AnomalyPool(), "123456789", T0))
+    assert (high, medium) == (2, 1)
+
+
+def test_evidence_fusion_returns_zero_anomaly_counts_when_missing():
+    worker = _load_worker()
+
+    class EmptyPool:
+        async def fetch(self, *_args):
+            return []
+
+    counts = asyncio.run(worker._fetch_anomaly_counts(EmptyPool(), "123456789", T0))
+    assert counts == (0, 0)
 
 
 async def _run(worker, payload, pool):

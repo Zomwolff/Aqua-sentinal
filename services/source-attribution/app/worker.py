@@ -205,20 +205,6 @@ async def _fetch_candidate_vessels(
     return [dict(r) for r in rows]
 
 
-async def _fetch_anomaly_counts(
-    pool, mmsi: str, acquisition_time: datetime,
-) -> tuple:
-    """Count HIGH and MEDIUM anomaly events in 6h before acquisition."""
-    since = acquisition_time - timedelta(hours=6)
-    rows = await pool.fetch(
-        "SELECT severity FROM anomaly_events WHERE mmsi=$1 AND window_start BETWEEN $2 AND $3",
-        mmsi, since, acquisition_time,
-    )
-    high = sum(1 for r in rows if r["severity"] == "HIGH")
-    med  = sum(1 for r in rows if r["severity"] == "MEDIUM")
-    return high, med
-
-
 async def _fetch_weather(
     pool, spill_lat: float, spill_lon: float,
     acquisition_time: datetime,
@@ -273,9 +259,11 @@ async def _score_and_persist_vessel(
     time_gap_hours = vessel.get("time_gap_hours")
     ti_score = score_time(float(time_gap_hours) if time_gap_hours is not None else None)
 
-    # Factor 4: behavioral anomaly
-    high_cnt, med_cnt = await _fetch_anomaly_counts(pool, mmsi, acquisition_time)
-    b_score = score_behavior(high_cnt, med_cnt)
+    # Factor 4: behavioral anomaly evidence was calculated by Evidence Fusion.
+    b_score = score_behavior(
+        int(vessel.get("high_anomaly_count", 0)),
+        int(vessel.get("medium_anomaly_count", 0)),
+    )
 
     # Factor 5: wind/current backward drift
     elapsed_h = (acquisition_time - pos_ts).total_seconds() / 3600.0 if pos_ts else 0.0
@@ -369,6 +357,8 @@ def _normalise_candidate_vessel(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]
             if raw.get("time_gap_hours") is not None
             else None
         ),
+        "high_anomaly_count": int(raw.get("high_anomaly_count", 0)),
+        "medium_anomaly_count": int(raw.get("medium_anomaly_count", 0)),
     }
 
 

@@ -87,6 +87,20 @@ def _candidate_from_payload(data: Dict[str, Any]) -> Dict[str, Any]:
     return candidate
 
 
+async def _fetch_anomaly_counts(
+    pool, mmsi: str, acquisition_time: datetime,
+) -> tuple[int, int]:
+    """Count HIGH and MEDIUM anomaly events in the six hours before acquisition."""
+    since = acquisition_time - timedelta(hours=6)
+    rows = await pool.fetch(
+        "SELECT severity FROM anomaly_events WHERE mmsi=$1 AND window_start BETWEEN $2 AND $3",
+        mmsi, since, acquisition_time,
+    )
+    high = sum(1 for row in rows if row.get("severity") == "HIGH")
+    medium = sum(1 for row in rows if row.get("severity") == "MEDIUM")
+    return high, medium
+
+
 async def _handle_filtered_candidate(data: Dict[str, Any], pool, redis) -> None:
     """Fuse one spill.candidates.filtered message and publish incident.fused."""
     candidate = _candidate_from_payload(data)
@@ -133,6 +147,13 @@ async def _handle_filtered_candidate(data: Dict[str, Any], pool, redis) -> None:
         temporal_window_hours=temporal_hours,
         candidate_acquisition=acq,
     )
+
+    for vessel in candidates:
+        high_count, medium_count = await _fetch_anomaly_counts(
+            pool, str(vessel["mmsi"]), acq,
+        )
+        vessel["high_anomaly_count"] = high_count
+        vessel["medium_anomaly_count"] = medium_count
 
     fused = fuse_evidence(
         candidate,
