@@ -269,11 +269,9 @@ async def _score_and_persist_vessel(
     closest_m = vessel.get("closest_approach_m")
     t_score = score_trajectory(float(closest_m) if closest_m is not None else None)
 
-    # Factor 3: temporal coincidence
-    hours_gap = None
-    if pos_ts:
-        hours_gap = abs((acquisition_time - pos_ts).total_seconds()) / 3600.0
-    ti_score = score_time(hours_gap)
+    # Factor 3: temporal coincidence was calculated by Evidence Fusion.
+    time_gap_hours = vessel.get("time_gap_hours")
+    ti_score = score_time(float(time_gap_hours) if time_gap_hours is not None else None)
 
     # Factor 4: behavioral anomaly
     high_cnt, med_cnt = await _fetch_anomaly_counts(pool, mmsi, acquisition_time)
@@ -364,6 +362,11 @@ def _normalise_candidate_vessel(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]
         "closest_approach_m": (
             float(raw["closest_approach_m"])
             if raw.get("closest_approach_m") is not None
+            else None
+        ),
+        "time_gap_hours": (
+            float(raw["time_gap_hours"])
+            if raw.get("time_gap_hours") is not None
             else None
         ),
     }

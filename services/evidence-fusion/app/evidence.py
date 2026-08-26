@@ -58,6 +58,11 @@ def candidate_lookup_sql() -> str:
     """
 
 
+def _as_aware_datetime(value: datetime) -> datetime:
+    """Treat naive timestamps as UTC, matching the existing service behavior."""
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
 def build_vessel_correlation_sql(limit: Optional[int] = None) -> str:
     """Geography-based vessel-risk correlation query.
 
@@ -104,9 +109,7 @@ def select_correlated_vessels(
     candidate_acquisition: datetime,
 ) -> List[Dict[str, Any]]:
     """Return every qualifying vessel candidate in deterministic order."""
-    acq = candidate_acquisition
-    if acq.tzinfo is None:
-        acq = acq.replace(tzinfo=timezone.utc)
+    acq = _as_aware_datetime(candidate_acquisition)
     half = timedelta(hours=float(temporal_window_hours))
 
     qualifying_by_vessel: Dict[Any, Dict[str, Any]] = {}
@@ -117,9 +120,10 @@ def select_correlated_vessels(
         ts = record.get("position_timestamp")
         if ts is None:
             continue
-        ts_dt = ts if ts.tzinfo is not None else ts.replace(tzinfo=timezone.utc)
+        ts_dt = _as_aware_datetime(ts)
         if not (acq - half <= ts_dt <= acq + half):
             continue
+        time_gap_hours = abs((acq - ts_dt).total_seconds()) / 3600.0
         vessel_id = record.get("vessel_id", record.get("mmsi"))
         record_approach = record.get("closest_approach_m")
         record_approach = float(record_approach) if record_approach is not None else float(record["distance_m"])
@@ -130,6 +134,7 @@ def select_correlated_vessels(
             float(existing["distance_m"]), str(existing.get("mmsi") or "")
         ):
             selected = dict(record)
+            selected["time_gap_hours"] = time_gap_hours
             selected["closest_approach_m"] = min(
                 record_approach,
                 float(existing.get("closest_approach_m", record["distance_m"]))
@@ -182,6 +187,11 @@ def _normalise_vessel_for_event(record: Dict[str, Any]) -> Dict[str, Any]:
         "closest_approach_m": (
             float(record["closest_approach_m"])
             if record.get("closest_approach_m") is not None
+            else None
+        ),
+        "time_gap_hours": (
+            float(record["time_gap_hours"])
+            if record.get("time_gap_hours") is not None
             else None
         ),
     }

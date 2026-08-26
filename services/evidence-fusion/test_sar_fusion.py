@@ -131,6 +131,27 @@ def test_select_handles_missing_closest_approach_safely():
     assert selected[0]["closest_approach_m"] == 700.0
 
 
+def test_select_adds_time_gap_hours_for_exact_and_fractional_offsets():
+    records = [
+        _vessel_record(vessel_id=1, distance_m=100.0, position_timestamp=T0),
+        _vessel_record(vessel_id=2, distance_m=200.0, position_timestamp=T0 - timedelta(hours=1.5)),
+    ]
+    selected = select_correlated_vessels(records, 5000.0, 6.0, T0)
+    assert selected[0]["time_gap_hours"] == 0.0
+    assert selected[1]["time_gap_hours"] == 1.5
+
+
+def test_select_keeps_both_six_hour_boundaries_and_excludes_outside():
+    records = [
+        _vessel_record(vessel_id=1, distance_m=100.0, position_timestamp=T0 - timedelta(hours=6)),
+        _vessel_record(vessel_id=2, distance_m=200.0, position_timestamp=T0 + timedelta(hours=6)),
+        _vessel_record(vessel_id=3, distance_m=300.0, position_timestamp=T0 + timedelta(hours=6, seconds=1)),
+    ]
+    selected = select_correlated_vessels(records, 5000.0, 6.0, T0)
+    assert [v["vessel_id"] for v in selected] == [1, 2]
+    assert [v["time_gap_hours"] for v in selected] == [6.0, 6.0]
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # fuse_evidence
 # ──────────────────────────────────────────────────────────────────────────────
@@ -173,6 +194,13 @@ def test_fuse_emits_closest_approach_for_each_candidate():
     vessel["closest_approach_m"] = 125.0
     event = fuse_evidence(_candidate_payload(), [vessel])
     assert event["candidates"][0]["closest_approach_m"] == 125.0
+
+
+def test_fuse_emits_time_gap_hours_for_each_candidate():
+    vessel = _vessel_record(vessel_id=10, distance_m=450.0, position_timestamp=T0 - timedelta(hours=1.5))
+    vessel["time_gap_hours"] = 1.5
+    event = fuse_evidence(_candidate_payload(), [vessel])
+    assert event["candidates"][0]["time_gap_hours"] == 1.5
 
 
 def test_fuse_never_contains_source_attribution():
