@@ -21,6 +21,7 @@ from app.evidence import (  # noqa: E402
     correlation_windows,
     fuse_evidence,
     select_correlated_vessel,
+    select_correlated_vessels,
 )
 
 T0 = datetime(2024, 8, 20, 9, 40, 0, tzinfo=timezone.utc)
@@ -100,6 +101,17 @@ def test_select_returns_none_for_empty():
     assert select_correlated_vessel([], 5000.0, 6.0, T0) is None
 
 
+def test_select_returns_all_qualifying_vessels_in_distance_order():
+    recs = [
+        _vessel_record(vessel_id=1, mmsi="200", distance_m=800.0),
+        _vessel_record(vessel_id=2, mmsi="100", distance_m=400.0),
+        _vessel_record(vessel_id=3, mmsi="300", distance_m=12000.0),
+        _vessel_record(vessel_id=4, mmsi="050", distance_m=200.0, position_timestamp=T0 - timedelta(hours=1)),
+    ]
+    selected = select_correlated_vessels(recs, 5000.0, 6.0, T0)
+    assert [v["vessel_id"] for v in selected] == [4, 2, 1]
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # fuse_evidence
 # ──────────────────────────────────────────────────────────────────────────────
@@ -121,7 +133,20 @@ def test_fuse_without_vessel_keeps_null_and_still_emits():
     event = fuse_evidence(_candidate_payload(), None)
     assert event["correlated_vessel_id"] is None
     assert event["correlated_vessel"] is None
+    assert event["candidates"] == []
     assert event["candidate_id"] == "candidate-101"
+
+
+def test_fuse_emits_full_candidate_list_for_attribution():
+    candidate = _candidate_payload()
+    vessels = [
+        _vessel_record(vessel_id=10, mmsi="200", risk_score=90.0, tier="HIGH", distance_m=450.0),
+        _vessel_record(vessel_id=20, mmsi="100", risk_score=80.0, tier="CRITICAL", distance_m=900.0),
+    ]
+    event = fuse_evidence(candidate, vessels)
+    assert event["correlated_vessel_id"] == 10
+    assert [v["vessel_id"] for v in event["candidates"]] == [10, 20]
+    assert event["correlated_vessel"]["vessel_id"] == 10
 
 
 def test_fuse_never_contains_source_attribution():
@@ -138,7 +163,7 @@ def test_correlation_windows_from_env(monkeypatch):
     assert spatial == 2500.0 and hours == 3.0
     monkeypatch.delenv("EVIDENCE_SPATIAL_WINDOW_M")
     monkeypatch.delenv("EVIDENCE_TEMPORAL_WINDOW_HOURS")
-    assert correlation_windows() == (5000.0, 6.0)
+    assert correlation_windows() == (20000.0, 6.0)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

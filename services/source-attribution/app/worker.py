@@ -341,6 +341,46 @@ async def _score_and_persist_vessel(
     }
 
 
+def _normalise_candidate_vessel(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Normalize a vessel candidate from incident.fused.candidates into the
+    shape expected by the existing attribution scoring pipeline."""
+    if raw is None:
+        return None
+    vessel_id = raw.get("vessel_id")
+    if vessel_id is None:
+        raise ValueError("incident.fused candidate missing vessel_id")
+    mmsi = raw.get("mmsi")
+    if mmsi is None:
+        raise ValueError(f"incident.fused candidate with vessel_id={vessel_id} missing mmsi")
+
+    pos_lat = raw.get("position_lat")
+    pos_lon = raw.get("position_lon")
+    if pos_lat is None:
+        pos_lat = raw.get("latitude")
+    if pos_lon is None:
+        pos_lon = raw.get("longitude")
+    if pos_lat is None or pos_lon is None:
+        raise ValueError(f"incident.fused candidate vessel_id={vessel_id} missing position_lat/position_lon")
+
+    pos_ts = raw.get("position_timestamp")
+    if pos_ts is not None and not isinstance(pos_ts, datetime):
+        pos_ts = _parse_dt(pos_ts)
+
+    distance_m = raw.get("distance_m")
+    if distance_m is None:
+        raise ValueError(f"incident.fused candidate vessel_id={vessel_id} missing distance_m")
+
+    return {
+        "vessel_id": int(vessel_id),
+        "mmsi": str(mmsi),
+        "vessel_type": raw.get("vessel_type"),
+        "pos_lat": float(pos_lat),
+        "pos_lon": float(pos_lon),
+        "pos_ts": pos_ts,
+        "distance_m": float(distance_m),
+    }
+
+
 async def _process_incident_fused(
     data: Dict[str, Any], pool, redis,
 ) -> None:
@@ -391,10 +431,20 @@ async def _process_incident_fused(
     STATE["last_candidate_id"] = candidate_id
     STATE["last_spill_id"] = spill_id
 
-    # Fetch candidate vessels from AIS positions
-    vessels = await _fetch_candidate_vessels(pool, spill_lat, spill_lon, acq)
+    candidates_raw = data.get("candidates")
+    if candidates_raw is None:
+        raise ValueError("incident.fused message missing candidates array; Evidence Fusion is required to provide candidate vessels")
+    if not isinstance(candidates_raw, list):
+        raise ValueError("incident.fused candidates must be a list")
+
+    vessels = []
+    for raw in candidates_raw:
+        vessel = _normalise_candidate_vessel(raw)
+        if vessel is not None:
+            vessels.append(vessel)
+
     if not vessels:
-        log.info("No AIS vessels found near spill=%s — publishing with no attribution", spill_id)
+        log.info("No candidate vessels provided for spill=%s — publishing with no attribution", spill_id)
         await publish_to_stream(redis, OUTPUT_STREAM, {
             "spill_id": spill_id,
             "candidate_id": candidate_id,

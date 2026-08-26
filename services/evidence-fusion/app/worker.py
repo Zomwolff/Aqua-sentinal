@@ -39,7 +39,7 @@ from app.evidence import (
     candidate_lookup_sql,
     correlation_windows,
     fuse_evidence,
-    select_correlated_vessel,
+    select_correlated_vessels,
 )
 
 log = logging.getLogger(__name__)
@@ -127,7 +127,7 @@ async def _handle_filtered_candidate(data: Dict[str, Any], pool, redis) -> None:
     )
     vessel_records = [dict(r) for r in records]
 
-    correlated = select_correlated_vessel(
+    candidates = select_correlated_vessels(
         vessel_records,
         spatial_window_m=spatial_m,
         temporal_window_hours=temporal_hours,
@@ -136,7 +136,7 @@ async def _handle_filtered_candidate(data: Dict[str, Any], pool, redis) -> None:
 
     fused = fuse_evidence(
         candidate,
-        correlated,
+        candidates,
         centroid_lat=centroid_lat,
         centroid_lon=centroid_lon,
         area_m2=area_m2,
@@ -145,14 +145,13 @@ async def _handle_filtered_candidate(data: Dict[str, Any], pool, redis) -> None:
     await publish_to_stream(redis, FUSED_STREAM, fused)
 
     STATE["candidates_fused"] += 1
-    if correlated is not None:
-        STATE["candidates_with_vessel"] += 1
+    STATE["candidates_with_vessel"] += len(candidates)
     STATE["last_candidate_id"] = candidate_id
     STATE["last_processed_at"] = datetime.now(timezone.utc).isoformat()
     log.info(
-        "fused candidate=%s correlated_vessel_id=%s",
+        "fused candidate=%s candidate_count=%s",
         candidate_id,
-        fused["correlated_vessel_id"],
+        len(candidates),
     )
 
 
