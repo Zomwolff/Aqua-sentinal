@@ -252,13 +252,20 @@ def fuse_evidence(
             event[key] = candidate[key]
 
     # Real spill-candidate geometry (None only when the DB row was missing).
-    if centroid_lat is not None and centroid_lon is not None:
-        event["lat"] = float(centroid_lat)
-        event["lon"] = float(centroid_lon)
-    if area_m2 is not None:
-        event["area_km2"] = float(area_m2) / 1_000_000.0
-    if geom_geojson is not None:
-        event["geom_geojson"] = geom_geojson
+    payload_lat = centroid_lat if centroid_lat is not None else candidate.get("centroid_lat")
+    payload_lon = centroid_lon if centroid_lon is not None else candidate.get("centroid_lon")
+    payload_area = area_m2 if area_m2 is not None else candidate.get("area_m2")
+    payload_geometry = geom_geojson if geom_geojson is not None else candidate.get("geom_geojson")
+    if payload_lat is not None and payload_lon is not None:
+        event["lat"] = float(payload_lat)
+        event["lon"] = float(payload_lon)
+    if payload_area is not None:
+        event["area_km2"] = float(payload_area) / 1_000_000.0
+    if payload_geometry is not None:
+        event["geom_geojson"] = payload_geometry
+    for key in ("pixel_count", "texture_features"):
+        if candidate.get(key) is not None:
+            event[key] = candidate[key]
 
     event["candidates"] = [
         _normalise_vessel_for_event(record)

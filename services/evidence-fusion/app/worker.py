@@ -84,6 +84,12 @@ def _candidate_from_payload(data: Dict[str, Any]) -> Dict[str, Any]:
     for key in ("orbit", "polarization", "resolution"):
         if key in data:
             candidate[key] = data[key]
+    for key in (
+        "geom_geojson", "centroid_lat", "centroid_lon", "area_m2", "pixel_count",
+        "texture_features",
+    ):
+        if key in data:
+            candidate[key] = data[key]
     return candidate
 
 
@@ -204,10 +210,10 @@ async def _handle_filtered_candidate(data: Dict[str, Any], pool, redis) -> None:
     fused = fuse_evidence(
         candidate,
         candidates,
-        centroid_lat=centroid_lat,
-        centroid_lon=centroid_lon,
-        area_m2=area_m2,
-        geom_geojson=geom_geojson,
+        centroid_lat=float(candidate.get("centroid_lat", centroid_lat)) if candidate.get("centroid_lat", centroid_lat) is not None else None,
+        centroid_lon=float(candidate.get("centroid_lon", centroid_lon)) if candidate.get("centroid_lon", centroid_lon) is not None else None,
+        area_m2=float(candidate.get("area_m2", area_m2)) if candidate.get("area_m2", area_m2) is not None else None,
+        geom_geojson=candidate.get("geom_geojson", geom_geojson),
         environment=environment,
     )
     await publish_to_stream(redis, FUSED_STREAM, fused)

@@ -212,6 +212,32 @@ def test_fuse_emits_anomaly_counts_for_each_candidate():
     assert event["candidates"][0]["medium_anomaly_count"] == 3
 
 
+def test_fuse_preserves_optional_sar_evidence_from_filtered_payload():
+    candidate = _candidate_payload()
+    candidate.update({
+        "geom_geojson": '{"type":"Polygon","coordinates":[]}',
+        "centroid_lat": 19.1,
+        "centroid_lon": 72.8,
+        "area_m2": 2500000.0,
+        "pixel_count": 12345,
+        "texture_features": {"contrast": 0.2, "energy": 0.7},
+    })
+    event = fuse_evidence(candidate, [])
+    assert event["geom_geojson"] == candidate["geom_geojson"]
+    assert event["lat"] == 19.1
+    assert event["lon"] == 72.8
+    assert event["area_km2"] == 2.5
+    assert event["pixel_count"] == 12345
+    assert event["texture_features"] == candidate["texture_features"]
+
+
+def test_fuse_handles_missing_optional_sar_evidence():
+    event = fuse_evidence(_candidate_payload(), [])
+    assert "geom_geojson" not in event
+    assert "pixel_count" not in event
+    assert "texture_features" not in event
+
+
 def test_fuse_never_contains_source_attribution():
     event = fuse_evidence(_candidate_payload(), _vessel_record())
     assert not set(FORBIDDEN_ATTRIBUTION_FIELDS) & set(event.keys())

@@ -56,6 +56,10 @@ CANDIDATES_FILTERED_STREAM = "spill.candidates.filtered"
 PIXEL_PADDING = 7
 
 GLCM_LEVELS = 32
+TEXTURE_EVIDENCE_FIELDS = (
+    "contrast", "homogeneity", "energy", "correlation",
+    "mean_backscatter", "std_backscatter",
+)
 
 STATE: Dict[str, Any] = {
     "heartbeat": None,
@@ -85,7 +89,9 @@ def _candidate_ids(data: Dict[str, Any]) -> List[str]:
 
 _FETCH_CANDIDATE_SQL = """
     SELECT candidate_id, scene_id, status, pixel_count, area_m2,
-           classification_label, is_synthetic, ST_AsGeoJSON(geom) AS geojson
+           classification_label, is_synthetic, ST_AsGeoJSON(geom) AS geojson,
+           ST_X(ST_Centroid(geom)) AS centroid_lon,
+           ST_Y(ST_Centroid(geom)) AS centroid_lat
     FROM spill_candidates
     WHERE candidate_id = $1
 """
@@ -170,6 +176,16 @@ def _filtered_event(data: Dict[str, Any], result) -> Dict[str, Any]:
         "classification_label": result["classification_label"],
         "is_synthetic": _as_bool(data.get("is_synthetic"), default=False),
     }
+    for key in ("geom_geojson", "centroid_lat", "centroid_lon", "area_m2", "pixel_count"):
+        if result.get(key) is not None:
+            event[key] = result[key]
+    texture = result.get("texture_features")
+    if isinstance(texture, dict):
+        event["texture_features"] = {
+            key: texture[key]
+            for key in TEXTURE_EVIDENCE_FIELDS
+            if key in texture
+        }
     for key in ("acquisition_time", "orbit", "polarization", "resolution"):
         if key in data:
             event[key] = data[key]
@@ -278,6 +294,12 @@ async def _process_candidates_message(data: Dict[str, Any], pool, redis) -> None
                                     "scene_id": row["scene_id"],
                                     "confidence": scored["confidence"],
                                     "classification_label": scored["classification_label"],
+                                    "geom_geojson": row["geojson"],
+                                    "centroid_lat": row["centroid_lat"],
+                                    "centroid_lon": row["centroid_lon"],
+                                    "area_m2": row["area_m2"],
+                                    "pixel_count": row["pixel_count"],
+                                    "texture_features": texture,
                                 }),
                             )
                             STATE["candidates_filtered_published"] += 1
