@@ -66,6 +66,7 @@ def test_correlation_query_uses_geography_semantics():
     assert "BETWEEN" in sql
     assert "ST_MakePoint" in sql
     assert "'HIGH'" in sql and "'CRITICAL'" in sql
+    assert "closest_approach_m" in sql
 
 
 def test_candidate_lookup_uses_centroid():
@@ -112,6 +113,24 @@ def test_select_returns_all_qualifying_vessels_in_distance_order():
     assert [v["vessel_id"] for v in selected] == [4, 2, 1]
 
 
+def test_select_calculates_closest_approach_across_track_rows():
+    recs = [
+        _vessel_record(vessel_id=7, distance_m=900.0, position_timestamp=T0 - timedelta(hours=1)),
+        _vessel_record(vessel_id=7, distance_m=250.0, position_timestamp=T0),
+    ]
+    selected = select_correlated_vessels(recs, 5000.0, 6.0, T0)
+    assert len(selected) == 1
+    assert selected[0]["distance_m"] == 250.0
+    assert selected[0]["closest_approach_m"] == 250.0
+
+
+def test_select_handles_missing_closest_approach_safely():
+    record = _vessel_record(vessel_id=8, distance_m=700.0)
+    record["closest_approach_m"] = None
+    selected = select_correlated_vessels([record], 5000.0, 6.0, T0)
+    assert selected[0]["closest_approach_m"] == 700.0
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # fuse_evidence
 # ──────────────────────────────────────────────────────────────────────────────
@@ -147,6 +166,13 @@ def test_fuse_emits_full_candidate_list_for_attribution():
     assert event["correlated_vessel_id"] == 10
     assert [v["vessel_id"] for v in event["candidates"]] == [10, 20]
     assert event["correlated_vessel"]["vessel_id"] == 10
+
+
+def test_fuse_emits_closest_approach_for_each_candidate():
+    vessel = _vessel_record(vessel_id=10, distance_m=450.0)
+    vessel["closest_approach_m"] = 125.0
+    event = fuse_evidence(_candidate_payload(), [vessel])
+    assert event["candidates"][0]["closest_approach_m"] == 125.0
 
 
 def test_fuse_never_contains_source_attribution():

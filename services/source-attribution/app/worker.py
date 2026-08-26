@@ -265,26 +265,9 @@ async def _score_and_persist_vessel(
     dist_m = float(vessel["distance_m"])
     d_score = score_distance(dist_m)
 
-    # Factor 2: trajectory — closest approach from ALL positions in window
-    traj_row = await pool.fetchrow(
-        """
-        SELECT MIN(
-            ST_Distance(
-                vp.geom::geography,
-                ST_SetSRID(ST_MakePoint($2, $1), 4326)::geography
-            )
-        ) AS closest_m
-        FROM vessel_positions vp
-        JOIN vessels v ON v.id = vp.vessel_id
-        WHERE v.mmsi = $3
-          AND vp.timestamp BETWEEN $4 AND $5
-        """,
-        spill_lat, spill_lon, mmsi,
-        acquisition_time - timedelta(hours=ATTRIBUTION_TEMPORAL_WINDOW_H),
-        acquisition_time + timedelta(hours=ATTRIBUTION_TEMPORAL_WINDOW_H),
-    )
-    closest_m = float(traj_row["closest_m"]) if traj_row and traj_row["closest_m"] else None
-    t_score = score_trajectory(closest_m)
+    # Factor 2: trajectory evidence was calculated by Evidence Fusion.
+    closest_m = vessel.get("closest_approach_m")
+    t_score = score_trajectory(float(closest_m) if closest_m is not None else None)
 
     # Factor 3: temporal coincidence
     hours_gap = None
@@ -378,6 +361,11 @@ def _normalise_candidate_vessel(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]
         "pos_lon": float(pos_lon),
         "pos_ts": pos_ts,
         "distance_m": float(distance_m),
+        "closest_approach_m": (
+            float(raw["closest_approach_m"])
+            if raw.get("closest_approach_m") is not None
+            else None
+        ),
     }
 
 

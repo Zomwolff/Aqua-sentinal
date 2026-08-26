@@ -81,7 +81,8 @@ def build_vessel_correlation_sql(limit: Optional[int] = None) -> str:
                vp.latitude AS position_lat,
                vp.longitude AS position_lon,
                vp.timestamp AS position_timestamp,
-               {distance_expr} AS distance_m
+               {distance_expr} AS distance_m,
+               MIN({distance_expr}) OVER (PARTITION BY vp.vessel_id) AS closest_approach_m
         FROM vessel_positions vp
         JOIN vessels v ON v.id = vp.vessel_id
         JOIN vessel_risk_scores vr ON vr.vessel_id = v.id
@@ -108,7 +109,7 @@ def select_correlated_vessels(
         acq = acq.replace(tzinfo=timezone.utc)
     half = timedelta(hours=float(temporal_window_hours))
 
-    qualifying: List[Dict[str, Any]] = []
+    qualifying_by_vessel: Dict[Any, Dict[str, Any]] = {}
     for record in records:
         distance = record.get("distance_m")
         if distance is None or not (0.0 <= float(distance) <= float(spatial_window_m)):
@@ -119,9 +120,33 @@ def select_correlated_vessels(
         ts_dt = ts if ts.tzinfo is not None else ts.replace(tzinfo=timezone.utc)
         if not (acq - half <= ts_dt <= acq + half):
             continue
-        qualifying.append(record)
+        vessel_id = record.get("vessel_id", record.get("mmsi"))
+        record_approach = record.get("closest_approach_m")
+        record_approach = float(record_approach) if record_approach is not None else float(record["distance_m"])
+        existing = qualifying_by_vessel.get(vessel_id)
+        if existing is None or (
+            float(record["distance_m"]), str(record.get("mmsi") or "")
+        ) < (
+            float(existing["distance_m"]), str(existing.get("mmsi") or "")
+        ):
+            selected = dict(record)
+            selected["closest_approach_m"] = min(
+                record_approach,
+                float(existing.get("closest_approach_m", record["distance_m"]))
+                if existing is not None
+                else record_approach,
+            )
+            qualifying_by_vessel[vessel_id] = selected
+        elif existing is not None:
+            existing["closest_approach_m"] = min(
+                float(existing.get("closest_approach_m", existing["distance_m"])),
+                record_approach,
+            )
 
-    return sorted(qualifying, key=lambda r: (float(r["distance_m"]), str(r.get("mmsi") or "")))
+    return sorted(
+        qualifying_by_vessel.values(),
+        key=lambda r: (float(r["distance_m"]), str(r.get("mmsi") or "")),
+    )
 
 
 def select_correlated_vessel(
@@ -154,6 +179,11 @@ def _normalise_vessel_for_event(record: Dict[str, Any]) -> Dict[str, Any]:
             else record.get("position_timestamp")
         ),
         "distance_m": float(record["distance_m"]),
+        "closest_approach_m": (
+            float(record["closest_approach_m"])
+            if record.get("closest_approach_m") is not None
+            else None
+        ),
     }
     for key in ("risk_score", "tier", "recommended_action"):
         if key in record and record.get(key) is not None:
