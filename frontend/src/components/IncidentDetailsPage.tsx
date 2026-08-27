@@ -3,6 +3,7 @@ import { SAR_ARTIFACT_FILENAMES, sarArtifactUrls, type SarArtifactKey } from "..
 import { SARArtifactPreview } from "./SARArtifactPreview";
 import "./IncidentDetailsPage.css";
 import { ARTIFACTS_BASE } from "../lib/api";
+import { SARLookalikeAnalysis } from "./SARLookalikeAnalysis";
 
 interface Props {
   incidentDetail: any; // Result from fetchIncidentDetail
@@ -12,6 +13,10 @@ interface Props {
 
 export function IncidentDetailsPage({ incidentDetail, onBack, onSpotVessel }: Props) {
   const [images, setImages] = useState<Partial<Record<SarArtifactKey, string>>>({});
+
+  const showCandidateImage = () => {
+    document.getElementById("sar-candidate-evidence")?.scrollIntoView({ behavior: "smooth", block: "center" });
+  };
 
   useEffect(() => {
     if (incidentDetail?.incident?.source_image_id) {
@@ -135,11 +140,13 @@ export function IncidentDetailsPage({ incidentDetail, onBack, onSpotVessel }: Pr
             )}
           </section>
 
+          <SARLookalikeAnalysis incidentDetail={incidentDetail} onShowCandidate={showCandidateImage} />
+
         </div>
 
         {/* Right Column: SAR Imagery */}
         <div className="idp-main-view">
-          <section className="idp-card full-height">
+          <section className="idp-card full-height" id="sar-candidate-evidence">
             <div className="sar-header-flex">
               <h3>SAR Processing Pipeline Evidence</h3>
               {incident.source_image_id && (
