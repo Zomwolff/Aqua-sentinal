@@ -1128,6 +1128,55 @@ async def list_spill_incidents(
     }
 
 
+@app.get("/historical/incidents/near", tags=["HistoricalEvidence"])
+async def list_nearby_historical_incidents(
+    lat: float = Query(..., ge=-90, le=90),
+    lon: float = Query(..., ge=-180, le=180),
+    radius_km: float = Query(50.0, gt=0, le=500),
+    limit: int = Query(50, ge=1, le=200),
+):
+    """Return historical context near a point; never used for live scoring."""
+    pool = await _get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT id, title, description, cause_description, incident_date,
+               incident_time, date_precision, ST_Y(geom) AS latitude,
+               ST_X(geom) AS longitude, location_text, location_precision,
+               country, admin_region, water_body, spill_type, substance_type,
+               volume_min_liters, volume_max_liters, volume_precision,
+               area_affected_km2, vessels_involved, status, response_summary,
+               confidence_level, is_synthetic, synthetic_notes,
+               ST_Distance(
+                   geom::geography,
+                   ST_SetSRID(ST_MakePoint($2, $1), 4326)::geography
+               ) / 1000.0 AS distance_km,
+               (SELECT array_agg(s.name ORDER BY s.name)
+                  FROM incident_sources isr JOIN sources s ON s.id = isr.source_id
+                 WHERE isr.incident_id = incidents.id) AS source_names
+        FROM incidents
+        WHERE ST_DWithin(
+            geom::geography,
+            ST_SetSRID(ST_MakePoint($2, $1), 4326)::geography,
+            $3
+        )
+        ORDER BY distance_km ASC, incident_date DESC, id ASC
+        LIMIT $4
+        """,
+        lat, lon, radius_km * 1000.0, limit,
+    )
+    return {
+        "count": len(rows),
+        "latitude": lat,
+        "longitude": lon,
+        "radius_km": radius_km,
+        "incidents": [
+            {key: (value.isoformat() if isinstance(value, (datetime,)) else value)
+             for key, value in dict(row).items()}
+            for row in rows
+        ],
+    }
+
+
 @app.get("/spill/incidents/{spill_id}", tags=["SpillIntelligence"])
 async def get_spill_incident(spill_id: str):
     """Full detail for a spill incident: severity, attribution, forecast, and recommendations."""

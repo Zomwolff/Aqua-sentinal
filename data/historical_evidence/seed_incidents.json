@@ -1,0 +1,156 @@
+{
+  "sources": [
+    {
+      "id": "src-news-deccanherald",
+      "name": "Deccan Herald",
+      "source_type": "news_media",
+      "url": "https://www.deccanherald.com",
+      "license": "Copyrighted news reporting — cite/link, do not reproduce full text",
+      "reliability_tier": 3
+    },
+    {
+      "id": "src-news-tribune",
+      "name": "The Tribune",
+      "source_type": "news_media",
+      "url": "https://www.tribuneindia.com",
+      "license": "Copyrighted news reporting — cite/link, do not reproduce full text",
+      "reliability_tier": 3
+    },
+    {
+      "id": "src-wikipedia",
+      "name": "Wikipedia",
+      "source_type": "crowd_wiki",
+      "url": "https://en.wikipedia.org",
+      "license": "CC BY-SA",
+      "reliability_tier": 4
+    },
+    {
+      "id": "src-aljazeera",
+      "name": "Al Jazeera",
+      "source_type": "news_media",
+      "url": "https://www.aljazeera.com",
+      "license": "Copyrighted news reporting — cite/link, do not reproduce full text",
+      "reliability_tier": 3
+    }
+  ],
+
+  "incidents": [
+    {
+      "title": "2010 Mumbai Harbour Oil Spill",
+      "description": "Collision between container ship MSC Chitra and bulk carrier Khalija III near Mumbai harbour, causing a fuel oil spill. Indian Coast Guard vessels worked to contain the slick under difficult weather conditions.",
+      "cause_description": "Collision between two cargo/container vessels near the harbour entrance",
+      "incident_date": "2010-08-07",
+      "date_precision": "day",
+      "latitude": 18.90,
+      "longitude": 72.83,
+      "location_text": "Off Mumbai harbour entrance, Arabian Sea",
+      "location_precision": "city_level",
+      "country": "India",
+      "admin_region": "Maharashtra",
+      "water_body": "Arabian Sea",
+      "spill_type": "tanker_collision",
+      "substance_type": "fuel_oil",
+      "volume_min_liters": null,
+      "volume_max_liters": null,
+      "volume_precision": "unknown",
+      "area_affected_km2": null,
+      "vessels_involved": [
+        {"name": "MSC Chitra", "role": "source"},
+        {"name": "Khalija III", "role": "struck"}
+      ],
+      "status": "confirmed",
+      "response_summary": "Indian Coast Guard deployed six ships and undertook aerial spraying of dispersant chemicals; fishermen advised to stay ashore pending clearance.",
+      "confidence_level": "reported_single_source",
+      "is_synthetic": false,
+      "synthetic_notes": null,
+      "sources": ["src-aljazeera"]
+    },
+    {
+      "title": "2017 Ennore Oil Spill",
+      "description": "Collision between outbound LPG tanker BW Maple and inbound oil tanker Dawn Kanchipuram outside Kamarajar Port, Ennore, near Chennai, resulting in an oil sheen spreading along the Coromandel Coast.",
+      "cause_description": "Collision between an outbound empty LPG tanker and an inbound loaded oil tanker",
+      "incident_date": "2017-01-28",
+      "date_precision": "exact_datetime",
+      "incident_time": "04:00:00",
+      "latitude": 13.228166,
+      "longitude": 80.363333,
+      "location_text": "~2 nautical miles off Kamarajar Port, Ennore, Chennai",
+      "location_precision": "exact",
+      "country": "India",
+      "admin_region": "Tamil Nadu",
+      "water_body": "Bay of Bengal",
+      "spill_type": "tanker_collision",
+      "substance_type": "petroleum_oil_lubricant",
+      "volume_min_liters": null,
+      "volume_max_liters": null,
+      "volume_precision": "unknown",
+      "area_affected_km2": 34000.0,
+      "vessels_involved": [
+        {"name": "MT BW Maple", "role": "source"},
+        {"name": "MT Dawn Kanchipuram", "role": "struck"}
+      ],
+      "status": "confirmed",
+      "response_summary": "Oil slick spread roughly 72 km of coastline from Ennore Port to Mahabalipuram, with the worst-affected stretch around 12 km; cleanup and legal cases followed against both vessels' management.",
+      "confidence_level": "verified_multi_source",
+      "is_synthetic": false,
+      "synthetic_notes": null,
+      "sources": ["src-wikipedia", "src-tribune", "src-deccanherald"]
+    },
+    {
+      "title": "2021 Palghar/Vadrai Coast Oil Spill (Cyclone Tauktae aftermath)",
+      "description": "Oil noticed by local fishermen along the Vadrai coast, Palghar district, from a grounded accommodation barge (GAL Constructor) that had been impacted during Cyclone Tauktae's passage near ONGC's Mumbai High offshore field.",
+      "cause_description": "Vessel/barge grounding and cyclone damage to offshore accommodation and support vessels",
+      "incident_date": "2021-05-29",
+      "date_precision": "day",
+      "latitude": 19.75,
+      "longitude": 72.75,
+      "location_text": "Vadrai/Satpati coastal area, Palghar district, Maharashtra (approximate — exact grounding point not confirmed in sources reviewed)",
+      "location_precision": "region_level",
+      "country": "India",
+      "admin_region": "Maharashtra",
+      "water_body": "Arabian Sea",
+      "spill_type": "weather_related",
+      "substance_type": "diesel",
+      "volume_min_liters": 80000,
+      "volume_max_liters": null,
+      "volume_precision": "estimated_range",
+      "area_affected_km2": null,
+      "vessels_involved": [
+        {"name": "GAL Constructor", "role": "source"}
+      ],
+      "status": "confirmed",
+      "response_summary": "Sorbent pads and containment booms deployed; Indian Coast Guard and district authorities monitored the site; part of the wider Mumbai High Cyclone Tauktae incident that killed 86 people on other vessels.",
+      "confidence_level": "reported_single_source",
+      "is_synthetic": false,
+      "synthetic_notes": null,
+      "sources": ["src-deccanherald"]
+    },
+    {
+      "title": "2023 Ennore Creek Oil Spill (Cyclone Michaung aftermath)",
+      "description": "Oily water and sludge spill in the ecologically sensitive Ennore Creek area following Cyclone Michaung, with the Indian Coast Guard reporting the spill had spread to roughly 20 square km before cleanup.",
+      "cause_description": "Cyclone-related discharge/damage near Ennore Creek",
+      "incident_date": "2023-12-12",
+      "date_precision": "month",
+      "latitude": 13.228166,
+      "longitude": 80.363333,
+      "location_text": "Ennore Creek, Chennai (same general area as the 2017 incident)",
+      "location_precision": "city_level",
+      "country": "India",
+      "admin_region": "Tamil Nadu",
+      "water_body": "Bay of Bengal",
+      "spill_type": "weather_related",
+      "substance_type": "unknown",
+      "volume_min_liters": 105820,
+      "volume_max_liters": null,
+      "volume_precision": "estimated_range",
+      "area_affected_km2": 20.0,
+      "vessels_involved": [],
+      "status": "confirmed",
+      "response_summary": "Tamil Nadu government reported removal of 105.82 kl of oily water and 393.5 tonnes of oily sludge; National Green Tribunal had pressed for faster cleanup.",
+      "confidence_level": "reported_single_source",
+      "is_synthetic": false,
+      "synthetic_notes": null,
+      "sources": ["src-deccanherald"]
+    }
+  ]
+}
