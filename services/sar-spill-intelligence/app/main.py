@@ -14,12 +14,15 @@ import numpy as np
 import rasterio
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from rasterio.transform import from_origin
+from rasterio.crs import CRS
+from rasterio.transform import array_bounds, from_origin
+from rasterio.warp import Resampling, calculate_default_transform, reproject
 
 sys.path.insert(0, "/app")
 
 from shared.db.connection import create_pool
 from shared.redis_client import close_redis, get_redis, publish_to_stream
+from shared.spatial.constants import SENTINEL1_PIXEL_SIZE_M
 from app.worker import STATE, run_sar_worker
 
 
@@ -85,29 +88,138 @@ _MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 _MAX_RASTER_PIXELS = 100_000_000
 
 
+def _scene_raster_path(scene_id: str) -> Path:
+    """Locate a scene's normalised raster the same way the worker reads it.
+
+    Uploads always land at ``<root>/sar/uploads/<scene_id>.tif`` (see
+    ``upload_sar`` below); this mirrors that convention rather than adding a
+    second one, so a scene's metadata always reflects the exact file the
+    worker actually processed.
+    """
+    root = Path(os.environ.get("SAR_ARTIFACT_ROOT", "artifacts"))
+    return root / "sar" / "uploads" / f"{scene_id}.tif"
+
+
+@app.get("/scenes/{scene_id}/metadata")
+async def scene_metadata(scene_id: str):
+    """Read-only SAR raster metadata for the frontend's SAR Image Information panel.
+
+    Values are read live from the normalised (always-EPSG:4326) GeoTIFF on
+    the shared artifact volume, so this reflects reality even if a scene was
+    reprojected from a non-4326 source at upload time.
+    """
+    raster_path = _scene_raster_path(scene_id)
+    if not raster_path.is_file():
+        raise HTTPException(status_code=404, detail="No SAR raster found for this scene_id.")
+
+    def _read() -> dict:
+        with rasterio.open(raster_path) as src:
+            west, south, east, north = src.bounds
+            return {
+                "scene_id": scene_id,
+                "format": "GeoTIFF",
+                "crs": src.crs.to_string() if src.crs else None,
+                "epsg": src.crs.to_epsg() if src.crs else None,
+                # The pipeline is calibrated for, and this normalisation step
+                # always targets, Sentinel-1's 10 m ground-range pixel size —
+                # reported directly rather than re-derived from the (now
+                # degree-based, EPSG:4326) pixel size, which would vary with
+                # latitude and not reflect the sensor's actual resolution.
+                "resolution_m": SENTINEL1_PIXEL_SIZE_M,
+                "width": src.width,
+                "height": src.height,
+                "bounds": {"west": west, "south": south, "east": east, "north": north},
+                "bands": src.count,
+                # Band-1-only convention (see _normalise_upload docstring):
+                # for a multi-band source this is always the first band,
+                # treated as VV for a dual-pol Sentinel-1 product.
+                "band_labels": ["VV"] if src.count >= 1 else [],
+                "nodata": src.nodata,
+            }
+
+    return await asyncio.to_thread(_read)
+
+
 def _normalise_upload(source_path: Path, output_path: Path, latitude: float, longitude: float) -> dict:
-    """Write a single-band EPSG:4326 GeoTIFF suitable for the existing worker."""
+    """Write a single-band EPSG:4326 GeoTIFF suitable for the existing worker.
+
+    Band selection: when the source is a real georeferenced GeoTIFF with more
+    than one band (e.g. a Sentinel-1 dual-pol VV+VH product), band 1 is always
+    used — for Sentinel-1 GRD products this is conventionally VV, which is the
+    polarisation the rest of this pipeline (despeckle/CFAR/dark-region
+    thresholds) is tuned against. There is no per-request band selection; if a
+    future need arises to process VH (or another band) it should be added as
+    an explicit "band" upload parameter rather than inferred from the file.
+
+    CRS handling: a GeoTIFF with an embedded CRS other than EPSG:4326 (for
+    example a Sentinel-1 product delivered in a UTM zone) is reprojected to
+    EPSG:4326 with bilinear resampling rather than rejected, so the frontend
+    map and the rest of the pipeline can always assume WGS84 lon/lat.
+
+    NoData handling: pixels flagged by the source GeoTIFF's `nodata` value (or
+    otherwise non-finite) are read as NaN, carried through reprojection as
+    NaN, and the *output* file has `nodata=NaN` set explicitly. This is the
+    piece that previously went missing between upload and processing: without
+    it, a source file's NoData value was silently dropped before the worker's
+    masked read ever saw it, so a sea-boundary/border NoData pixel could be
+    scaled into a false dark-region candidate. PNG/JPEG uploads have no
+    NoData concept and are not masked.
+    """
     with rasterio.open(source_path) as src:
         if src.count < 1:
             raise ValueError("The SAR image has no raster bands.")
         if src.width * src.height > _MAX_RASTER_PIXELS:
             raise ValueError("The SAR image is too large; maximum raster size is 100 megapixels.")
-        width, height = src.width, src.height
+        band_count = src.count
+
         if not src.crs and src.count >= 3:
             rgb = src.read((1, 2, 3)).astype("float32")
             image = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
-        else:
+        elif not src.crs:
             image = src.read(1).astype("float32")
+        else:
+            # Always band 1 (see docstring); read masked so the source's
+            # NoData value (whatever it is: 0, -9999, a real NaN, ...) becomes
+            # a proper NaN instead of a plain pixel value.
+            masked = src.read(1, masked=True)
+            image = np.asarray(masked.filled(np.nan), dtype="float32")
+
         if not np.isfinite(image).any():
             raise ValueError("The SAR image contains no usable pixels.")
 
         if src.crs:
             if src.crs.to_epsg() != 4326:
-                raise ValueError("Uploaded GeoTIFFs must use EPSG:4326 coordinates.")
-            transform = src.transform
-            geolocation = "embedded_geotiff"
+                dst_crs = CRS.from_epsg(4326)
+                dst_transform, dst_width, dst_height = calculate_default_transform(
+                    src.crs, dst_crs, src.width, src.height, *src.bounds
+                )
+                reprojected = np.full((dst_height, dst_width), np.nan, dtype="float32")
+                reproject(
+                    source=image,
+                    destination=reprojected,
+                    src_transform=src.transform,
+                    src_crs=src.crs,
+                    src_nodata=np.nan,
+                    dst_transform=dst_transform,
+                    dst_crs=dst_crs,
+                    dst_nodata=np.nan,
+                    resampling=Resampling.bilinear,
+                )
+                image = reprojected
+                transform = dst_transform
+                width, height = dst_width, dst_height
+                geolocation = "embedded_geotiff_reprojected"
+            else:
+                transform = src.transform
+                width, height = src.width, src.height
+                geolocation = "embedded_geotiff"
             radiometry = "embedded_values"
+            if not np.isfinite(image).any():
+                raise ValueError(
+                    "The SAR image contains no usable pixels after reprojection to EPSG:4326."
+                )
         else:
+            width, height = src.width, src.height
             # Plain image uploads have no map coordinates. Anchor their centre
             # on the selected vessel using the Sentinel-1 10 m pixel spacing.
             metres_per_lon_degree = max(1.0, 111_320.0 * math.cos(math.radians(latitude)))
@@ -141,21 +253,26 @@ def _normalise_upload(source_path: Path, output_path: Path, latitude: float, lon
             output_path,
             "w",
             driver="GTiff",
-            width=src.width,
-            height=src.height,
+            width=width,
+            height=height,
             count=1,
             dtype="float32",
             crs="EPSG:4326",
             transform=transform,
+            nodata=float("nan"),
             compress="deflate",
         ) as dst:
             dst.write(image, 1)
+
+        west, south, east, north = array_bounds(height, width, transform)
 
     return {
         "width": int(width),
         "height": int(height),
         "geolocation": geolocation,
         "radiometry": radiometry,
+        "band_count": int(band_count),
+        "bounds": {"west": west, "south": south, "east": east, "north": north},
     }
 
 
@@ -242,6 +359,7 @@ async def upload_sar(mmsi: int, image: UploadFile = File(...)):
             "mmsi": str(vessel["mmsi"]),
             "geolocation": raster_info["geolocation"],
             "radiometry": raster_info["radiometry"],
+            "band_count": raster_info["band_count"],
         }
         redis = await get_redis()
         await publish_to_stream(redis, "sar.clean", {
@@ -256,6 +374,8 @@ async def upload_sar(mmsi: int, image: UploadFile = File(...)):
             "status": "processing",
             "geolocation": raster_info["geolocation"],
             "radiometry": raster_info["radiometry"],
+            "band_count": raster_info["band_count"],
+            "bounds": raster_info["bounds"],
         }
     except HTTPException:
         raise
