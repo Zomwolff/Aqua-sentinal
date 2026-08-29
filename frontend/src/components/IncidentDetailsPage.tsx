@@ -4,6 +4,7 @@ import { SARArtifactPreview } from "./SARArtifactPreview";
 import "./IncidentDetailsPage.css";
 import { ARTIFACTS_BASE } from "../lib/api";
 import { SARLookalikeAnalysis } from "./SARLookalikeAnalysis";
+import { SourceAttributionAnalysis } from "./SourceAttributionAnalysis";
 
 interface Props {
   incidentDetail: any; // Result from fetchIncidentDetail
@@ -92,37 +93,7 @@ export function IncidentDetailsPage({ incidentDetail, onBack, onSpotVessel }: Pr
             </div>
           </section>
 
-          <section className="idp-card">
-            <h3>Source Attribution</h3>
-            {attribution && attribution.length > 0 ? (
-              <ul className="idp-attribution-list">
-                {attribution.map((attr: any, idx: number) => (
-                  <li key={idx} className="idp-attribution-item">
-                    <div className="attr-main">
-                      <span className="attr-rank">#{idx + 1}</span>
-                      <span className="attr-name">{attr.vessel_name || `MMSI ${attr.mmsi}`}</span>
-                      <span className="attr-score">{(attr.final_score * 100).toFixed(1)}% Match</span>
-                    </div>
-                    <div className="attr-details">
-                      <small>Distance: {(attr.distance_score * 100).toFixed(0)}%</small>
-                      <small>Trajectory: {(attr.trajectory_score * 100).toFixed(0)}%</small>
-                    </div>
-                    {onSpotVessel && attr.mmsi && (
-                      <button
-                        className="idp-spot-btn"
-                        onClick={() => onSpotVessel(String(attr.mmsi))}
-                        title="Center the map on this vessel's live position"
-                      >
-                        ◎ Spot vessel on map
-                      </button>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <div className="idp-empty-state">No nearby vessels correlated.</div>
-            )}
-          </section>
+          <SourceAttributionAnalysis attribution={attribution} incident={incident} onSpotVessel={onSpotVessel} />
 
           <section className="idp-card">
             <h3>Recommended Actions</h3>

@@ -10,6 +10,7 @@ import { useLiveFeeds } from "./hooks/useLiveFeeds";
 import { SARTaskingPipeline } from "./components/SARTaskingPipeline";
 import { IncidentDetailsPage } from "./components/IncidentDetailsPage";
 import { VesselDetailsPage } from "./components/VesselDetailsPage";
+import { sourceAttributionDemo } from "./demo/sourceAttributionDemo";
 
 type Severity = "critical" | "high" | "medium" | "low";
 type Vessel = { id: string; name: string; mmsi: string; type: string; risk: Severity; score: number; coordinates: [number, number]; detail: string; sar_status?: string | null; detected_spill_id?: string | null };
@@ -17,6 +18,7 @@ type Incident = { rawId: string; id: string; title: string; location: string; ag
 type FeedItem = { time: string; kind: "spill" | "risk" | "dark" | "system"; title: string; body: string };
 
 const severityLabel: Record<Severity, string> = { critical: "Critical", high: "High", medium: "Medium", low: "Low" };
+const isSourceAttributionDemo = new URLSearchParams(window.location.search).get("demo") === "source-attribution";
 
 // Fallback protected zone (Konkan sector) used only until the DB-backed
 // /protected-areas endpoint responds; replaced by real geometries on load.
@@ -29,8 +31,8 @@ const PROTECTED_FALLBACK: any = {
 function App() {
   const mapNode = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
-  const [selectedIncident, setSelectedIncident] = useState<Incident | null>(null);
-  const [incidentDetail, setIncidentDetail] = useState<any>(null);
+  const [selectedIncident, setSelectedIncident] = useState<Incident | null>(isSourceAttributionDemo ? sourceAttributionDemo.summary as unknown as Incident : null);
+  const [incidentDetail, setIncidentDetail] = useState<any>(isSourceAttributionDemo ? sourceAttributionDemo.detail : null);
   const [selectedVessel, setSelectedVessel] = useState<Vessel | null>(null);
   const [horizon, setHorizon] = useState(0);
   const [layers, setLayers] = useState({ vessels: true, dark: true, protected: true });
@@ -38,11 +40,11 @@ function App() {
 
   const [historicalFeed, setHistoricalFeed] = useState<FeedItem[]>([]);
   const { feed, liveEvent, connectionStatus } = useLiveFeeds(historicalFeed);
-  const [vessels, setVessels] = useState<Vessel[]>([]);
-  const [incidents, setIncidents] = useState<Incident[]>([]);
-  const [activeCount, setActiveCount] = useState(0);
+  const [vessels, setVessels] = useState<Vessel[]>(isSourceAttributionDemo ? [...sourceAttributionDemo.vessels] as unknown as Vessel[] : []);
+  const [incidents, setIncidents] = useState<Incident[]>(isSourceAttributionDemo ? [sourceAttributionDemo.summary as unknown as Incident] : []);
+  const [activeCount, setActiveCount] = useState(isSourceAttributionDemo ? 1 : 0);
   const [historicalSceneId, setHistoricalSceneId] = useState<string | null>(null);
-  const [viewMode, setViewMode] = useState<"map" | "incident" | "vessel">("map");
+  const [viewMode, setViewMode] = useState<"map" | "incident" | "vessel">(isSourceAttributionDemo ? "incident" : "map");
   const [vesselDetail, setVesselDetail] = useState<any>(null);
   const [aisFetching, setAisFetching] = useState(false);
   const [sarUploadOpen, setSarUploadOpen] = useState(false);
@@ -55,8 +57,13 @@ function App() {
   const [intelSts, setIntelSts] = useState<any[]>([]);
   const [intelSpoof, setIntelSpoof] = useState<any[]>([]);
   const [trackPoints, setTrackPoints] = useState<{ lon: number; lat: number; speed: number | null }[]>([]);
+  const [attributionMapLink, setAttributionMapLink] = useState<{ spill: [number, number]; vessel: [number, number]; distanceKm: number; mmsi: string } | null>(null);
 
   useEffect(() => {
+    if (isSourceAttributionDemo) {
+      setHistoricalFeed([{ time: "10:15:00", kind: "system", title: "Attribution demo loaded", body: "Frontend-only test fixture · no backend required" }]);
+      return;
+    }
     let mounted = true;
     async function loadData() {
       try {
@@ -238,6 +245,7 @@ function App() {
 
   useEffect(() => {
     if (!selectedIncident || !mapLoaded) return;
+    if (isSourceAttributionDemo) return;
     let mounted = true;
     (async () => {
       try {
@@ -358,6 +366,10 @@ function App() {
         id: "spot-highlight-ring", type: "circle", source: "spot-highlight",
         paint: { "circle-radius": 22, "circle-color": "transparent", "circle-stroke-color": "#f4bd68", "circle-stroke-width": 2.5, "circle-stroke-opacity": 0.9 }
       });
+
+      map.addSource("attribution-link", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+      map.addLayer({ id: "attribution-link-line", type: "line", source: "attribution-link", filter: ["==", ["geometry-type"], "LineString"], paint: { "line-color": "#f4bd68", "line-width": 2, "line-dasharray": [2, 2], "line-opacity": .9 } });
+      map.addLayer({ id: "attribution-spill-point", type: "circle", source: "attribution-link", filter: ["==", ["get", "kind"], "spill"], paint: { "circle-radius": 9, "circle-color": "#ed7657", "circle-stroke-color": "#ffe1d7", "circle-stroke-width": 2 } });
       
       map.on("click", "vessel-points", (event) => {
         const feature = event.features?.[0];
@@ -453,6 +465,20 @@ function App() {
     }
   }, [selectedVessel, trackPoints, mapLoaded]);
 
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapLoaded) return;
+    const source = map.getSource("attribution-link") as maplibregl.GeoJSONSource;
+    if (!source) return;
+    source.setData(attributionMapLink ? {
+      type: "FeatureCollection",
+      features: [
+        { type: "Feature", geometry: { type: "LineString", coordinates: [attributionMapLink.spill, attributionMapLink.vessel] }, properties: { kind: "link" } },
+        { type: "Feature", geometry: { type: "Point", coordinates: attributionMapLink.spill }, properties: { kind: "spill" } },
+      ],
+    } : { type: "FeatureCollection", features: [] });
+  }, [attributionMapLink, mapLoaded]);
+
   const loadVesselTrack = async (mmsi: string) => {
     try {
       const data = await fetchVesselTrack(mmsi, 24);
@@ -468,6 +494,7 @@ function App() {
   };
 
   const focusIncident = async (incident: Incident) => {
+    setAttributionMapLink(null);
     setSelectedIncident(incident);
     setSelectedVessel(null);
     setTrackPoints([]);
@@ -482,6 +509,7 @@ function App() {
   };
 
   const focusFlaggedVessel = async (vessel: Vessel) => {
+    setAttributionMapLink(null);
     setSelectedVessel(vessel);
     setSelectedIncident(null);
     setViewMode("vessel");
@@ -498,6 +526,7 @@ function App() {
   // "Spot this vessel on the map" from an opened incident: jump back to the
   // operational picture centered on the attributed vessel with its popover.
   const spotVesselOnMap = async (mmsi: string) => {
+    const spillCoordinates = selectedIncident?.coordinates;
     let vessel = vessels.find(v => v.mmsi === String(mmsi));
     if (!vessel) {
       try {
@@ -524,7 +553,20 @@ function App() {
     setIncidentDetail(null);
     setSelectedVessel(vessel);
     setViewMode("map");
-    mapRef.current?.flyTo({ center: vessel.coordinates, zoom: 9.2, duration: 1200 });
+    loadVesselTrack(vessel.mmsi);
+    if (spillCoordinates) {
+      const [spillLon, spillLat] = spillCoordinates;
+      const [vesselLon, vesselLat] = vessel.coordinates;
+      const radians = (degrees: number) => degrees * Math.PI / 180;
+      const dLat = radians(vesselLat - spillLat), dLon = radians(vesselLon - spillLon);
+      const a = Math.sin(dLat / 2) ** 2 + Math.cos(radians(spillLat)) * Math.cos(radians(vesselLat)) * Math.sin(dLon / 2) ** 2;
+      const distanceKm = 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      setAttributionMapLink({ spill: spillCoordinates, vessel: vessel.coordinates, distanceKm, mmsi: vessel.mmsi });
+      const bounds = new maplibregl.LngLatBounds(spillCoordinates, spillCoordinates).extend(vessel.coordinates);
+      mapRef.current?.fitBounds(bounds, { padding: 120, maxZoom: 10, duration: 1200 });
+    } else {
+      mapRef.current?.flyTo({ center: vessel.coordinates, zoom: 9.2, duration: 1200 });
+    }
   };
 
   // Manual live-AIS fetch: the reader interrupts its polling sleep and the
@@ -591,6 +633,7 @@ function App() {
           <div className="map-label map-title"><small>OPERATIONAL PICTURE</small><h1>Konkan Coast / Sector 04</h1><span>Live vessel telemetry and fused SAR intelligence</span></div>
           <div className="map-legend"><small>LAYERS</small>{([['vessels', 'AIS vessels'], ['dark', 'Dark vessels'], ['protected', 'Protected zones']] as const).map(([key, label]) => <button key={key} className={`legend-item ${layers[key as keyof typeof layers] ? "active" : ""}`} onClick={() => setLayers((state) => ({ ...state, [key]: !state[key as keyof typeof layers] }))}><span className={`legend-swatch ${key}`} />{label}</button>)}</div>
           {selectedIncident && <div className="coordinate">{selectedIncident.coordinates[1].toFixed(2)}° N &nbsp; {selectedIncident.coordinates[0].toFixed(2)}° E</div>}
+          {attributionMapLink && <div className="attribution-map-readout"><small>ATTRIBUTION SPATIAL CHECK</small><b>{attributionMapLink.distanceKm.toFixed(2)} km map separation</b><span>Spill centroid ↔ MMSI {attributionMapLink.mmsi}</span></div>}
           {(viewMode === "incident" || (viewMode === "vessel" && selectedVessel?.detected_spill_id)) && (
             <div className="forecast-bar"><div><small>FORECAST HORIZON</small><strong>{horizon === 0 ? "NOW" : `+${horizon}H`}</strong></div><div className="horizon-track">{[0, 3, 6, 12, 24].map((value) => <button key={value} className={horizon === value ? "chosen" : ""} onClick={() => setHorizon(value)}><span>{value === 0 ? "Now" : `+${value}h`}</span></button>)}</div><div className="forecast-confidence"><small>MODEL CONFIDENCE{activeForecast?.model_version ? ` · ${String(activeForecast.model_version)}` : ""}</small><strong>{modelConfidence}%</strong></div></div>
           )}
