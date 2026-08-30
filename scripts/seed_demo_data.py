@@ -88,7 +88,7 @@ async def main() -> int:
                             ST_SetSRID(ST_MakePoint($6, $7), 4326), $8, $9, $10, $11, $12)
                     """,
                     spill_id, NOW, SPILL_LAT, SPILL_LON, box(SPILL_LON, SPILL_LAT),
-                    SPILL_LON, SPILL_LAT, 12.5, 0.92, "SAR", "S1A_20260819T0100", "detected",
+                    SPILL_LON, SPILL_LAT, 12.5, 0.92, "sar_satellite", "S1A_20260819T0100", "detected",
                 )
 
                 candidates = [
@@ -126,7 +126,7 @@ async def main() -> int:
                                           computed_at)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                     """,
-                    spill_id, "HIGH", 8.5, 0.90, 0.70, 0.60, 0.85, NOW,
+                    spill_id, "HIGH", 0.75, 0.90, 0.70, 0.60, 0.85, NOW,
                 )
 
                 for rec, priority in (
