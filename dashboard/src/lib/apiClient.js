@@ -49,3 +49,13 @@ export async function getSpillSeverity(spillId, fetcher = fetch) {
 export async function getSpillRecommendations(spillId, fetcher = fetch) {
   return json(fetcher, `/spill/incidents/${encodeURIComponent(spillId)}/recommendations`);
 }
+
+/** SAR raster metadata (CRS, bounds, resolution, bands, ...) for a scene_id. */
+export async function getSarSceneMetadata(sceneId, fetcher = fetch) {
+  return json(fetcher, `/sar/scenes/${encodeURIComponent(sceneId)}/metadata`);
+}
+
+/** Public URL for a scene's processed SAR raster preview PNG. */
+export function sarArtifactPreviewUrl(sceneId, artifact = "filtered_image.png") {
+  return `${apiBase()}/artifacts/${encodeURIComponent(sceneId)}/${artifact}`;
+}

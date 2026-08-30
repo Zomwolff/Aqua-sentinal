@@ -984,6 +984,27 @@ async def upload_sar_image(mmsi: int, image: UploadFile = File(...)):
     return response.json()
 
 
+@app.get("/sar/scenes/{scene_id}/metadata", tags=["SAR"])
+async def sar_scene_metadata(scene_id: str):
+    """Proxy the SAR Image Information panel data for a processed scene."""
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(
+                f"{_SERVICES['sar-spill-intelligence']}/scenes/{scene_id}/metadata",
+            )
+    except httpx.RequestError as exc:
+        log.error("SAR metadata service unavailable: %s", exc)
+        raise HTTPException(status_code=503, detail="SAR processing service is unavailable.")
+
+    if response.status_code >= 400:
+        try:
+            detail = response.json().get("detail", "SAR scene metadata was not found.")
+        except ValueError:
+            detail = "SAR scene metadata was not found."
+        raise HTTPException(status_code=response.status_code, detail=detail)
+    return response.json()
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # FEATURES (raw analytics output)
 # ═══════════════════════════════════════════════════════════════════════════════
