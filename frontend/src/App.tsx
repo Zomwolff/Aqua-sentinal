@@ -10,7 +10,6 @@ import { useLiveFeeds } from "./hooks/useLiveFeeds";
 import { SARTaskingPipeline } from "./components/SARTaskingPipeline";
 import { IncidentDetailsPage } from "./components/IncidentDetailsPage";
 import { VesselDetailsPage } from "./components/VesselDetailsPage";
-import { spillForecastDemo } from "./demo/spillForecastDemo";
 
 type Severity = "critical" | "high" | "medium" | "low";
 type Vessel = { id: string; name: string; mmsi: string; type: string; risk: Severity; score: number; coordinates: [number, number]; detail: string; sar_status?: string | null; detected_spill_id?: string | null };
@@ -18,7 +17,6 @@ type Incident = { rawId: string; id: string; title: string; location: string; ag
 type FeedItem = { time: string; kind: "spill" | "risk" | "dark" | "system"; title: string; body: string };
 
 const severityLabel: Record<Severity, string> = { critical: "Critical", high: "High", medium: "Medium", low: "Low" };
-const isSpillForecastDemo = new URLSearchParams(window.location.search).get("demo") === "spill-forecast";
 
 // Fallback protected zone (Konkan sector) used only until the DB-backed
 // /protected-areas endpoint responds; replaced by real geometries on load.
@@ -31,8 +29,8 @@ const PROTECTED_FALLBACK: any = {
 function App() {
   const mapNode = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
-  const [selectedIncident, setSelectedIncident] = useState<Incident | null>(isSpillForecastDemo ? spillForecastDemo.summary as unknown as Incident : null);
-  const [incidentDetail, setIncidentDetail] = useState<any>(isSpillForecastDemo ? spillForecastDemo.detail : null);
+  const [selectedIncident, setSelectedIncident] = useState<Incident | null>(null);
+  const [incidentDetail, setIncidentDetail] = useState<any>(null);
   const [selectedVessel, setSelectedVessel] = useState<Vessel | null>(null);
   const [horizon, setHorizon] = useState(0);
   const [layers, setLayers] = useState({ vessels: true, dark: true, protected: true });
@@ -41,10 +39,10 @@ function App() {
   const [historicalFeed, setHistoricalFeed] = useState<FeedItem[]>([]);
   const { feed, liveEvent, connectionStatus } = useLiveFeeds(historicalFeed);
   const [vessels, setVessels] = useState<Vessel[]>([]);
-  const [incidents, setIncidents] = useState<Incident[]>(isSpillForecastDemo ? [spillForecastDemo.summary as unknown as Incident] : []);
-  const [activeCount, setActiveCount] = useState(isSpillForecastDemo ? 1 : 0);
+  const [incidents, setIncidents] = useState<Incident[]>([]);
+  const [activeCount, setActiveCount] = useState(0);
   const [historicalSceneId, setHistoricalSceneId] = useState<string | null>(null);
-  const [viewMode, setViewMode] = useState<"map" | "incident" | "vessel">(isSpillForecastDemo ? "incident" : "map");
+  const [viewMode, setViewMode] = useState<"map" | "incident" | "vessel">("map");
   const [vesselDetail, setVesselDetail] = useState<any>(null);
   const [aisFetching, setAisFetching] = useState(false);
   const [sarUploadOpen, setSarUploadOpen] = useState(false);
@@ -60,7 +58,6 @@ function App() {
   const [attributionMapLink, setAttributionMapLink] = useState<{ spill: [number, number]; vessel: [number, number]; distanceKm: number; mmsi: string } | null>(null);
 
   useEffect(() => {
-    if (isSpillForecastDemo) { setHistoricalFeed([{ time: "09:38:00", kind: "spill", title: "Forecast demo loaded", body: "Frontend-only test data · no backend required" }]); return; }
     let mounted = true;
     async function loadData() {
       try {
@@ -242,7 +239,6 @@ function App() {
 
   useEffect(() => {
     if (!selectedIncident || !mapLoaded) return;
-    if (isSpillForecastDemo) return;
     let mounted = true;
     (async () => {
       try {
