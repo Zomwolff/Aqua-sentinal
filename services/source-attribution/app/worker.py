@@ -205,46 +205,6 @@ async def _fetch_candidate_vessels(
     return [dict(r) for r in rows]
 
 
-async def _fetch_anomaly_counts(
-    pool, mmsi: str, acquisition_time: datetime,
-) -> tuple:
-    """Count HIGH and MEDIUM anomaly events in 6h before acquisition."""
-    since = acquisition_time - timedelta(hours=6)
-    rows = await pool.fetch(
-        "SELECT severity FROM anomaly_events WHERE mmsi=$1 AND window_start BETWEEN $2 AND $3",
-        mmsi, since, acquisition_time,
-    )
-    high = sum(1 for r in rows if r["severity"] == "HIGH")
-    med  = sum(1 for r in rows if r["severity"] == "MEDIUM")
-    return high, med
-
-
-async def _fetch_weather(
-    pool, spill_lat: float, spill_lon: float,
-    acquisition_time: datetime,
-) -> Dict[str, float]:
-    """Nearest environmental_conditions sample at acquisition time."""
-    row = await pool.fetchrow(
-        """
-        SELECT wind_speed_kmh, wind_direction_deg, current_speed_ms, current_direction_deg
-        FROM environmental_conditions
-        WHERE timestamp BETWEEN $3::timestamptz - INTERVAL '3 hours'
-                            AND $3::timestamptz + INTERVAL '3 hours'
-        ORDER BY geom <-> ST_SetSRID(ST_MakePoint($2, $1), 4326)
-        LIMIT 1
-        """,
-        spill_lat, spill_lon, acquisition_time,
-    )
-    if row:
-        return {
-            "wind_speed_ms":      float(row["wind_speed_kmh"] or 0) / 3.6,
-            "wind_dir_deg":       float(row["wind_direction_deg"] or 0),
-            "current_speed_ms":   float(row["current_speed_ms"] or 0),
-            "current_dir_deg":    float(row["current_direction_deg"] or 0),
-        }
-    return {"wind_speed_ms": 0.0, "wind_dir_deg": 0.0, "current_speed_ms": 0.0, "current_dir_deg": 0.0}
-
-
 async def _score_and_persist_vessel(
     pool, spill_id: str,
     spill_lat: float, spill_lon: float,
@@ -265,36 +225,19 @@ async def _score_and_persist_vessel(
     dist_m = float(vessel["distance_m"])
     d_score = score_distance(dist_m)
 
-    # Factor 2: trajectory — closest approach from ALL positions in window
-    traj_row = await pool.fetchrow(
-        """
-        SELECT MIN(
-            ST_Distance(
-                vp.geom::geography,
-                ST_SetSRID(ST_MakePoint($2, $1), 4326)::geography
-            )
-        ) AS closest_m
-        FROM vessel_positions vp
-        JOIN vessels v ON v.id = vp.vessel_id
-        WHERE v.mmsi = $3
-          AND vp.timestamp BETWEEN $4 AND $5
-        """,
-        spill_lat, spill_lon, mmsi,
-        acquisition_time - timedelta(hours=ATTRIBUTION_TEMPORAL_WINDOW_H),
-        acquisition_time + timedelta(hours=ATTRIBUTION_TEMPORAL_WINDOW_H),
+    # Factor 2: trajectory evidence was calculated by Evidence Fusion.
+    closest_m = vessel.get("closest_approach_m")
+    t_score = score_trajectory(float(closest_m) if closest_m is not None else None)
+
+    # Factor 3: temporal coincidence was calculated by Evidence Fusion.
+    time_gap_hours = vessel.get("time_gap_hours")
+    ti_score = score_time(float(time_gap_hours) if time_gap_hours is not None else None)
+
+    # Factor 4: behavioral anomaly evidence was calculated by Evidence Fusion.
+    b_score = score_behavior(
+        int(vessel.get("high_anomaly_count", 0)),
+        int(vessel.get("medium_anomaly_count", 0)),
     )
-    closest_m = float(traj_row["closest_m"]) if traj_row and traj_row["closest_m"] else None
-    t_score = score_trajectory(closest_m)
-
-    # Factor 3: temporal coincidence
-    hours_gap = None
-    if pos_ts:
-        hours_gap = abs((acquisition_time - pos_ts).total_seconds()) / 3600.0
-    ti_score = score_time(hours_gap)
-
-    # Factor 4: behavioral anomaly
-    high_cnt, med_cnt = await _fetch_anomaly_counts(pool, mmsi, acquisition_time)
-    b_score = score_behavior(high_cnt, med_cnt)
 
     # Factor 5: wind/current backward drift
     elapsed_h = (acquisition_time - pos_ts).total_seconds() / 3600.0 if pos_ts else 0.0
@@ -338,6 +281,58 @@ async def _score_and_persist_vessel(
         "time_score": ti_score, "behavior_score": b_score,
         "wind_score": w_score, "final_score": final,
         "label": attribution_label(final),
+    }
+
+
+def _normalise_candidate_vessel(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Normalize a vessel candidate from incident.fused.candidates into the
+    shape expected by the existing attribution scoring pipeline."""
+    if raw is None:
+        return None
+    vessel_id = raw.get("vessel_id")
+    if vessel_id is None:
+        raise ValueError("incident.fused candidate missing vessel_id")
+    mmsi = raw.get("mmsi")
+    if mmsi is None:
+        raise ValueError(f"incident.fused candidate with vessel_id={vessel_id} missing mmsi")
+
+    pos_lat = raw.get("position_lat")
+    pos_lon = raw.get("position_lon")
+    if pos_lat is None:
+        pos_lat = raw.get("latitude")
+    if pos_lon is None:
+        pos_lon = raw.get("longitude")
+    if pos_lat is None or pos_lon is None:
+        raise ValueError(f"incident.fused candidate vessel_id={vessel_id} missing position_lat/position_lon")
+
+    pos_ts = raw.get("position_timestamp")
+    if pos_ts is not None and not isinstance(pos_ts, datetime):
+        pos_ts = _parse_dt(pos_ts)
+
+    distance_m = raw.get("distance_m")
+    if distance_m is None:
+        raise ValueError(f"incident.fused candidate vessel_id={vessel_id} missing distance_m")
+
+    return {
+        "vessel_id": int(vessel_id),
+        "mmsi": str(mmsi),
+        "vessel_type": raw.get("vessel_type"),
+        "pos_lat": float(pos_lat),
+        "pos_lon": float(pos_lon),
+        "pos_ts": pos_ts,
+        "distance_m": float(distance_m),
+        "closest_approach_m": (
+            float(raw["closest_approach_m"])
+            if raw.get("closest_approach_m") is not None
+            else None
+        ),
+        "time_gap_hours": (
+            float(raw["time_gap_hours"])
+            if raw.get("time_gap_hours") is not None
+            else None
+        ),
+        "high_anomaly_count": int(raw.get("high_anomaly_count", 0)),
+        "medium_anomaly_count": int(raw.get("medium_anomaly_count", 0)),
     }
 
 
@@ -391,10 +386,20 @@ async def _process_incident_fused(
     STATE["last_candidate_id"] = candidate_id
     STATE["last_spill_id"] = spill_id
 
-    # Fetch candidate vessels from AIS positions
-    vessels = await _fetch_candidate_vessels(pool, spill_lat, spill_lon, acq)
+    candidates_raw = data.get("candidates")
+    if candidates_raw is None:
+        raise ValueError("incident.fused message missing candidates array; Evidence Fusion is required to provide candidate vessels")
+    if not isinstance(candidates_raw, list):
+        raise ValueError("incident.fused candidates must be a list")
+
+    vessels = []
+    for raw in candidates_raw:
+        vessel = _normalise_candidate_vessel(raw)
+        if vessel is not None:
+            vessels.append(vessel)
+
     if not vessels:
-        log.info("No AIS vessels found near spill=%s — publishing with no attribution", spill_id)
+        log.info("No candidate vessels provided for spill=%s — publishing with no attribution", spill_id)
         await publish_to_stream(redis, OUTPUT_STREAM, {
             "spill_id": spill_id,
             "candidate_id": candidate_id,
@@ -420,12 +425,17 @@ async def _process_incident_fused(
             seen[vid] = v
     unique_vessels = list(seen.values())
 
-    weather = await _fetch_weather(pool, spill_lat, spill_lon, acq)
+    environment = data.get("environment") or {
+        "wind_speed_ms": 0.0,
+        "wind_dir_deg": 0.0,
+        "current_speed_ms": 0.0,
+        "current_dir_deg": 0.0,
+    }
 
     scored = []
     for vessel in unique_vessels[:20]:  # cap at 20 candidates
         result_v = await _score_and_persist_vessel(
-            pool, spill_id, spill_lat, spill_lon, vessel, acq, weather,
+            pool, spill_id, spill_lat, spill_lon, vessel, acq, environment,
         )
         if result_v:
             scored.append(result_v)

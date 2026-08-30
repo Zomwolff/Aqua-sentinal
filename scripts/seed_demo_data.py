@@ -6,8 +6,9 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "services", "vessel-risk-engine"))
 
-from shared.db.connection import close_pool, create_pool
+from app.scorer import compute_risk_score
 
 NOW = datetime.now(timezone.utc)
 
@@ -29,18 +30,37 @@ VESSELS = [
     (419000003, None, "Ocean Harvester", "fishing", "India", 45, 10, 300, "Village Fishermen Co-op"),
 ]
 
+SYNTHETIC_STS_EVENTS = [
+    (0, 1, 55, 180, 95, 0.88, 73.90, 15.20),
+    (0, 1, 38, 260, 140, 0.74, 73.91, 15.19),
+    (1, 2, 47, 410, 225, 0.67, 73.88, 15.23),
+]
+
+SYNTHETIC_TRUST_SCORES = [
+    (0, 0.18, 0.24, 18500, True, False, True),
+    (1, 0.42, 0.46, 4200, False, True, True),
+    (2, 0.08, 0.12, 31800, True, True, False),
+]
+
+DEMO_RESET_TABLES = (
+    "vessels", "vessel_positions", "spill_incidents", "attribution_results",
+    "forecasts", "severity", "response_recommendations", "protected_areas",
+    "environmental_conditions", "ais_trust_scores", "sts_events",
+    "vessel_risk_scores",
+)
+
 
 async def main() -> int:
+    from shared.db.connection import close_pool, create_pool
+
     pool = await create_pool()
     try:
         conn = await pool.acquire()
         try:
             async with conn.transaction():
                 await conn.execute(
-                    "TRUNCATE vessels, vessel_positions, spill_incidents, "
-                    "attribution_results, forecasts, severity, "
-                    "response_recommendations, protected_areas, "
-                    "environmental_conditions RESTART IDENTITY CASCADE"
+                    f"TRUNCATE {', '.join(DEMO_RESET_TABLES)} "
+                    "RESTART IDENTITY CASCADE"
                 )
 
                 vessel_ids = []
@@ -77,6 +97,43 @@ async def main() -> int:
                             vessel_ids[idx], t, lat, lon, lon, lat, speeds[str(mmsi)], 120, 125, "under way using engine", "simulator",
                         )
                         positions += 1
+
+                sts_count = 0
+                for vessel_a_idx, vessel_b_idx, duration, avg_distance, min_distance, confidence, lon, lat in SYNTHETIC_STS_EVENTS:
+                    start_time = NOW - timedelta(hours=6, minutes=sts_count * 2 + duration)
+                    end_time = start_time + timedelta(minutes=duration)
+                    await conn.execute(
+                        """
+                        INSERT INTO sts_events
+                            (vessel_a_id, vessel_b_id, vessel_a_mmsi, vessel_b_mmsi,
+                             start_time, end_time, duration_minutes, avg_distance_m,
+                             min_distance_m, avg_combined_speed_knots, confidence, location)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                                ST_SetSRID(ST_MakePoint($12, $13), 4326))
+                        """,
+                        vessel_ids[vessel_a_idx], vessel_ids[vessel_b_idx],
+                        str(VESSELS[vessel_a_idx][0]), str(VESSELS[vessel_b_idx][0]),
+                        start_time, end_time, duration, avg_distance, min_distance,
+                        1.4, confidence, lon, lat,
+                    )
+                    sts_count += 1
+
+                trust_count = 0
+                for vessel_idx, instant, rolling, discrepancy, speed_jump, identity_change, mmsi_valid in SYNTHETIC_TRUST_SCORES:
+                    await conn.execute(
+                        """
+                        INSERT INTO ais_trust_scores
+                            (vessel_id, mmsi, timestamp, discrepancy_distance_m,
+                             instant_trust_score, rolling_trust_score, speed_jump_flag,
+                             identity_change_flag, mmsi_validity_flag, flag)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                        """,
+                        vessel_ids[vessel_idx], str(VESSELS[vessel_idx][0]),
+                        NOW - timedelta(minutes=15 * (vessel_idx + 1)), discrepancy,
+                        instant, rolling, speed_jump, identity_change, mmsi_valid,
+                        "spoofing_suspected",
+                    )
+                    trust_count += 1
 
                 spill_id = uuid.uuid4()
                 await conn.execute(
@@ -126,7 +183,7 @@ async def main() -> int:
                                           computed_at)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                     """,
-                    spill_id, "HIGH", 0.75, 0.90, 0.70, 0.60, 0.85, NOW,
+                    spill_id, "HIGH", 0.85, 0.90, 0.70, 0.60, 0.85, NOW,
                 )
 
                 for rec, priority in (
@@ -167,6 +224,38 @@ async def main() -> int:
                         12, 240, 0.8, 210, "era5",
                     )
 
+                risk_count = 0
+                for vessel_idx, (mmsi, *_) in enumerate(VESSELS):
+                    risk = compute_risk_score(
+                        mmsi,
+                        [],
+                        SYNTHETIC_TRUST_SCORES[vessel_idx][2],
+                        False,
+                        [
+                            {
+                                "vessel_a": VESSELS[a_idx][0],
+                                "vessel_b": VESSELS[b_idx][0],
+                                "start_time": (NOW - timedelta(hours=6)).isoformat(),
+                                "end_time": (NOW - timedelta(hours=1)).isoformat(),
+                            }
+                            for a_idx, b_idx, *_ in SYNTHETIC_STS_EVENTS
+                            if vessel_idx in (a_idx, b_idx)
+                        ],
+                        VESSELS[vessel_idx][3],
+                    )
+                    await conn.execute(
+                        """
+                        INSERT INTO vessel_risk_scores
+                            (vessel_id, mmsi, risk_score, tier, contributing_factors,
+                             recommended_action, updated_at)
+                        VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)
+                        """,
+                        vessel_ids[vessel_idx], str(mmsi), risk["risk_score"],
+                        risk["tier"], json.dumps(risk["contributing_factors"]),
+                        risk["recommended_action"], NOW,
+                    )
+                    risk_count += 1
+
                 print("Demo data inserted:")
                 print(f"  vessels                  : {len(vessel_ids)}")
                 print(f"  vessel_positions         : {positions}")
@@ -177,6 +266,9 @@ async def main() -> int:
                 print(f"  response_recommendations : 2")
                 print(f"  protected_areas          : 1")
                 print(f"  environmental_conditions : 4")
+                print(f"  synthetic_sts_events     : {sts_count}")
+                print(f"  synthetic_trust_scores   : {trust_count}")
+                print(f"  vessel_risk_scores       : {risk_count}")
                 return 0
         finally:
             await pool.release(conn)
