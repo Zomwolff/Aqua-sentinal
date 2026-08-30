@@ -5,14 +5,17 @@ import "./IncidentDetailsPage.css";
 import { ARTIFACTS_BASE } from "../lib/api";
 import { SARLookalikeAnalysis } from "./SARLookalikeAnalysis";
 import { SourceAttributionAnalysis } from "./SourceAttributionAnalysis";
+import { SpillForecastAnalysis } from "./SpillForecastAnalysis";
 
 interface Props {
   incidentDetail: any; // Result from fetchIncidentDetail
   onBack: () => void;
   onSpotVessel?: (mmsi: string) => void;
+  forecastHorizon: number;
+  onForecastHorizonChange: (hours: number) => void;
 }
 
-export function IncidentDetailsPage({ incidentDetail, onBack, onSpotVessel }: Props) {
+export function IncidentDetailsPage({ incidentDetail, onBack, onSpotVessel, forecastHorizon, onForecastHorizonChange }: Props) {
   const [images, setImages] = useState<Partial<Record<SarArtifactKey, string>>>({});
 
   const showCandidateImage = () => {
@@ -94,6 +97,8 @@ export function IncidentDetailsPage({ incidentDetail, onBack, onSpotVessel }: Pr
           </section>
 
           <SourceAttributionAnalysis attribution={attribution} incident={incident} onSpotVessel={onSpotVessel} />
+
+          <SpillForecastAnalysis incidentDetail={incidentDetail} horizon={forecastHorizon} onHorizonChange={onForecastHorizonChange} />
 
           <section className="idp-card">
             <h3>Recommended Actions</h3>

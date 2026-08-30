@@ -10,7 +10,7 @@ import { useLiveFeeds } from "./hooks/useLiveFeeds";
 import { SARTaskingPipeline } from "./components/SARTaskingPipeline";
 import { IncidentDetailsPage } from "./components/IncidentDetailsPage";
 import { VesselDetailsPage } from "./components/VesselDetailsPage";
-import { sourceAttributionDemo } from "./demo/sourceAttributionDemo";
+import { spillForecastDemo } from "./demo/spillForecastDemo";
 
 type Severity = "critical" | "high" | "medium" | "low";
 type Vessel = { id: string; name: string; mmsi: string; type: string; risk: Severity; score: number; coordinates: [number, number]; detail: string; sar_status?: string | null; detected_spill_id?: string | null };
@@ -18,7 +18,7 @@ type Incident = { rawId: string; id: string; title: string; location: string; ag
 type FeedItem = { time: string; kind: "spill" | "risk" | "dark" | "system"; title: string; body: string };
 
 const severityLabel: Record<Severity, string> = { critical: "Critical", high: "High", medium: "Medium", low: "Low" };
-const isSourceAttributionDemo = new URLSearchParams(window.location.search).get("demo") === "source-attribution";
+const isSpillForecastDemo = new URLSearchParams(window.location.search).get("demo") === "spill-forecast";
 
 // Fallback protected zone (Konkan sector) used only until the DB-backed
 // /protected-areas endpoint responds; replaced by real geometries on load.
@@ -31,8 +31,8 @@ const PROTECTED_FALLBACK: any = {
 function App() {
   const mapNode = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
-  const [selectedIncident, setSelectedIncident] = useState<Incident | null>(isSourceAttributionDemo ? sourceAttributionDemo.summary as unknown as Incident : null);
-  const [incidentDetail, setIncidentDetail] = useState<any>(isSourceAttributionDemo ? sourceAttributionDemo.detail : null);
+  const [selectedIncident, setSelectedIncident] = useState<Incident | null>(isSpillForecastDemo ? spillForecastDemo.summary as unknown as Incident : null);
+  const [incidentDetail, setIncidentDetail] = useState<any>(isSpillForecastDemo ? spillForecastDemo.detail : null);
   const [selectedVessel, setSelectedVessel] = useState<Vessel | null>(null);
   const [horizon, setHorizon] = useState(0);
   const [layers, setLayers] = useState({ vessels: true, dark: true, protected: true });
@@ -40,11 +40,11 @@ function App() {
 
   const [historicalFeed, setHistoricalFeed] = useState<FeedItem[]>([]);
   const { feed, liveEvent, connectionStatus } = useLiveFeeds(historicalFeed);
-  const [vessels, setVessels] = useState<Vessel[]>(isSourceAttributionDemo ? [...sourceAttributionDemo.vessels] as unknown as Vessel[] : []);
-  const [incidents, setIncidents] = useState<Incident[]>(isSourceAttributionDemo ? [sourceAttributionDemo.summary as unknown as Incident] : []);
-  const [activeCount, setActiveCount] = useState(isSourceAttributionDemo ? 1 : 0);
+  const [vessels, setVessels] = useState<Vessel[]>([]);
+  const [incidents, setIncidents] = useState<Incident[]>(isSpillForecastDemo ? [spillForecastDemo.summary as unknown as Incident] : []);
+  const [activeCount, setActiveCount] = useState(isSpillForecastDemo ? 1 : 0);
   const [historicalSceneId, setHistoricalSceneId] = useState<string | null>(null);
-  const [viewMode, setViewMode] = useState<"map" | "incident" | "vessel">(isSourceAttributionDemo ? "incident" : "map");
+  const [viewMode, setViewMode] = useState<"map" | "incident" | "vessel">(isSpillForecastDemo ? "incident" : "map");
   const [vesselDetail, setVesselDetail] = useState<any>(null);
   const [aisFetching, setAisFetching] = useState(false);
   const [sarUploadOpen, setSarUploadOpen] = useState(false);
@@ -60,10 +60,7 @@ function App() {
   const [attributionMapLink, setAttributionMapLink] = useState<{ spill: [number, number]; vessel: [number, number]; distanceKm: number; mmsi: string } | null>(null);
 
   useEffect(() => {
-    if (isSourceAttributionDemo) {
-      setHistoricalFeed([{ time: "10:15:00", kind: "system", title: "Attribution demo loaded", body: "Frontend-only test fixture · no backend required" }]);
-      return;
-    }
+    if (isSpillForecastDemo) { setHistoricalFeed([{ time: "09:38:00", kind: "spill", title: "Forecast demo loaded", body: "Frontend-only test data · no backend required" }]); return; }
     let mounted = true;
     async function loadData() {
       try {
@@ -245,7 +242,7 @@ function App() {
 
   useEffect(() => {
     if (!selectedIncident || !mapLoaded) return;
-    if (isSourceAttributionDemo) return;
+    if (isSpillForecastDemo) return;
     let mounted = true;
     (async () => {
       try {
@@ -266,7 +263,7 @@ function App() {
           }
           const trajSource = mapRef.current.getSource("trajectory") as maplibregl.GeoJSONSource;
           if (trajSource && detail.forecasts) {
-             const f = detail.forecasts.find((f: any) => f.horizon_hours === horizon) || detail.forecasts[0];
+             const f = horizon === 0 ? null : detail.forecasts.find((f: any) => Number(f.horizon_hours) === horizon);
              if (f?.geometry) {
                  trajSource.setData({ type: "Feature", geometry: f.geometry, properties: {} });
              } else {
@@ -611,11 +608,10 @@ function App() {
   // only when no forecast rows exist yet.
   const forecastsList = incidentDetail?.forecasts || [];
   const activeForecast =
-    forecastsList.find((f: any) => Number(f.horizon_hours) === horizon) ||
-    (horizon === 0 ? forecastsList[0] : null);
+    horizon === 0 ? null : forecastsList.find((f: any) => Number(f.horizon_hours) === horizon);
   const modelConfidence = activeForecast?.confidence != null
     ? Math.round(Number(activeForecast.confidence) * 100)
-    : Math.round(Math.max(48, 92 - horizon / 2));
+    : null;
 
   const connectionLabel = { connected: "CONNECTED", connecting: "CONNECTING", reconnecting: "RECONNECTING", offline: "OFFLINE" }[connectionStatus];
 
@@ -635,7 +631,7 @@ function App() {
           {selectedIncident && <div className="coordinate">{selectedIncident.coordinates[1].toFixed(2)}° N &nbsp; {selectedIncident.coordinates[0].toFixed(2)}° E</div>}
           {attributionMapLink && <div className="attribution-map-readout"><small>ATTRIBUTION SPATIAL CHECK</small><b>{attributionMapLink.distanceKm.toFixed(2)} km map separation</b><span>Spill centroid ↔ MMSI {attributionMapLink.mmsi}</span></div>}
           {(viewMode === "incident" || (viewMode === "vessel" && selectedVessel?.detected_spill_id)) && (
-            <div className="forecast-bar"><div><small>FORECAST HORIZON</small><strong>{horizon === 0 ? "NOW" : `+${horizon}H`}</strong></div><div className="horizon-track">{[0, 3, 6, 12, 24].map((value) => <button key={value} className={horizon === value ? "chosen" : ""} onClick={() => setHorizon(value)}><span>{value === 0 ? "Now" : `+${value}h`}</span></button>)}</div><div className="forecast-confidence"><small>MODEL CONFIDENCE{activeForecast?.model_version ? ` · ${String(activeForecast.model_version)}` : ""}</small><strong>{modelConfidence}%</strong></div></div>
+            <div className="forecast-bar"><div><small>FORECAST HORIZON</small><strong>{horizon === 0 ? "NOW" : `+${horizon}H`}</strong></div><div className="horizon-track">{[0, ...forecastsList.map((row: any) => Number(row.horizon_hours))].filter((value, index, values) => Number.isFinite(value) && values.indexOf(value) === index).map((value) => <button key={value} className={horizon === value ? "chosen" : ""} onClick={() => setHorizon(value)}><span>{value === 0 ? "Now" : `+${value}h`}</span></button>)}</div><div className="forecast-confidence"><small>MODEL CONFIDENCE{activeForecast?.model_version ? ` · ${String(activeForecast.model_version)}` : ""}</small><strong>{modelConfidence === null ? "Unavailable" : `${modelConfidence}%`}</strong></div></div>
           )}
         </section>
         <aside className="sidebar">
@@ -709,6 +705,8 @@ function App() {
                setIncidentDetail(null);
             }}
             onSpotVessel={spotVesselOnMap}
+            forecastHorizon={horizon}
+            onForecastHorizonChange={setHorizon}
          />
       )}
 
