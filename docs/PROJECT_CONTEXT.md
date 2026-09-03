@@ -316,8 +316,8 @@ Features in `App.tsx` / `components/*`:
 - `scripts/seed_demo_data.py` — seeds vessels, positions, one spill, attribution,
   forecasts, severity, recommendations, protected areas, environmental observations.
 - `scripts/verify_db.py` — schema verification.
-- `scripts/generate_synthetic_sar_fixture.py` — deterministic synthetic SAR fixture.
-- `scripts/demo_sar_spill.py` — end-to-end SAR demo: `--run-a` (real Sentinel-1 via
+- `sar/scripts/generate_synthetic_sar_fixture.py` — deterministic synthetic SAR fixture.
+- `sar/scripts/demo_sar_spill.py` — end-to-end SAR demo: `--run-a` (real Sentinel-1 via
   GEE) and `--run-b` (synthetic injection validating `is_synthetic` provenance),
   or both by default.
 - `run_ais_reader.py` — standalone AIS reader entrypoint.
@@ -327,9 +327,9 @@ Features in `App.tsx` / `components/*`:
 - `tests/` — **spatial regression tests** (meter-vs-degree distance, `ST_DWithin`
   radius semantics, geometry topology, lon/lat order) — run against a container.
 - Per-service suites (in-process; DB-backed tests skip when PostGIS unreachable):
-  `sar-spill-intelligence/test_*` (28), `lookalike-engine/test_*` (37),
-  `evidence-fusion/test_*` (19), `data-ingestion/test_synthetic_injection.py` (10),
-  plus `tests/test_spatial.py`, `tests/test_sar_acquisition.py`. Provenance tests
+  `sar/sar-spill-intelligence/test_*` (28), `lookalike-engine/test_*` (37),
+  `evidence-fusion/test_*` (19), `sar/tests/test_synthetic_injection.py` (10),
+  plus `tests/test_spatial.py`, `sar/tests/test_sar_acquisition.py`. Provenance tests
   stub shared infra so workers are tested without live Redis/PostGIS.
 
 ## 9. Docker / infra layout

@@ -299,7 +299,10 @@ def export_scene_metadata(
     _validate_geotiff(raster_path)
     log.info("SAR raster downloaded and validated: %s", raster_path)
 
-    from app.synthetic_injection import inject_geotiff_if_enabled
+    try:
+        from app.synthetic_injection import inject_geotiff_if_enabled
+    except ImportError:  # local repo-root run: sar/acquisition/ layout
+        from sar.acquisition.synthetic_injection import inject_geotiff_if_enabled
 
     raster_path, synthetic_meta = inject_geotiff_if_enabled(
         raster_path,

@@ -24,6 +24,13 @@ COPY services/shared/artifacts.py ./shared/artifacts.py
 
 # Copy service code
 COPY services/data-ingestion/app ./app
+# SAR acquisition modules live in sar/acquisition/ (repo root).
+# Copy them into ./app so existing `from app.sar_acquisition`,
+# `from app.synthetic_injection` and `from app.dynamic_sar_worker`
+# imports keep working inside the container.
+COPY sar/acquisition/sar_acquisition.py ./app/sar_acquisition.py
+COPY sar/acquisition/synthetic_injection.py ./app/synthetic_injection.py
+COPY sar/acquisition/dynamic_sar_worker.py ./app/dynamic_sar_worker.py
 
 EXPOSE 8000
 

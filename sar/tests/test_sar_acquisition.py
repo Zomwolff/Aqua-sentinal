@@ -5,8 +5,11 @@ import pytest
 from unittest.mock import Mock, patch, MagicMock, PropertyMock
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "services/data-ingestion"))
+# SAR refactor: tests moved to sar/tests/, acquisition code to sar/acquisition/.
+# Repo root for shared/ + sar/ package, plus sar/acquisition/ for legacy
+# `from app.sar_acquisition import ...` imports used below.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "sar", "acquisition"))
 
 # Mock ee module before importing sar_acquisition
 import ee

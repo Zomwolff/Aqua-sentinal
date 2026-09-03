@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-scripts/demo_sar_spill.py — End-to-end SAR spill demonstration.
+sar/scripts/demo_sar_spill.py — End-to-end SAR spill demonstration.
 
 PURPOSE
 -------
@@ -21,7 +21,7 @@ It only reads/writes through the real services.
 
 HOW TO RUN (inside the data-ingestion container, which owns GEE creds + /app/shared)
 ------------------------------------------------------------------------------------
-    docker compose cp scripts/demo_sar_spill.py data-ingestion:/app/demo_sar_spill.py
+    docker compose cp sar/scripts/demo_sar_spill.py data-ingestion:/app/demo_sar_spill.py
     docker compose exec data-ingestion python /app/demo_sar_spill.py
 
 Running inside the existing data-ingestion container reuses its environment

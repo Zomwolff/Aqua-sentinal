@@ -4,15 +4,25 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-SERVICE_ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(SERVICE_ROOT))
-sys.path.insert(0, str(SERVICE_ROOT.parent.parent))
+# SAR refactor: this test moved from services/data-ingestion/ to sar/tests/.
+# Acquisition code now lives in sar/acquisition/.
+SAR_ACQ_ROOT = Path(__file__).resolve().parent.parent / "acquisition"
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(SAR_ACQ_ROOT))
+sys.path.insert(0, str(REPO_ROOT))
 
-from app.synthetic_injection import (
-    inject_geotiff_if_enabled,
-    inject_synthetic_slick,
-    resolve_synthetic_enabled,
-)
+try:
+    from app.synthetic_injection import (
+        inject_geotiff_if_enabled,
+        inject_synthetic_slick,
+        resolve_synthetic_enabled,
+    )
+except ImportError:  # repo-root layout: sar.acquisition package
+    from sar.acquisition.synthetic_injection import (
+        inject_geotiff_if_enabled,
+        inject_synthetic_slick,
+        resolve_synthetic_enabled,
+    )
 
 
 def test_injection_never_mutates_input():

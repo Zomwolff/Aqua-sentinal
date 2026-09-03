@@ -216,7 +216,7 @@ services:
     <<: *backend-defaults
     build:
       context: .
-      dockerfile: services/sar-spill-intelligence/Dockerfile
+      dockerfile: sar/sar-spill-intelligence/Dockerfile
     environment:
       <<: *backend-env
       SERVICE_NAME: sar-spill-intelligence

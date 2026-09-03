@@ -6,13 +6,22 @@ from datetime import datetime, timedelta, timezone
 import ee
 
 from shared.db import get_pool
-from app.sar_acquisition import (
-    init_gee,
-    get_sentinel1_scenes,
-    select_best_scene,
-    export_scene_metadata,
-    publish_sar_scene,
-)
+try:
+    from app.sar_acquisition import (
+        init_gee,
+        get_sentinel1_scenes,
+        select_best_scene,
+        export_scene_metadata,
+        publish_sar_scene,
+    )
+except ImportError:  # local repo-root run: sar/acquisition/ layout
+    from sar.acquisition.sar_acquisition import (
+        init_gee,
+        get_sentinel1_scenes,
+        select_best_scene,
+        export_scene_metadata,
+        publish_sar_scene,
+    )
 
 log = logging.getLogger("data-ingestion")
 
@@ -65,7 +74,10 @@ async def process_task(task_id: int, mmsi: str, lat: float, lon: float, pool):
             import numpy as np
             import rasterio
             from rasterio.transform import from_origin
-            from app.synthetic_injection import inject_geotiff_if_enabled
+            try:
+                from app.synthetic_injection import inject_geotiff_if_enabled
+            except ImportError:  # local repo-root run
+                from sar.acquisition.synthetic_injection import inject_geotiff_if_enabled
             import os
             
             # Create a mock 1000x1000 GeoTIFF (simulating SAR backscatter -10 to -20 dB)

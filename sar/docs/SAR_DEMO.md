@@ -34,7 +34,7 @@ curl -sf http://localhost:8001/health | python3 -m json.tool
 curl -sf http://localhost:8008/health | python3 -m json.tool
 
 # 6. Run the demo (inside data-ingestion container)
-docker compose cp scripts/demo_sar_spill.py data-ingestion:/app/demo_sar_spill.py
+docker compose cp sar/scripts/demo_sar_spill.py data-ingestion:/app/demo_sar_spill.py
 docker compose exec data-ingestion python /app/demo_sar_spill.py --run-a --run-b
 ```
 
@@ -107,10 +107,10 @@ docker compose exec data-ingestion python /app/demo_sar_spill.py
 
 | Component | Path |
 |-----------|------|
-| Demo script | `scripts/demo_sar_spill.py` |
-| SAR acquisition | `services/data-ingestion/app/sar_acquisition.py` |
-| Synthetic injection | `services/data-ingestion/app/synthetic_injection.py` |
-| SAR worker | `services/sar-spill-intelligence/app/worker.py` |
+| Demo script | `sar/scripts/demo_sar_spill.py` |
+| SAR acquisition | `sar/acquisition/sar_acquisition.py` |
+| Synthetic injection | `sar/acquisition/synthetic_injection.py` |
+| SAR worker | `sar/sar-spill-intelligence/app/worker.py` |
 | Lookalike engine | `services/lookalike-engine/app/worker.py` |
 | Evidence fusion | `services/evidence-fusion/app/worker.py` |
 | Downloaded rasters | `/data/artifacts/sar/` (in container, `sar-scene-artifacts` volume) |

@@ -8,7 +8,7 @@ parameters for the synthetic run ONLY. They are NOT scientifically validated
 and must NOT be committed or reused as production defaults.
 
 Usage:
-    python3 scripts/generate_synthetic_sar_fixture.py [output_path]
+    python3 sar/scripts/generate_synthetic_sar_fixture.py [output_path]
 """
 from __future__ import annotations
 
@@ -69,6 +69,6 @@ def write_geotiff(path: str) -> str:
 
 
 if __name__ == "__main__":
-    out = sys.argv[1] if len(sys.argv) > 1 else "data/sample_sar/synthetic_e2e.tif"
+    out = sys.argv[1] if len(sys.argv) > 1 else "sar/data/sample_sar/synthetic_e2e.tif"
     write_geotiff(out)
     print(f"wrote {out}")

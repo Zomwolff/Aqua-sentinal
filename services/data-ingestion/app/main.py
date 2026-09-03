@@ -31,7 +31,10 @@ sys.path.insert(0, "/app")
 from shared.db import get_pool, close_pool
 from shared.redis_client import get_redis, close_redis
 from app.worker import run_ingestion_worker, ingest_ais_batch, STATE
-from app.dynamic_sar_worker import dynamic_sar_worker
+try:
+    from app.dynamic_sar_worker import dynamic_sar_worker
+except ImportError:  # repo-root layout: SAR code consolidated under sar/acquisition/
+    from sar.acquisition.dynamic_sar_worker import dynamic_sar_worker
 from app.deduplicator import AISDeduplicator
 from app.reference_loader import load_reference_layers, get_port_polygons, get_protected_zones
 

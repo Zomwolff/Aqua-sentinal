@@ -1,4 +1,4 @@
-"""Lightweight validation for scripts/demo_sar_spill.py pure helpers.
+"""Lightweight validation for sar/scripts/demo_sar_spill.py pure helpers.
 
 These tests exercise response parsing, candidate filtering by scene_id, and
 synthetic provenance verification WITHOUT requiring Docker / Redis / PostGIS.

@@ -72,7 +72,7 @@ same detection/scoring/fusion code paths as real data.
 
 ## 2. Service: sar-spill-intelligence (Steps 1–3)
 
-Located at `services/sar-spill-intelligence/`.
+Located at `sar/sar-spill-intelligence/`.
 
 | File | Purpose |
 |---|---|
@@ -374,8 +374,8 @@ injection demo parameters (`length_px=40`, `width_px=8`, `angle_deg=30`,
 
 | Suite | Items | Notes |
 |---|---|---|
-| Data ingestion (`services/data-ingestion/test_synthetic_injection.py`) | injection, opt-in precedence, GeoTIFF path | `10/10` |
-| SAR (`services/sar-spill-intelligence/test_*`) | CFAR, despeckle, morphology/polygonize, segmentation, provenance | `28/28` |
+| Data ingestion (`sar/tests/test_synthetic_injection.py`) | injection, opt-in precedence, GeoTIFF path | `10/10` |
+| SAR (`sar/sar-spill-intelligence/test_*`) | CFAR, despeckle, morphology/polygonize, segmentation, provenance | `28/28` |
 | Lookalike (`services/lookalike-engine/test_*`) | shape filters, artifact mapping, texture, scoring, provenance | `37/37` |
 | Evidence fusion (`services/evidence-fusion/test_*`) | correlation, fusion, provenance | `19/19` |
 
@@ -393,7 +393,7 @@ Guidelines inherited from the work:
 
 ## 13. End-to-end validation
 
-A deterministic fixture (`scripts/generate_synthetic_sar_fixture.py`, values
+A deterministic fixture (`sar/scripts/generate_synthetic_sar_fixture.py`, values
 are TEST fixtures, not scientific) drives the real Docker pipeline. It produces:
 
 - a large uniform calm-water carpet → `likely_calm_water` (retained, not scored),
