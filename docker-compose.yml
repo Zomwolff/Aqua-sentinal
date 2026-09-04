@@ -121,7 +121,7 @@ services:
     <<: *backend-defaults
     build:
       context: .
-      dockerfile: services/ais-reader/Dockerfile
+      dockerfile: AIS/services/ais-reader/Dockerfile
     environment:
       <<: *backend-env
       SERVICE_NAME: ais-reader
@@ -139,7 +139,7 @@ services:
     <<: *backend-defaults
     build:
       context: .
-      dockerfile: services/ais-analytics/Dockerfile
+      dockerfile: AIS/services/ais-analytics/Dockerfile
     environment:
       <<: *backend-env
       SERVICE_NAME: ais-analytics
@@ -150,7 +150,7 @@ services:
     <<: *backend-defaults
     build:
       context: .
-      dockerfile: services/anomaly-detection/Dockerfile
+      dockerfile: AIS/services/anomaly-detection/Dockerfile
     environment:
       <<: *backend-env
       SERVICE_NAME: anomaly-detection
@@ -168,7 +168,7 @@ services:
     <<: *backend-defaults
     build:
       context: .
-      dockerfile: services/dark-vessel-detection/Dockerfile
+      dockerfile: AIS/services/dark-vessel-detection/Dockerfile
     environment:
       <<: *backend-env
       SERVICE_NAME: dark-vessel-detection
@@ -183,7 +183,7 @@ services:
     <<: *backend-defaults
     build:
       context: .
-      dockerfile: services/ais-spoof-detection/Dockerfile
+      dockerfile: AIS/services/ais-spoof-detection/Dockerfile
     environment:
       <<: *backend-env
       SERVICE_NAME: ais-spoof-detection
@@ -194,7 +194,7 @@ services:
     <<: *backend-defaults
     build:
       context: .
-      dockerfile: services/sts-detection/Dockerfile
+      dockerfile: AIS/services/sts-detection/Dockerfile
     environment:
       <<: *backend-env
       SERVICE_NAME: sts-detection
@@ -205,7 +205,7 @@ services:
     <<: *backend-defaults
     build:
       context: .
-      dockerfile: services/vessel-risk-engine/Dockerfile
+      dockerfile: AIS/services/vessel-risk-engine/Dockerfile
     environment:
       <<: *backend-env
       SERVICE_NAME: vessel-risk-engine
@@ -364,7 +364,7 @@ services:
     <<: *backend-defaults
     build:
       context: .
-      dockerfile: services/api-gateway/Dockerfile
+      dockerfile: AIS/services/api-gateway/Dockerfile
     environment:
       <<: *backend-env
       SERVICE_NAME: api-gateway

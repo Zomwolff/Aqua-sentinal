@@ -481,13 +481,13 @@ also expose `GET /status`.
 | `postgres` | PostGIS 15 storage | — | 5433 | `pg_isready` healthcheck | — | — | PostGIS | — |
 | `redis` | Redis 7 streams/state | — | 6380 | `redis-cli ping` | — | all streams routed here | — | — |
 | `data-ingestion` | Live AIS validation/dedup/normalize + SAR acquisition trigger | `services/data-ingestion` | 8001 | `/health` | — | `ais.clean` (via POST), `sar.clean` | vessels, vessel_positions, reference_layers | AISStream(WS)/GEE+Drive (SAR) |
-| `ais-reader` | Standalone AIS reader (pure Python, no HTTP) | `services/ais-reader` | — | none (no HTTP) | — | `ais.clean` | vessels, vessel_positions, vessel_draught_observations | AISStream WS / VesselAPI HTTP |
-| `ais-analytics` | 15-min per-vessel feature windows | `services/ais-analytics` | 8002 | `/health` | `ais.clean` (analytics) | `ais.features` | vessels, vessel_features | data-ingestion(reference layers) |
-| `anomaly-detection` | Rules + stats + ML anomaly flags | `services/anomaly-detection` | 8003 | `/health` | `ais.features` (anomaly-detection) | `anomaly.events` | vessels, vessel_features, anomaly_events, environmental_conditions | — |
-| `dark-vessel-detection` | SAR-detected vessels with no AIS | `services/dark-vessel-detection` | 8004 | `/health` | `sar.clean` (dark-vessel-detection) | `dark.vessel.events` | vessel_positions, dark_vessel_events | — |
-| `ais-spoof-detection` | Dead-reckoning trust/spoof scores | `services/ais-spoof-detection` | 8005 | `/health` | `ais.clean` (spoof-detection) | `ais.trust` | vessels, vessel_positions, ais_trust_scores | — |
-| `sts-detection` | Ship-to-ship transfer encounter detection | `services/sts-detection` | 8006 | `/health` | `ais.features` (sts-detection) | `sts.events` | vessels, vessel_positions, sts_events | — |
-| `vessel-risk-engine` | Per-vessel risk scoring | `services/vessel-risk-engine` | 8007 | `/health` | `anomaly.events`+`ais.trust`+`sts.events` (risk-engine) | `vessel.risk` | vessels, vessel_risk_scores, satellite_tasking_requests | — |
+| `ais-reader` | Standalone AIS reader (pure Python, no HTTP) | `AIS/services/ais-reader` | — | none (no HTTP) | — | `ais.clean` | vessels, vessel_positions, vessel_draught_observations | AISStream WS / VesselAPI HTTP |
+| `ais-analytics` | 15-min per-vessel feature windows | `AIS/services/ais-analytics` | 8002 | `/health` | `ais.clean` (analytics) | `ais.features` | vessels, vessel_features | data-ingestion(reference layers) |
+| `anomaly-detection` | Rules + stats + ML anomaly flags | `AIS/services/anomaly-detection` | 8003 | `/health` | `ais.features` (anomaly-detection) | `anomaly.events` | vessels, vessel_features, anomaly_events, environmental_conditions | — |
+| `dark-vessel-detection` | SAR-detected vessels with no AIS | `AIS/services/dark-vessel-detection` | 8004 | `/health` | `sar.clean` (dark-vessel-detection) | `dark.vessel.events` | vessel_positions, dark_vessel_events | — |
+| `ais-spoof-detection` | Dead-reckoning trust/spoof scores | `AIS/services/ais-spoof-detection` | 8005 | `/health` | `ais.clean` (spoof-detection) | `ais.trust` | vessels, vessel_positions, ais_trust_scores | — |
+| `sts-detection` | Ship-to-ship transfer encounter detection | `AIS/services/sts-detection` | 8006 | `/health` | `ais.features` (sts-detection) | `sts.events` | vessels, vessel_positions, sts_events | — |
+| `vessel-risk-engine` | Per-vessel risk scoring | `AIS/services/vessel-risk-engine` | 8007 | `/health` | `anomaly.events`+`ais.trust`+`sts.events` (risk-engine) | `vessel.risk` | vessels, vessel_risk_scores, satellite_tasking_requests | — |
 | `sar-spill-intelligence` | SAR detection (Lee/Otsu/CFAR/morphology/polygonize) | `sar/sar-spill-intelligence` | 8008 | `/health`,`/status` | `sar.clean` (sar-spill-intelligence) | `spill.candidates.raw` | spill_candidates, artifact vol | rasterio(GDAL) |
 | `lookalike-engine` | Shape + GLCM texture + confidence scoring | `services/lookalike-engine` | 8009 | `/health`,`/status` | `spill.candidates.raw` (lookalike-engine) | `spill.candidates.filtered` | spill_candidates, artifact vol | — |
 | `evidence-fusion` | SAR + high-risk vessel correlation | `services/evidence-fusion` | 8010 | `/health`,`/status` | `vessel.risk`+`spill.candidates.filtered` (evidence-fusion) | `incident.fused` | spill_candidates, vessel_risk_scores, vessel_positions | — |
@@ -495,7 +495,7 @@ also expose `GET /status`.
 | `drift-forecast` | (skeleton, heartbeat only) | `services/drift-forecast` | 8012 | `/health` | — | — | (none wired) | — |
 | `severity-impact` | (skeleton, heartbeat only) | `services/severity-impact` | 8013 | `/health` | — | — | (none wired) | — |
 | `response-decision` | (skeleton, heartbeat only) | `services/response-decision` | 8014 | `/health` | — | — | (none wired) | — |
-| `api-gateway` | REST API + WebSocket relay | `services/api-gateway` | 8015 | `/health`, `/system/health` | reads 5 streams (xread) for WS | — (relays only) | many tables (read-only aggregation) | internal services `/health` |
+| `api-gateway` | REST API + WebSocket relay | `AIS/services/api-gateway` | 8015 | `/health`, `/system/health` | reads 5 streams (xread) for WS | — (relays only) | many tables (read-only aggregation) | internal services `/health` |
 | `dashboard` | React + Vite + Leaflet UI | `dashboard/` | 3000 | (nginx) | ws `/live` via gateway | — | — | api-gateway REST/WS |
 | `simulator` | data replay container (no HTTP) | `simulator/` | — | — | — | (none currently) | — | mounts `./data` |
 
@@ -590,7 +590,7 @@ things documented to run natively are `scripts/*.py`, the test suites (Section 1
 
 - Purpose: standalone WebSocket-to-AISStream reader (or VesselAPI poll); **no HTTP
   server**.
-- Directory: `services/ais-reader`. Public port: none.
+- Directory: `AIS/services/ais-reader`. Public port: none.
 - Start: `docker compose up -d ais-reader` (runs `python -u app/reader.py`).
 - Health: none. Verify via logs / `docker compose ps ais-reader` (running) and that
   `ais.clean` grows: `docker compose exec redis redis-cli XLEN ais.clean`.
@@ -609,7 +609,7 @@ things documented to run natively are `scripts/*.py`, the test suites (Section 1
 ### 10.5 ais-analytics
 
 - Purpose: buffers `ais.clean` into per-vessel 15-min windows, computes features.
-- Dir `services/ais-analytics`. Port 8002.
+- Dir `AIS/services/ais-analytics`. Port 8002.
 - Start: `docker compose up -d ais-analytics`
 - Health: `curl -sf http://localhost:8002/health` (expect `worker_alive: true`).
 - Endpoints: `GET /vessels`, `GET /vessels/{mmsi}/features`,
@@ -623,7 +623,7 @@ things documented to run natively are `scripts/*.py`, the test suites (Section 1
 ### 10.6 anomaly-detection
 
 - Purpose: rules + statistical z-score + ML (Isolation Forest) anomaly flagging.
-- Directory: `services/anomaly-detection`. Port 8003.
+- Directory: `AIS/services/anomaly-detection`. Port 8003.
 - Start: `docker compose up -d anomaly-detection`
 - Health: `curl -sf http://localhost:8003/health`
 - Endpoints: `GET /anomalies`, `GET /anomalies/{event_id}`, `POST /anomalies/evaluate`.
@@ -637,7 +637,7 @@ things documented to run natively are `scripts/*.py`, the test suites (Section 1
 ### 10.7 ais-spoof-detection
 
 - Purpose: dead-reckoning trust scoring to flag spoofing.
-- Directory: `services/ais-spoof-detection`. Port 8005.
+- Directory: `AIS/services/ais-spoof-detection`. Port 8005.
 - Start: `docker compose up -d ais-spoof-detection`
 - Health: `curl -sf http://localhost:8005/health`
 - Endpoints: `GET /vessels/{mmsi}/trust-score`, `GET /spoofing-suspects`.
@@ -647,7 +647,7 @@ things documented to run natively are `scripts/*.py`, the test suites (Section 1
 ### 10.8 sts-detection
 
 - Purpose: detects ship-to-ship (STS) encounters from paired vessel tracks.
-- Directory: `services/sts-detection`. Port 8006.
+- Directory: `AIS/services/sts-detection`. Port 8006.
 - Start: `docker compose up -d sts-detection`
 - Health: `curl -sf http://localhost:8006/health`
 - Consumes: `ais.features` (group `sts-detection`). Produces: `sts.events`.
@@ -657,7 +657,7 @@ things documented to run natively are `scripts/*.py`, the test suites (Section 1
 ### 10.9 vessel-risk-engine
 
 - Purpose: computes per-vessel risk score + tier + recommended action.
-- Directory: `services/vessel-risk-engine`. Port 8007.
+- Directory: `AIS/services/vessel-risk-engine`. Port 8007.
 - Start: `docker compose up -d vessel-risk-engine`
 - Health: `curl -sf http://localhost:8007/health`
 - Consumes: `anomaly.events`, `ais.trust`, `sts.events` (group `risk-engine`). Produces:
@@ -668,7 +668,7 @@ things documented to run natively are `scripts/*.py`, the test suites (Section 1
 ### 10.10 dark-vessel-detection
 
 - Purpose: SAR-driven dark-vessel detection (consumes `sar.clean`).
-- Directory: `services/dark-vessel-detection`. Port 8004.
+- Directory: `AIS/services/dark-vessel-detection`. Port 8004.
 - Start: `docker compose up -d dark-vessel-detection`
 - Health: `curl -sf http://localhost:8004/health`
 - Consumes: `sar.clean` (group `dark-vessel-detection`). Produces: `dark.vessel.events`.
@@ -732,7 +732,7 @@ things documented to run natively are `scripts/*.py`, the test suites (Section 1
 ### 10.14 api-gateway
 
 - Purpose: unified REST API + WebSocket `/live` relay for the dashboard.
-- Directory: `services/api-gateway`. Port 8015.
+- Directory: `AIS/services/api-gateway`. Port 8015.
 - Start: `docker compose up -d api-gateway`
 - Health: `curl -sf http://localhost:8015/health`; Aggregate:
   `curl -sf http://localhost:8015/system/health`.
