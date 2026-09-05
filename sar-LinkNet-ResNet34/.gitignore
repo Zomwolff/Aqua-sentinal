@@ -1,0 +1,28 @@
+# Virtual environments
+venv/
+.venv/
+
+# Large model weights — shared out-of-band (Drive/USB), not via git
+checkpoints/
+*.pth
+
+# Dataset (large, local only)
+dataset/
+
+# Generated outputs (masks, overlays, demo runs, logs)
+outputs/
+*.csv
+sample_check.png
+# NOTE: predictions_sample.png is intentionally tracked (referenced by evaluation_report.md)
+
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# OS / editor clutter
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
