@@ -7,7 +7,7 @@
 | Field | Value |
 |---|---|
 | Stream | `spill.candidates.raw` |
-| Producer | `sar-spill-intelligence` worker (`services/sar-spill-intelligence/app/worker.py`) |
+| Producer | `sar-spill-intelligence` worker (`sar/sar-spill-intelligence/app/worker.py`) |
 | Consumer group | none assigned yet (downstream classification service to follow) |
 | Purpose | Announces the raw SAR spill candidates persisted to the `spill_candidates` PostGIS table for one scene, after morphology + polygonization (Step 3). Downstream look-alike classification consumes these candidate IDs. |
 

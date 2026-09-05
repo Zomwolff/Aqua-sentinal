@@ -1,0 +1,55 @@
+.anomaly-detection-card { display: flex; flex-direction: column; gap: 14px; }
+.anomaly-card-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.anomaly-card-heading h3 { margin-bottom: 5px; }
+.anomaly-card-heading p { margin: 0; color: #8ea29a; font-size: 11px; line-height: 1.5; }
+.anomaly-monitoring-status { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px; border: 1px solid rgba(80, 205, 153, .28); background: rgba(80, 205, 153, .08); color: #73d5a8; padding: 5px 7px; font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
+.anomaly-monitoring-status i { width: 6px; height: 6px; border-radius: 50%; background: #73d5a8; box-shadow: 0 0 7px rgba(115, 213, 168, .8); }
+.anomaly-count-banner { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border: 1px solid rgba(244, 174, 73, .28); background: rgba(244, 174, 73, .08); color: #f2b75e; font-size: 12px; }
+.anomaly-list { display: flex; flex-direction: column; gap: 10px; }
+.anomaly-item { border: 1px solid rgba(255,255,255,.08); border-left: 3px solid #77867f; background: rgba(8, 19, 25, .72); padding: 12px; }
+.anomaly-item.severity-high, .anomaly-item.severity-critical { border-left-color: #ef654f; }
+.anomaly-item.severity-medium { border-left-color: #e9ad4b; }
+.anomaly-item.severity-low { border-left-color: #63b894; }
+.anomaly-item-topline { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.anomaly-item-topline time { color: #768a82; font-size: 9px; text-align: right; }
+.anomaly-severity { display: inline-flex; padding: 3px 6px; font-size: 9px; font-weight: 800; letter-spacing: .08em; border: 1px solid currentColor; }
+.anomaly-severity.severity-high, .anomaly-severity.severity-critical { color: #f17a67; background: rgba(239, 101, 79, .09); }
+.anomaly-severity.severity-medium { color: #e9b75f; background: rgba(233, 183, 95, .09); }
+.anomaly-severity.severity-low { color: #79c9a6; background: rgba(121, 201, 166, .09); }
+.anomaly-severity.severity-unknown { color: #9babaf; }
+.anomaly-item h4 { color: #f1f5f2; font-size: 14px; margin: 9px 0 4px; }
+.anomaly-explanation { color: #b7c5bf; font-size: 11px; line-height: 1.55; margin: 0 0 10px; }
+.anomaly-risk-link { display: grid; grid-template-columns: 1fr; gap: 2px; padding: 8px 9px; border: 1px solid rgba(116, 167, 185, .18); background: rgba(48, 92, 106, .12); }
+.anomaly-risk-link span { color: #76919b; font-size: 8px; text-transform: uppercase; letter-spacing: .08em; }
+.anomaly-risk-link strong { color: #9ec4d2; font-size: 10px; font-weight: 600; }
+.anomaly-risk-link.included { border-color: rgba(232, 165, 70, .25); background: rgba(232, 165, 70, .08); }
+.anomaly-risk-link.included strong { color: #e9b35f; }
+.anomaly-risk-link.excluded strong { color: #91a39b; }
+.anomaly-metadata { display: flex; flex-wrap: wrap; gap: 7px 12px; margin-top: 8px; color: #73877f; font-size: 9px; }
+.anomaly-metadata b { color: #aebdb7; font-weight: 600; }
+.anomaly-evidence { margin-top: 9px; border-top: 1px solid rgba(255,255,255,.06); padding-top: 8px; }
+.anomaly-evidence summary { cursor: pointer; color: #77b7c8; font-size: 10px; list-style: none; display: flex; align-items: center; justify-content: space-between; }
+.anomaly-evidence summary::-webkit-details-marker { display: none; }
+.anomaly-evidence summary::before { content: "+"; margin-right: 6px; color: #5e8997; }
+.anomaly-evidence[open] summary::before { content: "−"; }
+.anomaly-evidence summary span { margin-left: auto; min-width: 19px; text-align: center; border: 1px solid rgba(119,183,200,.18); color: #86a9b3; }
+.anomaly-evidence dl { display: grid; gap: 0; margin: 9px 0 0; }
+.anomaly-evidence dl div { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,.04); }
+.anomaly-evidence dt { color: #7f918a; font-size: 9px; }
+.anomaly-evidence dd { margin: 0; color: #c2cec9; font-size: 9px; text-align: right; overflow-wrap: anywhere; }
+.anomaly-evidence > p { margin: 8px 0 0; color: #72847d; font-size: 9px; }
+.anomaly-empty-state { display: flex; gap: 11px; align-items: center; padding: 13px; border: 1px solid rgba(82, 180, 137, .2); background: rgba(82, 180, 137, .07); }
+.anomaly-empty-icon { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; border: 1px solid #67c39a; color: #79d2aa; }
+.anomaly-empty-state strong { color: #aee0ca; font-size: 12px; }
+.anomaly-empty-state p { margin: 3px 0 0; color: #7f968c; font-size: 10px; line-height: 1.45; }
+.anomaly-risk-summary { border: 1px solid rgba(99, 154, 174, .16); background: rgba(27, 54, 64, .18); padding: 11px; }
+.anomaly-risk-summary > div { display: flex; justify-content: space-between; gap: 10px; align-items: center; }
+.anomaly-risk-summary span { color: #829b94; font-size: 9px; text-transform: uppercase; letter-spacing: .06em; }
+.anomaly-risk-summary strong { color: #a5cfdb; font-size: 12px; }
+.anomaly-risk-summary p { color: #9eafa8; font-size: 10px; line-height: 1.5; margin: 6px 0; }
+.anomaly-risk-summary small { display: block; color: #678078; font-size: 9px; border-top: 1px solid rgba(255,255,255,.05); padding-top: 7px; }
+
+@media (max-width: 700px) {
+  .anomaly-card-heading { flex-direction: column; }
+  .anomaly-item-topline { align-items: flex-start; }
+}

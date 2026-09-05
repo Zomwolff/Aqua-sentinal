@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import "./IncidentDetailsPage.css";
 import { fetchIncidentDetail, SAR_ARTIFACT_FILENAMES, sarArtifactUrls, type SarArtifactKey } from "../lib/api";
 import { SARArtifactPreview } from "./SARArtifactPreview";
+import { AnomalyDetectionCard } from "./AnomalyDetectionCard";
 
 interface Props {
   vesselDetail: any;
@@ -77,7 +78,7 @@ export function VesselDetailsPage({ vesselDetail, onBack, liveEvent }: Props) {
     );
   }
 
-  const { vessel, risk, sar_tasking } = vesselDetail;
+  const { vessel, risk, sar_tasking, anomalies } = vesselDetail;
   const riskTier = risk?.tier?.toLowerCase() || 'low';
   const previewPendingLabel = sar_tasking?.status === "failed" ? "PROCESSING FAILED" : "PENDING";
 
@@ -189,6 +190,8 @@ export function VesselDetailsPage({ vesselDetail, onBack, liveEvent }: Props) {
               </>
             )}
           </div>
+
+          <AnomalyDetectionCard anomalies={anomalies} risk={risk} />
 
           <div className="idp-card">
             <h3>Final Verdict</h3>

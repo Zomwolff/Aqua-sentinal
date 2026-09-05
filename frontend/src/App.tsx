@@ -55,6 +55,7 @@ function App() {
   const [intelSts, setIntelSts] = useState<any[]>([]);
   const [intelSpoof, setIntelSpoof] = useState<any[]>([]);
   const [trackPoints, setTrackPoints] = useState<{ lon: number; lat: number; speed: number | null }[]>([]);
+  const [attributionMapLink, setAttributionMapLink] = useState<{ spill: [number, number]; vessel: [number, number]; distanceKm: number; mmsi: string } | null>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -258,7 +259,7 @@ function App() {
           }
           const trajSource = mapRef.current.getSource("trajectory") as maplibregl.GeoJSONSource;
           if (trajSource && detail.forecasts) {
-             const f = detail.forecasts.find((f: any) => f.horizon_hours === horizon) || detail.forecasts[0];
+             const f = horizon === 0 ? null : detail.forecasts.find((f: any) => Number(f.horizon_hours) === horizon);
              if (f?.geometry) {
                  trajSource.setData({ type: "Feature", geometry: f.geometry, properties: {} });
              } else {
@@ -358,6 +359,10 @@ function App() {
         id: "spot-highlight-ring", type: "circle", source: "spot-highlight",
         paint: { "circle-radius": 22, "circle-color": "transparent", "circle-stroke-color": "#f4bd68", "circle-stroke-width": 2.5, "circle-stroke-opacity": 0.9 }
       });
+
+      map.addSource("attribution-link", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+      map.addLayer({ id: "attribution-link-line", type: "line", source: "attribution-link", filter: ["==", ["geometry-type"], "LineString"], paint: { "line-color": "#f4bd68", "line-width": 2, "line-dasharray": [2, 2], "line-opacity": .9 } });
+      map.addLayer({ id: "attribution-spill-point", type: "circle", source: "attribution-link", filter: ["==", ["get", "kind"], "spill"], paint: { "circle-radius": 9, "circle-color": "#ed7657", "circle-stroke-color": "#ffe1d7", "circle-stroke-width": 2 } });
       
       map.on("click", "vessel-points", (event) => {
         const feature = event.features?.[0];
@@ -453,6 +458,20 @@ function App() {
     }
   }, [selectedVessel, trackPoints, mapLoaded]);
 
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapLoaded) return;
+    const source = map.getSource("attribution-link") as maplibregl.GeoJSONSource;
+    if (!source) return;
+    source.setData(attributionMapLink ? {
+      type: "FeatureCollection",
+      features: [
+        { type: "Feature", geometry: { type: "LineString", coordinates: [attributionMapLink.spill, attributionMapLink.vessel] }, properties: { kind: "link" } },
+        { type: "Feature", geometry: { type: "Point", coordinates: attributionMapLink.spill }, properties: { kind: "spill" } },
+      ],
+    } : { type: "FeatureCollection", features: [] });
+  }, [attributionMapLink, mapLoaded]);
+
   const loadVesselTrack = async (mmsi: string) => {
     try {
       const data = await fetchVesselTrack(mmsi, 24);
@@ -468,6 +487,7 @@ function App() {
   };
 
   const focusIncident = async (incident: Incident) => {
+    setAttributionMapLink(null);
     setSelectedIncident(incident);
     setSelectedVessel(null);
     setTrackPoints([]);
@@ -482,6 +502,7 @@ function App() {
   };
 
   const focusFlaggedVessel = async (vessel: Vessel) => {
+    setAttributionMapLink(null);
     setSelectedVessel(vessel);
     setSelectedIncident(null);
     setViewMode("vessel");
@@ -498,6 +519,7 @@ function App() {
   // "Spot this vessel on the map" from an opened incident: jump back to the
   // operational picture centered on the attributed vessel with its popover.
   const spotVesselOnMap = async (mmsi: string) => {
+    const spillCoordinates = selectedIncident?.coordinates;
     let vessel = vessels.find(v => v.mmsi === String(mmsi));
     if (!vessel) {
       try {
@@ -524,7 +546,20 @@ function App() {
     setIncidentDetail(null);
     setSelectedVessel(vessel);
     setViewMode("map");
-    mapRef.current?.flyTo({ center: vessel.coordinates, zoom: 9.2, duration: 1200 });
+    loadVesselTrack(vessel.mmsi);
+    if (spillCoordinates) {
+      const [spillLon, spillLat] = spillCoordinates;
+      const [vesselLon, vesselLat] = vessel.coordinates;
+      const radians = (degrees: number) => degrees * Math.PI / 180;
+      const dLat = radians(vesselLat - spillLat), dLon = radians(vesselLon - spillLon);
+      const a = Math.sin(dLat / 2) ** 2 + Math.cos(radians(spillLat)) * Math.cos(radians(vesselLat)) * Math.sin(dLon / 2) ** 2;
+      const distanceKm = 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      setAttributionMapLink({ spill: spillCoordinates, vessel: vessel.coordinates, distanceKm, mmsi: vessel.mmsi });
+      const bounds = new maplibregl.LngLatBounds(spillCoordinates, spillCoordinates).extend(vessel.coordinates);
+      mapRef.current?.fitBounds(bounds, { padding: 120, maxZoom: 10, duration: 1200 });
+    } else {
+      mapRef.current?.flyTo({ center: vessel.coordinates, zoom: 9.2, duration: 1200 });
+    }
   };
 
   // Manual live-AIS fetch: the reader interrupts its polling sleep and the
@@ -569,11 +604,10 @@ function App() {
   // only when no forecast rows exist yet.
   const forecastsList = incidentDetail?.forecasts || [];
   const activeForecast =
-    forecastsList.find((f: any) => Number(f.horizon_hours) === horizon) ||
-    (horizon === 0 ? forecastsList[0] : null);
+    horizon === 0 ? null : forecastsList.find((f: any) => Number(f.horizon_hours) === horizon);
   const modelConfidence = activeForecast?.confidence != null
     ? Math.round(Number(activeForecast.confidence) * 100)
-    : Math.round(Math.max(48, 92 - horizon / 2));
+    : null;
 
   const connectionLabel = { connected: "CONNECTED", connecting: "CONNECTING", reconnecting: "RECONNECTING", offline: "OFFLINE" }[connectionStatus];
 
@@ -591,8 +625,9 @@ function App() {
           <div className="map-label map-title"><small>OPERATIONAL PICTURE</small><h1>Konkan Coast / Sector 04</h1><span>Live vessel telemetry and fused SAR intelligence</span></div>
           <div className="map-legend"><small>LAYERS</small>{([['vessels', 'AIS vessels'], ['dark', 'Dark vessels'], ['protected', 'Protected zones']] as const).map(([key, label]) => <button key={key} className={`legend-item ${layers[key as keyof typeof layers] ? "active" : ""}`} onClick={() => setLayers((state) => ({ ...state, [key]: !state[key as keyof typeof layers] }))}><span className={`legend-swatch ${key}`} />{label}</button>)}</div>
           {selectedIncident && <div className="coordinate">{selectedIncident.coordinates[1].toFixed(2)}° N &nbsp; {selectedIncident.coordinates[0].toFixed(2)}° E</div>}
+          {attributionMapLink && <div className="attribution-map-readout"><small>ATTRIBUTION SPATIAL CHECK</small><b>{attributionMapLink.distanceKm.toFixed(2)} km map separation</b><span>Spill centroid ↔ MMSI {attributionMapLink.mmsi}</span></div>}
           {(viewMode === "incident" || (viewMode === "vessel" && selectedVessel?.detected_spill_id)) && (
-            <div className="forecast-bar"><div><small>FORECAST HORIZON</small><strong>{horizon === 0 ? "NOW" : `+${horizon}H`}</strong></div><div className="horizon-track">{[0, 3, 6, 12, 24].map((value) => <button key={value} className={horizon === value ? "chosen" : ""} onClick={() => setHorizon(value)}><span>{value === 0 ? "Now" : `+${value}h`}</span></button>)}</div><div className="forecast-confidence"><small>MODEL CONFIDENCE{activeForecast?.model_version ? ` · ${String(activeForecast.model_version)}` : ""}</small><strong>{modelConfidence}%</strong></div></div>
+            <div className="forecast-bar"><div><small>FORECAST HORIZON</small><strong>{horizon === 0 ? "NOW" : `+${horizon}H`}</strong></div><div className="horizon-track">{[0, ...forecastsList.map((row: any) => Number(row.horizon_hours))].filter((value, index, values) => Number.isFinite(value) && values.indexOf(value) === index).map((value) => <button key={value} className={horizon === value ? "chosen" : ""} onClick={() => setHorizon(value)}><span>{value === 0 ? "Now" : `+${value}h`}</span></button>)}</div><div className="forecast-confidence"><small>MODEL CONFIDENCE{activeForecast?.model_version ? ` · ${String(activeForecast.model_version)}` : ""}</small><strong>{modelConfidence === null ? "Unavailable" : `${modelConfidence}%`}</strong></div></div>
           )}
         </section>
         <aside className="sidebar">
@@ -666,6 +701,8 @@ function App() {
                setIncidentDetail(null);
             }}
             onSpotVessel={spotVesselOnMap}
+            forecastHorizon={horizon}
+            onForecastHorizonChange={setHorizon}
          />
       )}
 

@@ -84,3 +84,39 @@ def test_filtered_event_synthetic_defaults_false_when_absent():
     data.pop("is_synthetic")
     event = _WORKER._filtered_event(data, _result())
     assert event["is_synthetic"] is False
+
+
+def test_filtered_event_preserves_compact_sar_evidence():
+    result = _result()
+    result.update({
+        "geom_geojson": '{"type":"Polygon","coordinates":[]}',
+        "centroid_lat": 19.1,
+        "centroid_lon": 72.8,
+        "area_m2": 2500000.0,
+        "pixel_count": 12345,
+        "texture_features": {
+            "contrast": 0.2,
+            "homogeneity": 0.8,
+            "energy": 0.7,
+            "correlation": 0.4,
+            "mean_backscatter": -10.0,
+            "std_backscatter": 0.5,
+            "unapproved_large_field": "discarded",
+        },
+    })
+    event = _WORKER._filtered_event(_data(False), result)
+    assert event["geom_geojson"] == result["geom_geojson"]
+    assert event["pixel_count"] == 12345
+    assert set(event["texture_features"]) == {
+        "contrast", "homogeneity", "energy", "correlation",
+        "mean_backscatter", "std_backscatter",
+    }
+
+
+def test_filtered_event_omits_missing_optional_sar_evidence():
+    event = _WORKER._filtered_event(_data(False), _result())
+    assert "geom_geojson" not in event
+    assert "centroid_lat" not in event
+    assert "area_m2" not in event
+    assert "pixel_count" not in event
+    assert "texture_features" not in event

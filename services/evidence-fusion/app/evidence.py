@@ -18,7 +18,7 @@ from shared.spatial.geo import distance_m_sql, dwithin_sql, make_point_sql
 # Tunable correlation assumptions — NOT validated scientific constants. Their
 # production values must come from validation/operational tuning; the project
 # had no existing equivalents, so 5 km / 6 h are the proposed initial values.
-DEFAULT_SPATIAL_WINDOW_M = 5000.0
+DEFAULT_SPATIAL_WINDOW_M = 20_000.0
 DEFAULT_TEMPORAL_WINDOW_HOURS = 6.0
 
 # Existing risk representation reused verbatim: risk_tier_enum tiers HIGH and
@@ -58,7 +58,12 @@ def candidate_lookup_sql() -> str:
     """
 
 
-def build_vessel_correlation_sql(limit: int = 20) -> str:
+def _as_aware_datetime(value: datetime) -> datetime:
+    """Treat naive timestamps as UTC, matching the existing service behavior."""
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
+def build_vessel_correlation_sql(limit: Optional[int] = None) -> str:
     """Geography-based vessel-risk correlation query.
 
     Parameters ($1..$5): $1 start_ts, $2 end_ts (temporal window), $3 longitude,
@@ -67,18 +72,22 @@ def build_vessel_correlation_sql(limit: int = 20) -> str:
     Uses PostGIS geography ST_DWithin against the candidate centroid — never
     longitude/latitude difference arithmetic (docs/spatial.md).
     """
-    centroid_point = make_point_sql("$3", "$4")  # ST_SetSRID(ST_MakePoint(lon, lat), 4326)
-    distance_expr = distance_m_sql("vp.geom", centroid_point)  # meters via geography
-    proximity_expr = dwithin_sql("vp.geom", centroid_point, "$5")  # meters via geography
+    centroid_point = make_point_sql("$3", "$4")
+    distance_expr = distance_m_sql("vp.geom", centroid_point)
+    proximity_expr = dwithin_sql("vp.geom", centroid_point, "$5")
     tiers = ", ".join(f"'{t}'" for t in HIGH_RISK_TIERS)
-    return f"""
+    sql = f"""
         SELECT vr.vessel_id,
                v.mmsi,
+               v.vessel_type,
                vr.risk_score,
                vr.tier::text AS tier,
                vr.recommended_action,
+               vp.latitude AS position_lat,
+               vp.longitude AS position_lon,
                vp.timestamp AS position_timestamp,
-               {distance_expr} AS distance_m
+               {distance_expr} AS distance_m,
+               MIN({distance_expr}) OVER (PARTITION BY vp.vessel_id) AS closest_approach_m
         FROM vessel_positions vp
         JOIN vessels v ON v.id = vp.vessel_id
         JOIN vessel_risk_scores vr ON vr.vessel_id = v.id
@@ -87,8 +96,62 @@ def build_vessel_correlation_sql(limit: int = 20) -> str:
           AND {proximity_expr}
           AND vp.geom IS NOT NULL
         ORDER BY distance_m ASC, v.mmsi ASC
-        LIMIT {int(limit)}
     """
+    if limit is not None:
+        sql += f"\nLIMIT {int(limit)}"
+    return sql
+
+
+def select_correlated_vessels(
+    records: List[Dict[str, Any]],
+    spatial_window_m: float,
+    temporal_window_hours: float,
+    candidate_acquisition: datetime,
+) -> List[Dict[str, Any]]:
+    """Return every qualifying vessel candidate in deterministic order."""
+    acq = _as_aware_datetime(candidate_acquisition)
+    half = timedelta(hours=float(temporal_window_hours))
+
+    qualifying_by_vessel: Dict[Any, Dict[str, Any]] = {}
+    for record in records:
+        distance = record.get("distance_m")
+        if distance is None or not (0.0 <= float(distance) <= float(spatial_window_m)):
+            continue
+        ts = record.get("position_timestamp")
+        if ts is None:
+            continue
+        ts_dt = _as_aware_datetime(ts)
+        if not (acq - half <= ts_dt <= acq + half):
+            continue
+        time_gap_hours = abs((acq - ts_dt).total_seconds()) / 3600.0
+        vessel_id = record.get("vessel_id", record.get("mmsi"))
+        record_approach = record.get("closest_approach_m")
+        record_approach = float(record_approach) if record_approach is not None else float(record["distance_m"])
+        existing = qualifying_by_vessel.get(vessel_id)
+        if existing is None or (
+            float(record["distance_m"]), str(record.get("mmsi") or "")
+        ) < (
+            float(existing["distance_m"]), str(existing.get("mmsi") or "")
+        ):
+            selected = dict(record)
+            selected["time_gap_hours"] = time_gap_hours
+            selected["closest_approach_m"] = min(
+                record_approach,
+                float(existing.get("closest_approach_m", record["distance_m"]))
+                if existing is not None
+                else record_approach,
+            )
+            qualifying_by_vessel[vessel_id] = selected
+        elif existing is not None:
+            existing["closest_approach_m"] = min(
+                float(existing.get("closest_approach_m", existing["distance_m"])),
+                record_approach,
+            )
+
+    return sorted(
+        qualifying_by_vessel.values(),
+        key=lambda r: (float(r["distance_m"]), str(r.get("mmsi") or "")),
+    )
 
 
 def select_correlated_vessel(
@@ -97,44 +160,58 @@ def select_correlated_vessel(
     temporal_window_hours: float,
     candidate_acquisition: datetime,
 ) -> Optional[Dict[str, Any]]:
-    """Select the single correlated vessel, or None.
+    """Backward-compatible helper returning the nearest qualifying vessel."""
+    qualifying = select_correlated_vessels(
+        records,
+        spatial_window_m=spatial_window_m,
+        temporal_window_hours=temporal_window_hours,
+        candidate_acquisition=candidate_acquisition,
+    )
+    return qualifying[0] if qualifying else None
 
-    Rows from ``build_vessel_correlation_sql`` are already geometry-filtered by
-    PostGIS; this is the deterministic selection + defensive re-check of the
-    spatial/temporal windows. Selection rule: nearest geographic distance, ties
-    broken by lowest MMSI (documented, deterministic — no attribution implied).
-    """
-    acq = candidate_acquisition
-    if acq.tzinfo is None:
-        acq = acq.replace(tzinfo=timezone.utc)
-    half = timedelta(hours=float(temporal_window_hours))
 
-    qualifying: List[Dict[str, Any]] = []
-    for record in records:
-        distance = record.get("distance_m")
-        if distance is None or not (0.0 <= float(distance) <= float(spatial_window_m)):
-            continue
-        ts = record.get("position_timestamp")
-        if ts is None:
-            continue
-        ts_dt = ts if ts.tzinfo is not None else ts.replace(tzinfo=timezone.utc)
-        if not (acq - half <= ts_dt <= acq + half):
-            continue
-        qualifying.append(record)
-
-    if not qualifying:
-        return None
-    return min(qualifying, key=lambda r: (float(r["distance_m"]), str(r["mmsi"])))
+def _normalise_vessel_for_event(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalise a correlated vessel record for the incident.fused payload."""
+    vessel = {
+        "vessel_id": int(record["vessel_id"]),
+        "mmsi": str(record["mmsi"]),
+        "vessel_type": record.get("vessel_type"),
+        "position_lat": float(record.get("position_lat") if record.get("position_lat") is not None else record.get("latitude", 0.0)),
+        "position_lon": float(record.get("position_lon") if record.get("position_lon") is not None else record.get("longitude", 0.0)),
+        "position_timestamp": (
+            record["position_timestamp"].isoformat()
+            if record.get("position_timestamp") is not None and hasattr(record["position_timestamp"], "isoformat")
+            else record.get("position_timestamp")
+        ),
+        "distance_m": float(record["distance_m"]),
+        "closest_approach_m": (
+            float(record["closest_approach_m"])
+            if record.get("closest_approach_m") is not None
+            else None
+        ),
+        "time_gap_hours": (
+            float(record["time_gap_hours"])
+            if record.get("time_gap_hours") is not None
+            else None
+        ),
+        "high_anomaly_count": int(record.get("high_anomaly_count", 0)),
+        "medium_anomaly_count": int(record.get("medium_anomaly_count", 0)),
+    }
+    for key in ("risk_score", "tier", "recommended_action"):
+        if key in record and record.get(key) is not None:
+            vessel[key] = record[key]
+    return vessel
 
 
 def fuse_evidence(
     candidate: Dict[str, Any],
-    correlated_vessel: Optional[Dict[str, Any]],
+    correlated_vessels: Optional[List[Dict[str, Any]]] | Optional[Dict[str, Any]],
     *,
     centroid_lat: Optional[float] = None,
     centroid_lon: Optional[float] = None,
     area_m2: Optional[float] = None,
     geom_geojson: Optional[str] = None,
+    environment: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build the ``incident.fused`` payload.
 
@@ -146,6 +223,11 @@ def fuse_evidence(
 
     The result NEVER contains attribution fields.
     """
+    if isinstance(correlated_vessels, dict):
+        correlated_vessels = [correlated_vessels]
+    elif correlated_vessels is None:
+        correlated_vessels = []
+
     event: Dict[str, Any] = {
         "candidate_id": candidate["candidate_id"],
         "scene_id": candidate["scene_id"],
@@ -154,6 +236,15 @@ def fuse_evidence(
         "acquisition_time": candidate.get("acquisition_time"),
         "correlated_vessel_id": None,
         "correlated_vessel": None,
+        "candidates": [],
+        "environment": environment or {
+            "wind_speed_ms": 0.0,
+            "wind_dir_deg": 0.0,
+            "current_speed_ms": 0.0,
+            "current_dir_deg": 0.0,
+            "timestamp": None,
+            "source": None,
+        },
         "is_synthetic": candidate.get("is_synthetic", False),
     }
     for key in ("orbit", "polarization", "resolution"):
@@ -161,27 +252,27 @@ def fuse_evidence(
             event[key] = candidate[key]
 
     # Real spill-candidate geometry (None only when the DB row was missing).
-    if centroid_lat is not None and centroid_lon is not None:
-        event["lat"] = float(centroid_lat)
-        event["lon"] = float(centroid_lon)
-    if area_m2 is not None:
-        event["area_km2"] = float(area_m2) / 1_000_000.0
-    if geom_geojson is not None:
-        event["geom_geojson"] = geom_geojson
+    payload_lat = centroid_lat if centroid_lat is not None else candidate.get("centroid_lat")
+    payload_lon = centroid_lon if centroid_lon is not None else candidate.get("centroid_lon")
+    payload_area = area_m2 if area_m2 is not None else candidate.get("area_m2")
+    payload_geometry = geom_geojson if geom_geojson is not None else candidate.get("geom_geojson")
+    if payload_lat is not None and payload_lon is not None:
+        event["lat"] = float(payload_lat)
+        event["lon"] = float(payload_lon)
+    if payload_area is not None:
+        event["area_km2"] = float(payload_area) / 1_000_000.0
+    if payload_geometry is not None:
+        event["geom_geojson"] = payload_geometry
+    for key in ("pixel_count", "texture_features"):
+        if candidate.get(key) is not None:
+            event[key] = candidate[key]
 
-    if correlated_vessel is not None:
-        event["correlated_vessel_id"] = int(correlated_vessel["vessel_id"])
-        vessel = {
-            "mmsi": str(correlated_vessel["mmsi"]),
-            "risk_score": float(correlated_vessel["risk_score"]),
-            "tier": correlated_vessel["tier"],
-            "recommended_action": correlated_vessel.get("recommended_action"),
-            "distance_m": float(correlated_vessel["distance_m"]),
-            "position_timestamp": (
-                correlated_vessel["position_timestamp"].isoformat()
-                if correlated_vessel.get("position_timestamp") is not None
-                else None
-            ),
-        }
-        event["correlated_vessel"] = vessel
+    event["candidates"] = [
+        _normalise_vessel_for_event(record)
+        for record in correlated_vessels
+        if record is not None
+    ]
+    if event["candidates"]:
+        event["correlated_vessel_id"] = int(event["candidates"][0]["vessel_id"])
+        event["correlated_vessel"] = event["candidates"][0]
     return event

@@ -1,0 +1,447 @@
+import asyncio
+import importlib.util
+import sys
+import types
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+SERVICE_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = SERVICE_ROOT.resolve().parent.parent
+sys.path.insert(0, str(SERVICE_ROOT))
+sys.path.insert(0, str(REPO_ROOT))
+
+from shared.spatial import geo  # noqa: E402  (repo-root canonical shared)
+
+from app.evidence import (  # noqa: E402
+    FORBIDDEN_ATTRIBUTION_FIELDS,
+    build_vessel_correlation_sql,
+    candidate_lookup_sql,
+    correlation_windows,
+    fuse_evidence,
+    select_correlated_vessel,
+    select_correlated_vessels,
+)
+
+T0 = datetime(2024, 8, 20, 9, 40, 0, tzinfo=timezone.utc)
+
+
+def _candidate_payload(confidence=0.63, candidate_id="candidate-101"):
+    return {
+        "candidate_id": candidate_id,
+        "scene_id": "COPERNICUS/S1_GRD/S1A_STEP6_E2E_20240820",
+        "confidence": confidence,
+        "classification_label": "possible_oil_spill",
+        "acquisition_time": T0.isoformat(),
+        "orbit": 149,
+        "polarization": "VV",
+        "resolution": 10,
+    }
+
+
+def _vessel_record(vessel_id=42, mmsi="123456789", risk_score=80.0, tier="HIGH",
+                   recommended_action="satellite_task", distance_m=800.0,
+                   position_timestamp=T0):
+    return {
+        "vessel_id": vessel_id,
+        "mmsi": mmsi,
+        "risk_score": risk_score,
+        "tier": tier,
+        "recommended_action": recommended_action,
+        "position_timestamp": position_timestamp,
+        "distance_m": distance_m,
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Queries use PostGIS geography (no degree arithmetic)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_correlation_query_uses_geography_semantics():
+    sql = build_vessel_correlation_sql()
+    assert "ST_DWithin" in sql
+    assert "::geography" in sql
+    assert "ST_Distance" in sql
+    assert "BETWEEN" in sql
+    assert "ST_MakePoint" in sql
+    assert "'HIGH'" in sql and "'CRITICAL'" in sql
+    assert "closest_approach_m" in sql
+
+
+def test_candidate_lookup_uses_centroid():
+    assert "ST_Centroid" in candidate_lookup_sql()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Correlation selection
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_select_nearest_and_tiebreak_by_mmsi():
+    recs = [
+        _vessel_record(vessel_id=1, mmsi="200", distance_m=500.0),
+        _vessel_record(vessel_id=2, mmsi="100", distance_m=500.0),
+        _vessel_record(vessel_id=3, mmsi="300", distance_m=300.0),
+    ]
+    selected = select_correlated_vessel(recs, 5000.0, 6.0, T0)
+    assert selected["vessel_id"] == 3  # nearest
+
+
+def test_select_excludes_vessel_outside_spatial_window():
+    recs = [_vessel_record(vessel_id=9, distance_m=12000.0)]
+    assert select_correlated_vessel(recs, 5000.0, 6.0, T0) is None
+
+
+def test_select_excludes_vessel_outside_temporal_window():
+    outside = T0 - timedelta(hours=12)
+    recs = [_vessel_record(vessel_id=9, position_timestamp=outside)]
+    assert select_correlated_vessel(recs, 5000.0, 6.0, T0) is None
+
+
+def test_select_returns_none_for_empty():
+    assert select_correlated_vessel([], 5000.0, 6.0, T0) is None
+
+
+def test_select_returns_all_qualifying_vessels_in_distance_order():
+    recs = [
+        _vessel_record(vessel_id=1, mmsi="200", distance_m=800.0),
+        _vessel_record(vessel_id=2, mmsi="100", distance_m=400.0),
+        _vessel_record(vessel_id=3, mmsi="300", distance_m=12000.0),
+        _vessel_record(vessel_id=4, mmsi="050", distance_m=200.0, position_timestamp=T0 - timedelta(hours=1)),
+    ]
+    selected = select_correlated_vessels(recs, 5000.0, 6.0, T0)
+    assert [v["vessel_id"] for v in selected] == [4, 2, 1]
+
+
+def test_select_calculates_closest_approach_across_track_rows():
+    recs = [
+        _vessel_record(vessel_id=7, distance_m=900.0, position_timestamp=T0 - timedelta(hours=1)),
+        _vessel_record(vessel_id=7, distance_m=250.0, position_timestamp=T0),
+    ]
+    selected = select_correlated_vessels(recs, 5000.0, 6.0, T0)
+    assert len(selected) == 1
+    assert selected[0]["distance_m"] == 250.0
+    assert selected[0]["closest_approach_m"] == 250.0
+
+
+def test_select_handles_missing_closest_approach_safely():
+    record = _vessel_record(vessel_id=8, distance_m=700.0)
+    record["closest_approach_m"] = None
+    selected = select_correlated_vessels([record], 5000.0, 6.0, T0)
+    assert selected[0]["closest_approach_m"] == 700.0
+
+
+def test_select_adds_time_gap_hours_for_exact_and_fractional_offsets():
+    records = [
+        _vessel_record(vessel_id=1, distance_m=100.0, position_timestamp=T0),
+        _vessel_record(vessel_id=2, distance_m=200.0, position_timestamp=T0 - timedelta(hours=1.5)),
+    ]
+    selected = select_correlated_vessels(records, 5000.0, 6.0, T0)
+    assert selected[0]["time_gap_hours"] == 0.0
+    assert selected[1]["time_gap_hours"] == 1.5
+
+
+def test_select_keeps_both_six_hour_boundaries_and_excludes_outside():
+    records = [
+        _vessel_record(vessel_id=1, distance_m=100.0, position_timestamp=T0 - timedelta(hours=6)),
+        _vessel_record(vessel_id=2, distance_m=200.0, position_timestamp=T0 + timedelta(hours=6)),
+        _vessel_record(vessel_id=3, distance_m=300.0, position_timestamp=T0 + timedelta(hours=6, seconds=1)),
+    ]
+    selected = select_correlated_vessels(records, 5000.0, 6.0, T0)
+    assert [v["vessel_id"] for v in selected] == [1, 2]
+    assert [v["time_gap_hours"] for v in selected] == [6.0, 6.0]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# fuse_evidence
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_fuse_with_correlated_vessel():
+    candidate = _candidate_payload()
+    event = fuse_evidence(candidate, _vessel_record(vessel_id=42, mmsi="123456789",
+                                                     risk_score=80.0, tier="HIGH",
+                                                     distance_m=800.0))
+    assert event["candidate_id"] == "candidate-101"
+    assert event["confidence"] == 0.63
+    assert event["classification_label"] == "possible_oil_spill"
+    assert event["correlated_vessel_id"] == 42
+    assert event["correlated_vessel"]["mmsi"] == "123456789"
+    assert event["orbit"] == 149
+
+
+def test_fuse_without_vessel_keeps_null_and_still_emits():
+    event = fuse_evidence(_candidate_payload(), None)
+    assert event["correlated_vessel_id"] is None
+    assert event["correlated_vessel"] is None
+    assert event["candidates"] == []
+    assert event["candidate_id"] == "candidate-101"
+
+
+def test_fuse_emits_full_candidate_list_for_attribution():
+    candidate = _candidate_payload()
+    vessels = [
+        _vessel_record(vessel_id=10, mmsi="200", risk_score=90.0, tier="HIGH", distance_m=450.0),
+        _vessel_record(vessel_id=20, mmsi="100", risk_score=80.0, tier="CRITICAL", distance_m=900.0),
+    ]
+    event = fuse_evidence(candidate, vessels)
+    assert event["correlated_vessel_id"] == 10
+    assert [v["vessel_id"] for v in event["candidates"]] == [10, 20]
+    assert event["correlated_vessel"]["vessel_id"] == 10
+
+
+def test_fuse_emits_closest_approach_for_each_candidate():
+    vessel = _vessel_record(vessel_id=10, distance_m=450.0)
+    vessel["closest_approach_m"] = 125.0
+    event = fuse_evidence(_candidate_payload(), [vessel])
+    assert event["candidates"][0]["closest_approach_m"] == 125.0
+
+
+def test_fuse_emits_time_gap_hours_for_each_candidate():
+    vessel = _vessel_record(vessel_id=10, distance_m=450.0, position_timestamp=T0 - timedelta(hours=1.5))
+    vessel["time_gap_hours"] = 1.5
+    event = fuse_evidence(_candidate_payload(), [vessel])
+    assert event["candidates"][0]["time_gap_hours"] == 1.5
+
+
+def test_fuse_emits_anomaly_counts_for_each_candidate():
+    vessel = _vessel_record(vessel_id=10)
+    vessel["high_anomaly_count"] = 2
+    vessel["medium_anomaly_count"] = 3
+    event = fuse_evidence(_candidate_payload(), [vessel])
+    assert event["candidates"][0]["high_anomaly_count"] == 2
+    assert event["candidates"][0]["medium_anomaly_count"] == 3
+
+
+def test_fuse_preserves_optional_sar_evidence_from_filtered_payload():
+    candidate = _candidate_payload()
+    candidate.update({
+        "geom_geojson": '{"type":"Polygon","coordinates":[]}',
+        "centroid_lat": 19.1,
+        "centroid_lon": 72.8,
+        "area_m2": 2500000.0,
+        "pixel_count": 12345,
+        "texture_features": {"contrast": 0.2, "energy": 0.7},
+    })
+    event = fuse_evidence(candidate, [])
+    assert event["geom_geojson"] == candidate["geom_geojson"]
+    assert event["lat"] == 19.1
+    assert event["lon"] == 72.8
+    assert event["area_km2"] == 2.5
+    assert event["pixel_count"] == 12345
+    assert event["texture_features"] == candidate["texture_features"]
+
+
+def test_fuse_handles_missing_optional_sar_evidence():
+    event = fuse_evidence(_candidate_payload(), [])
+    assert "geom_geojson" not in event
+    assert "pixel_count" not in event
+    assert "texture_features" not in event
+
+
+def test_fuse_never_contains_source_attribution():
+    event = fuse_evidence(_candidate_payload(), _vessel_record())
+    assert not set(FORBIDDEN_ATTRIBUTION_FIELDS) & set(event.keys())
+    for key in FORBIDDEN_ATTRIBUTION_FIELDS:
+        assert key not in event
+
+
+def test_correlation_windows_from_env(monkeypatch):
+    monkeypatch.setenv("EVIDENCE_SPATIAL_WINDOW_M", "2500")
+    monkeypatch.setenv("EVIDENCE_TEMPORAL_WINDOW_HOURS", "3")
+    spatial, hours = correlation_windows()
+    assert spatial == 2500.0 and hours == 3.0
+    monkeypatch.delenv("EVIDENCE_SPATIAL_WINDOW_M")
+    monkeypatch.delenv("EVIDENCE_TEMPORAL_WINDOW_HOURS")
+    assert correlation_windows() == (20000.0, 6.0)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Worker integration (stubbed DB + Redis publish; no live services)
+# ──────────────────────────────────────────────────────────────────────────────
+
+class FakePool:
+    """Minimal asyncpg-like double for fetchrow/fetch."""
+
+    def __init__(self, candidate_rows, vessel_rows):
+        self.candidate_rows = candidate_rows
+        self.vessel_rows = vessel_rows
+
+    async def fetchrow(self, sql, *params):
+        cid = params[0] if params else None
+        return self.candidate_rows.get(str(cid))
+
+    async def fetch(self, sql, *params):
+        return list(self.vessel_rows)
+
+
+def _load_worker():
+    """Import the real worker module with stubbed shared infra."""
+    import app.evidence as evidence_mod
+
+    sys.modules.setdefault("app.evidence", evidence_mod)
+
+    redis_stub = types.ModuleType("shared.redis_client")
+    async def _noop(*args, **kwargs):
+        return None
+    redis_stub.consume_stream = _noop
+    redis_stub.ensure_consumer_group = _noop
+    redis_stub.get_redis = _noop
+    redis_stub.publish_to_stream = _noop
+    sys.modules["shared.redis_client"] = redis_stub
+
+    db_stub = types.ModuleType("shared.db.connection")
+    db_stub.create_pool = _noop
+    sys.modules["shared.db.connection"] = db_stub
+
+    spec = importlib.util.spec_from_file_location(
+        "app.evidence_fusion_worker", str(SERVICE_ROOT / "app" / "worker.py")
+    )
+    worker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(worker)
+    return worker
+
+
+def _run_worker_test(worker, payload, candidate_rows, vessel_rows, windows=(5000.0, 1.0)):
+    pool = FakePool(candidate_rows, vessel_rows)
+    captured = []
+    async def recorder(_client, stream, data, max_len=50000):
+        captured.append((stream, dict(data)))
+    worker.publish_to_stream = recorder
+    worker.correlation_windows = lambda: (windows[0], windows[1])
+    asyncio.run(_run(worker, payload, pool))
+    return captured
+
+
+def test_evidence_fusion_counts_only_anomalies_in_pre_acquisition_window():
+    worker = _load_worker()
+    events = [
+        {"mmsi": "123456789", "severity": "HIGH", "window_start": T0 - timedelta(hours=6)},
+        {"mmsi": "123456789", "severity": "HIGH", "window_start": T0 - timedelta(hours=1)},
+        {"mmsi": "123456789", "severity": "MEDIUM", "window_start": T0},
+        {"mmsi": "123456789", "severity": "MEDIUM", "window_start": T0 + timedelta(seconds=1)},
+        {"mmsi": "123456789", "severity": "HIGH", "window_start": T0 - timedelta(hours=7)},
+        {"mmsi": "999999999", "severity": "HIGH", "window_start": T0 - timedelta(hours=1)},
+    ]
+
+    class AnomalyPool:
+        async def fetch(self, sql, mmsi, since, acquisition_time):
+            assert "anomaly_events" in sql
+            return [
+                event for event in events
+                if event["mmsi"] == mmsi and since <= event["window_start"] <= acquisition_time
+            ]
+
+    high, medium = asyncio.run(worker._fetch_anomaly_counts(AnomalyPool(), "123456789", T0))
+    assert (high, medium) == (2, 1)
+
+
+def test_evidence_fusion_returns_zero_anomaly_counts_when_missing():
+    worker = _load_worker()
+
+    class EmptyPool:
+        async def fetch(self, *_args):
+            return []
+
+    counts = asyncio.run(worker._fetch_anomaly_counts(EmptyPool(), "123456789", T0))
+    assert counts == (0, 0)
+
+
+async def _run(worker, payload, pool):
+    from app.evidence import fuse_evidence  # noqa
+    await worker._process_filtered_message(payload, pool, redis=None)
+
+
+class TestWorkerFusion:
+    def _candidate_row(self, candidate_id="candidate-101"):
+        # Mirrors the extended candidate_lookup_sql(): centroid, geodesic area,
+        # GeoJSON geometry and acquisition time.
+        return {
+            "centroid_lon": 72.78195,
+            "centroid_lat": 19.11805,
+            "area_m2": 2_500_000.0,
+            "geom_geojson": '{"type":"Polygon","coordinates":[[[72.78,19.11],[72.79,19.11],[72.79,19.12],[72.78,19.11]]]}',
+            "acquisition_time": T0,
+        }
+
+    def test_sar_with_nearby_high_risk_vessel(self):
+        worker = _load_worker()
+        captured = _run_worker_test(
+            worker,
+            _candidate_payload(),
+            {"candidate-101": self._candidate_row()},
+            [_vessel_record(vessel_id=42, mmsi="123456789", risk_score=80.0, tier="HIGH",
+                            distance_m=800.0, position_timestamp=T0)],
+        )
+        assert len(captured) == 1
+        stream, event = captured[0]
+        assert stream == "incident.fused"
+        assert event["candidate_id"] == "candidate-101"
+        assert event["confidence"] == 0.63
+        assert event["classification_label"] == "possible_oil_spill"
+        assert event["correlated_vessel_id"] == 42
+        # Real candidate geometry must be forwarded to downstream consumers.
+        assert event["lat"] == 19.11805
+        assert event["lon"] == 72.78195
+        assert abs(event["area_km2"] - 2.5) < 1e-9
+        assert event["geom_geojson"].startswith('{"type":"Polygon"')
+
+    def test_sar_with_no_nearby_vessel_still_fused(self):
+        worker = _load_worker()
+        captured = _run_worker_test(
+            worker,
+            _candidate_payload(),
+            {"candidate-101": self._candidate_row()},
+            [],
+        )
+        assert len(captured) == 1
+        stream, event = captured[0]
+        assert stream == "incident.fused"
+        assert event["correlated_vessel_id"] is None
+
+    def test_vessel_outside_spatial_window_not_correlated(self):
+        worker = _load_worker()
+        captured = _run_worker_test(
+            worker,
+            _candidate_payload(),
+            {"candidate-101": self._candidate_row()},
+            [_vessel_record(vessel_id=42, distance_m=9000.0, position_timestamp=T0)],
+        )
+        _, event = captured[0]
+        assert event["correlated_vessel_id"] is None
+
+    def test_vessel_outside_temporal_window_not_correlated(self):
+        worker = _load_worker()
+        captured = _run_worker_test(
+            worker,
+            _candidate_payload(),
+            {"candidate-101": self._candidate_row()},
+            [_vessel_record(vessel_id=42, distance_m=800.0,
+                            position_timestamp=T0 - timedelta(hours=50))],
+        )
+        _, event = captured[0]
+        assert event["correlated_vessel_id"] is None
+
+    def test_multiple_vessels_selects_nearest(self):
+        worker = _load_worker()
+        captured = _run_worker_test(
+            worker,
+            _candidate_payload(),
+            {"candidate-101": self._candidate_row()},
+            [
+                _vessel_record(vessel_id=1, mmsi="100", distance_m=900.0, position_timestamp=T0),
+                _vessel_record(vessel_id=2, mmsi="200", distance_m=300.0, position_timestamp=T0),
+            ],
+        )
+        _, event = captured[0]
+        assert event["correlated_vessel_id"] == 2
+
+    def test_worker_payload_contains_no_attribution_fields(self):
+        worker = _load_worker()
+        captured = _run_worker_test(
+            worker,
+            _candidate_payload(),
+            {"candidate-101": self._candidate_row()},
+            [_vessel_record(vessel_id=42, position_timestamp=T0)],
+        )
+        _, event = captured[0]
+        assert not set(FORBIDDEN_ATTRIBUTION_FIELDS) & set(event.keys())
