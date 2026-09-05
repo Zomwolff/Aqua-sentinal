@@ -279,7 +279,7 @@ select deterministically the **nearest** correlated vessel; publish `incident.fu
 
 ## 6. API gateway & live frontend
 
-### API gateway (`services/api-gateway`)
+### API gateway (`AIS/services/api-gateway`)
 Unified REST + WebSocket:
 - **System:** `GET /health`, `GET /system/health` (aggregate), `GET /system/pipeline`
   (stream lengths + consumer lag), `GET /system/stats`.
