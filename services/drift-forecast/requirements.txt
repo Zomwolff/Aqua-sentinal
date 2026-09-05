@@ -4,3 +4,6 @@ redis[hiredis]
 asyncpg
 pydantic>=2.0
 numpy>=1.26
+scipy>=1.11
+pytest>=7.0
+shapely>=2.0

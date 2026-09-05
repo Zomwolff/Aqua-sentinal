@@ -1199,13 +1199,22 @@ async def get_spill_incident(spill_id: str):
     ]
 
     # Forecast polygons (incl. model confidence + version for the UI)
+    # V2: Now includes separated drift, physical spreading, and uncertainty metrics
     forecast_rows = await pool.fetch(
         """
         SELECT id, horizon_hours, forecast_time,
                ST_X(ST_Centroid(geom)) AS predicted_lon,
                ST_Y(ST_Centroid(geom)) AS predicted_lat,
-               ST_AsGeoJSON(geom) AS geometry, generated_at,
-               confidence, model_version
+               ST_AsGeoJSON(geom) AS geometry,
+               ST_AsGeoJSON(probability_50_geom) AS probability_50_geometry,
+               ST_AsGeoJSON(probability_90_geom) AS probability_90_geometry,
+               ST_AsGeoJSON(convex_hull_geom) AS convex_hull_geometry,
+               generated_at,
+               confidence, model_version,
+               drift_distance_m, drift_velocity_ms, drift_bearing_deg,
+               physical_area_m2, physical_radius_m, expansion_ratio, spread_rate_m2_per_hour,
+               uncertainty_rms_m, uncertainty_std_east_m, uncertainty_std_north_m,
+               oil_properties, windage_range
         FROM forecasts WHERE spill_id = $1 ORDER BY horizon_hours ASC
         """,
         spill_id,
@@ -1213,8 +1222,10 @@ async def get_spill_incident(spill_id: str):
     forecasts = []
     for r in forecast_rows:
         fr = {k: v for k, v in dict(r).items()}
-        if isinstance(fr.get("geometry"), str):
-            fr["geometry"] = json.loads(fr["geometry"])
+        # Parse GeoJSON fields
+        for geom_field in ["geometry", "probability_50_geometry", "probability_90_geometry", "convex_hull_geometry"]:
+            if isinstance(fr.get(geom_field), str):
+                fr[geom_field] = json.loads(fr[geom_field])
         if isinstance(fr.get("generated_at"), datetime):
             fr["generated_at"] = fr["generated_at"].isoformat()
         forecasts.append(fr)
@@ -1280,13 +1291,29 @@ async def get_spill_attribution(spill_id: str):
 
 @app.get("/spill/incidents/{spill_id}/forecast", tags=["SpillIntelligence"])
 async def get_spill_forecast(spill_id: str):
-    """Lagrangian drift forecast polygons for a spill at 3h, 6h, 12h, 24h horizons."""
+    """Lagrangian drift forecast with V2 physics (drift, spreading, uncertainty)."""
     pool = await _get_pool()
     rows = await pool.fetch(
         """
-        SELECT id, horizon_hours,
-               ST_AsGeoJSON(geom) AS geometry, generated_at
-        FROM forecasts WHERE spill_id = $1
+        SELECT 
+            id, horizon_hours, forecast_time, generated_at, 
+            model_version, confidence,
+            -- Geometries
+            ST_AsGeoJSON(geom) AS geometry,
+            ST_AsGeoJSON(probability_50_geom) AS probability_50_geometry,
+            ST_AsGeoJSON(probability_90_geom) AS probability_90_geometry,
+            ST_AsGeoJSON(convex_hull_geom) AS convex_hull_geometry,
+            -- Drift metrics
+            drift_distance_m, drift_velocity_ms, drift_bearing_deg,
+            -- Physical spreading
+            physical_area_m2, physical_radius_m, 
+            expansion_ratio, spread_rate_m2_per_hour,
+            -- Uncertainty
+            uncertainty_rms_m, uncertainty_std_east_m, uncertainty_std_north_m,
+            -- Metadata
+            oil_properties, windage_range
+        FROM forecasts 
+        WHERE spill_id = $1
         ORDER BY horizon_hours ASC
         """,
         spill_id,
@@ -1296,10 +1323,19 @@ async def get_spill_forecast(spill_id: str):
     result = []
     for r in rows:
         fr = {k: v for k, v in dict(r).items()}
-        if isinstance(fr.get("geometry"), str):
-            fr["geometry"] = json.loads(fr["geometry"])
+        
+        # Parse GeoJSON geometries
+        for geom_field in ['geometry', 'probability_50_geometry', 
+                           'probability_90_geometry', 'convex_hull_geometry']:
+            if isinstance(fr.get(geom_field), str):
+                fr[geom_field] = json.loads(fr[geom_field])
+        
+        # Format timestamps
         if isinstance(fr.get("generated_at"), datetime):
             fr["generated_at"] = fr["generated_at"].isoformat()
+        if isinstance(fr.get("forecast_time"), datetime):
+            fr["forecast_time"] = fr["forecast_time"].isoformat()
+        
         result.append(fr)
     return {"spill_id": spill_id, "horizons": result}
 
