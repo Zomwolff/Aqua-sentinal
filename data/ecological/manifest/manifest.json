@@ -1,0 +1,194 @@
+{
+  "project": "Aqua-Sentinel Ecological Impact V1",
+  "aoi": {
+    "description": "Western India / Arabian Sea ecological AOI",
+    "min_lat": 14.0,
+    "max_lat": 25.0,
+    "min_lon": 68.0,
+    "max_lon": 77.5
+  },
+  "buffer_km": 50,
+  "buffer_note": "[PROJECT-DEFINED] 50 km buffer chosen to capture edge receptors within realistic 24-hour Oil Spread V2 drift range. Derived from drift.py WIND_LEEWAY=0.03, Arabian Sea typical surface current ~0.8 m/s \u2192 max realistic 24h drift ~108 km; 50 km = ~46% of that. Physical spread radius (<2 km) and diffusion sigma (<2 km) are negligible by comparison.",
+  "clip_box": {
+    "min_lat": 13.5495,
+    "max_lat": 25.4505,
+    "min_lon": 67.5192,
+    "max_lon": 77.9808
+  },
+  "datasets": {
+    "coastline": {
+      "dataset_name": "Natural Earth 10m Physical Coastline",
+      "receptor_type": "sensitive_coastline",
+      "source": "Natural Earth / NACIS",
+      "version": "v5.1.2 (10m)",
+      "download_url": "https://naciscdn.org/naturalearth/10m/physical/ne_10m_coastline.zip",
+      "reference": "Natural Earth. Free vector and raster map data @ naturalearthdata.com",
+      "license": "Public domain",
+      "original_format": "ESRI Shapefile (zipped)",
+      "base_coastline_format": "GeoJSON (EPSG:4326, MultiLineString)",
+      "classified_format": "GeoJSON (EPSG:4326, MultiPolygon)",
+      "raw_file": "data\\ecological\\raw\\coastline\\ne_10m_coastline.zip",
+      "base_coastline_file": "data\\ecological\\processed\\coastline\\ne_10m_coastline_aoi.geojson",
+      "classified_file": "data\\ecological\\processed\\coastline\\sensitive_coastline_classified.geojson",
+      "geographic_coverage": "Global (clipped to AOI+buffer)",
+      "acquisition_method": "Direct download from naciscdn.org",
+      "acquisition_date": "2026-09-06",
+      "aoi_clip_applied": true,
+      "buffer_km": 50,
+      "processing_stats": {
+        "n_source": 4133,
+        "n_after_clip": 1,
+        "n_removed_by_clip": 4132,
+        "n_invalid": 0,
+        "n_repaired": 0,
+        "n_final": 1
+      },
+      "phase_note": "Phase 2 acquired and clipped base coastline geometry (MultiLineString). Phase 3 segments, buffers, and classifies sensitive coastline receptors.",
+      "phase_3_classification": {
+        "methodology": "PROJECT-DEFINED coastline sensitivity classification",
+        "segmentation": {
+          "method": "Fixed-length segmentation",
+          "segment_length_km": 5.0,
+          "rationale": "Balances spatial resolution against receptor count. Avoids thousands of tiny fragments while providing meaningful coastline sections for exposure assessment."
+        },
+        "buffering": {
+          "buffer_distance_km": 1.0,
+          "method": "Projected CRS (EPSG:32643 / UTM 43N) for metric accuracy, reprojected to EPSG:4326 for storage",
+          "rationale": "Represents sensitive coastal zone extent for oil-shoreline interaction assessment."
+        },
+        "proximity_classification": {
+          "proximity_distance_km": 2.0,
+          "method": "PostGIS ST_DWithin with geography cast for metric distance",
+          "rationale": "Captures direct coastal adjacency plus minor positional errors in receptor datasets. This is NOT a scientifically validated exposure zone; it is an operational classification rule."
+        },
+        "sensitivity_tiers": {
+          "high": "Near mangrove OR coral_reef (within 2 km)",
+          "medium": "Near MPA only, no mangrove/coral association (within 2 km)",
+          "low": "No ecological receptor association within 2 km",
+          "priority": "HIGH > MEDIUM > LOW (segment near both mangrove and MPA remains HIGH)"
+        },
+        "metadata_recorded": [
+          "segment_index",
+          "segment_length_km",
+          "buffer_km",
+          "proximity_km",
+          "near_mangrove (boolean)",
+          "near_coral (boolean)",
+          "near_mpa (boolean)",
+          "classification_reason (string explanation)"
+        ],
+        "limitations": [
+          "Classification is operationally defined for V1 oil-spill response prioritization",
+          "Not a universal scientific coastline sensitivity standard",
+          "Proximity-based association does not model hydrodynamic connectivity or ecological vulnerability gradients",
+          "Natural Earth 10m resolution may miss small embayments or coastal features",
+          "Fixed 5 km segmentation may group heterogeneous coastline sections",
+          "Receptor datasets have their own coverage gaps and positional uncertainties"
+        ]
+      }
+    },
+    "gmw": {
+      "dataset_name": "Global Mangrove Watch (GMW) v3.0 \u2014 2020 epoch",
+      "receptor_type": "mangrove",
+      "source": "Zenodo / JAXA / Aberystwyth University",
+      "version": "3.0",
+      "epoch": "2020",
+      "download_url": "https://zenodo.org/record/6894273",
+      "doi": "10.5281/zenodo.6894273",
+      "reference": "Bunting et al. (2022) Remote Sensing 14(15):3657",
+      "license": "CC-BY 4.0",
+      "original_format": "ESRI Shapefile (zipped)",
+      "processed_format": "GeoJSON (EPSG:4326)",
+      "raw_file": "data\\ecological\\raw\\gmw\\gmw_v3_2020_vec.zip",
+      "processed_file": "data\\ecological\\processed\\gmw\\gmw_v3_2020_mangroves_aoi.geojson",
+      "geographic_coverage": "Global (clipped to AOI+buffer)",
+      "acquisition_method": "Direct download from Zenodo API",
+      "acquisition_date": "2026-09-06",
+      "aoi_clip_applied": true,
+      "buffer_km": 50,
+      "processing_stats": {
+        "n_source": 1076117,
+        "n_after_clip": 25637,
+        "n_removed_by_clip": 1050480,
+        "n_invalid": 0,
+        "n_repaired": 0,
+        "n_empty_dropped": 0,
+        "n_final": 25637
+      },
+      "sensitivity_tier_note": "high \u2014 mangroves are IUCN-recognised highly sensitive coastal habitats"
+    },
+    "wdpa": {
+      "dataset_name": "WDPA \u2014 World Database on Protected Areas (India, Sep-2026)",
+      "receptor_type": "mpa",
+      "source": "Protected Planet / UNEP-WCMC",
+      "version": "September 2026",
+      "download_url": "https://d1gam3xoknrgr2.cloudfront.net/current/WDPA_WDOECM_Sep2026_Public_IND_shp.zip",
+      "reference": "UNEP-WCMC and IUCN (2026). Protected Planet: The World Database on Protected Areas. Cambridge UK / Gland Switzerland.",
+      "license": "CC-BY for non-commercial/research use. See https://www.protectedplanet.net/en/legal",
+      "original_format": "ESRI Shapefile (nested zip)",
+      "processed_format": "GeoJSON (EPSG:4326)",
+      "raw_file": "data\\ecological\\raw\\wdpa\\WDPA_WDOECM_Sep2026_Public_IND_shp.zip",
+      "processed_file": "data\\ecological\\processed\\wdpa\\wdpa_mpas_india_aoi.geojson",
+      "geographic_coverage": "India national coverage (IND shapefile, clipped to AOI+buffer)",
+      "acquisition_method": "Direct download from Protected Planet CloudFront CDN (public IND package)",
+      "acquisition_date": "2026-09-06",
+      "marine_filter": "REALM in ['Coastal','Marine'] OR GIS_M_AREA > 0 (Sep-2026 IND package uses REALM not MARINE)",
+      "coverage_gap_note": "India's WDPA IND polygon package has limited offshore marine PA coverage. Only Thane Creek (coastal) is present in the AOI+buffer for Sep-2026. India designates many marine areas as Wildlife Sanctuaries under domestic law but these may not all appear in the WDPA polygon layer. This is a known WDPA data limitation, not a processing error.",
+      "aoi_clip_applied": true,
+      "buffer_km": 50,
+      "processing_stats": {
+        "n_source": 6,
+        "n_after_clip": 1,
+        "n_removed_by_clip": 5,
+        "n_invalid": 0,
+        "n_repaired": 0,
+        "n_empty_dropped": 0,
+        "n_final": 1
+      },
+      "attributes_preserved": [
+        "wdpa_id",
+        "name",
+        "designation",
+        "designation_eng",
+        "iucn_category",
+        "marine_status",
+        "status",
+        "area_km2"
+      ],
+      "sensitivity_tier_note": "high \u2014 legally designated protected areas"
+    },
+    "aca": {
+      "dataset_name": "UNEP-WCMC Global Distribution of Coral Reefs 2018 v4.1",
+      "receptor_type": "coral_reef",
+      "preferred_source": "Allen Coral Atlas (ACA) reef_habitat_v2_0",
+      "preferred_source_status": "INACCESSIBLE \u2014 ACA website returns HTTP 403 for programmatic requests; GEE asset requires authenticated session. UNEP-WCMC v4.1 used as documented fallback per project scope.",
+      "fallback_source": "UNEP-WCMC / WorldFish / WRI / TNC",
+      "version": "v4.1 (2018)",
+      "download_url": "https://wcmc.io/WCMC_008",
+      "doi": "10.34892/t35q-e534",
+      "reference": "UNEP-WCMC, WorldFish Centre, WRI, TNC (2018). Global distribution of coral reefs, compiled from multiple sources including the Millennium Coral Reef Mapping Project.",
+      "license": "Non-commercial use with attribution required. See https://wcmc.io/WCMC_008",
+      "original_format": "ESRI Shapefile (zipped)",
+      "processed_format": "GeoJSON (EPSG:4326)",
+      "raw_file": "data\\ecological\\raw\\aca\\WCMC008_CoralReefs2018_v4_1.zip",
+      "processed_file": "data\\ecological\\processed\\aca\\coral_reefs_aoi.geojson",
+      "geographic_coverage": "Global (clipped to AOI+buffer)",
+      "acquisition_method": "Direct download from WCMC S3 (via wcmc.io/WCMC_008 redirect)",
+      "acquisition_date": "2026-09-06",
+      "aoi_clip_applied": true,
+      "buffer_km": 50,
+      "processing_stats": {
+        "n_source": 17504,
+        "n_after_clip": 24,
+        "n_removed_by_clip": 17480,
+        "n_invalid": 0,
+        "n_repaired": 0,
+        "n_empty_dropped": 0,
+        "n_final": 24
+      },
+      "coverage_note": "Arabian Sea has limited coral extent. Expected sites in AOI: Malvan Marine Sanctuary (~16\u00b0N 73.5\u00b0E), Gulf of Kutch (~22-23\u00b0N 68-70\u00b0E). Zero or few features is scientifically plausible, not a processing error.",
+      "sensitivity_tier_note": "high \u2014 coral reefs are IUCN-recognised highly sensitive habitats"
+    }
+  },
+  "generated_at": "2026-09-06T03:09:12.089922+00:00"
+}
