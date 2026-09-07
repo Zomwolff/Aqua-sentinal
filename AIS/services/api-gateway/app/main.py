@@ -1387,6 +1387,151 @@ async def get_spill_recommendations(spill_id: str):
         ],
     }
 
+@app.get("/spill/incidents/{spill_id}/ecological", tags=["SpillIntelligence"])
+async def get_spill_ecological_impact(
+    spill_id: str,
+    horizon_hours: Optional[float] = Query(None, description="Filter by specific forecast horizon (e.g., 12.0)"),
+    footprint_type: Optional[str] = Query(None, description="Filter by footprint: best_estimate | probability_90"),
+    receptor_type: Optional[str] = Query(None, description="Filter by receptor: mangrove | coral_reef | mpa | sensitive_coastline"),
+    category: Optional[str] = Query(None, description="Filter by exposure category: None | Low | Medium | High | Critical"),
+):
+    """
+    Ecological impact assessment for a spill incident.
+    
+    Returns exposure calculations for all receptor types at all forecast horizons,
+    including:
+    - Exposure percentage (overlap_area / receptor_area × 100)
+    - Exposure category (None/Low/Medium/High/Critical based on thresholds: 0%, 10%, 30%, 60%)
+    - Time-to-first-exposure for response prioritization
+    - Both best_estimate (50% probability) and probability_90 footprints
+    
+    The ecological impact is calculated by the ecological-impact worker service
+    and retrieved here as read-only data. This endpoint does NOT recalculate impacts.
+    """
+    pool = await _get_pool()
+    
+    # Build dynamic query with filters
+    conditions = ["spill_id = $1"]
+    params: list = [spill_id]
+    idx = 2
+    
+    if horizon_hours is not None:
+        conditions.append(f"horizon_hours = ${idx}")
+        params.append(horizon_hours)
+        idx += 1
+    
+    if footprint_type:
+        conditions.append(f"footprint_type = ${idx}")
+        params.append(footprint_type)
+        idx += 1
+    
+    if receptor_type:
+        conditions.append(f"receptor_type = ${idx}")
+        params.append(receptor_type)
+        idx += 1
+    
+    if category:
+        conditions.append(f"category = ${idx}")
+        params.append(category)
+        idx += 1
+    
+    where_clause = " AND ".join(conditions)
+    
+    rows = await pool.fetch(
+        f"""
+        SELECT 
+            spill_id,
+            horizon_hours,
+            footprint_type,
+            receptor_type,
+            overlap_area_km2,
+            receptor_area_km2,
+            spill_area_km2,
+            exposure_pct,
+            spill_share_pct,
+            category,
+            sensitivity_tier,
+            protection_status,
+            time_to_first_exposure_hours,
+            metadata,
+            computed_at
+        FROM ecological_impact
+        WHERE {where_clause}
+        ORDER BY 
+            horizon_hours ASC,
+            CASE footprint_type WHEN 'best_estimate' THEN 1 ELSE 2 END,
+            receptor_type ASC
+        """,
+        *params,
+    )
+    
+    if not rows:
+        # Check if spill exists
+        spill_exists = await pool.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM spill_incidents WHERE id = $1)",
+            spill_id
+        )
+        if not spill_exists:
+            raise HTTPException(status_code=404, detail="Spill incident not found")
+        
+        # Spill exists but no ecological impact calculated yet
+        return {
+            "spill_id": spill_id,
+            "impact_count": 0,
+            "impacts": [],
+            "message": "No ecological impact data available for this spill. The ecological-impact worker may not have processed this spill yet.",
+        }
+    
+    # Parse metadata JSON and format datetimes
+    impacts = []
+    for r in rows:
+        impact = {k: v for k, v in dict(r).items()}
+        if isinstance(impact.get("metadata"), str):
+            try:
+                impact["metadata"] = json.loads(impact["metadata"])
+            except Exception:
+                pass
+        if isinstance(impact.get("computed_at"), datetime):
+            impact["computed_at"] = impact["computed_at"].isoformat()
+        impacts.append(impact)
+    
+    # Calculate summary statistics
+    summary = {
+        "total_impacts": len(impacts),
+        "horizons_covered": sorted(list(set(r["horizon_hours"] for r in rows))),
+        "receptors_affected": sorted(list(set(r["receptor_type"] for r in rows if r["exposure_pct"] > 0))),
+        "highest_category": _get_highest_category([r["category"] for r in rows]),
+        "time_to_first_exposure": {
+            receptor: _get_first_exposure_time(rows, receptor)
+            for receptor in set(r["receptor_type"] for r in rows)
+        },
+    }
+    
+    return {
+        "spill_id": spill_id,
+        "summary": summary,
+        "impact_count": len(impacts),
+        "impacts": impacts,
+    }
+
+
+def _get_highest_category(categories: list) -> str:
+    """Determine the highest exposure category from a list."""
+    category_order = {"Critical": 5, "High": 4, "Medium": 3, "Low": 2, "None": 1}
+    highest = "None"
+    for cat in categories:
+        if category_order.get(cat, 0) > category_order.get(highest, 0):
+            highest = cat
+    return highest
+
+
+def _get_first_exposure_time(rows, receptor_type: str) -> Optional[float]:
+    """Get time-to-first-exposure for a specific receptor type."""
+    for row in rows:
+        if row["receptor_type"] == receptor_type and row["time_to_first_exposure_hours"] is not None:
+            return float(row["time_to_first_exposure_hours"])
+    return None
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # LIVE DATA TRIGGER + REFERENCE / DARK-VESSEL ENDPOINTS
