@@ -16,3 +16,5 @@ tiff_data/
 *.zip
 documentation
 env (16)
+inference_output/
+optical imagery/batch_inference.py
