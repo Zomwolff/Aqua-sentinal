@@ -115,13 +115,13 @@ def get_valid_data_mask(source_image: Path, shape_hw: tuple) -> np.ndarray | Non
 # Morphological cleanup
 # --------------------------------------------------------------------------
 
-def clean_mask(mask: np.ndarray, min_object_px: int = 64, min_hole_px: int = 64,
-               opening_radius: int = 2, closing_radius: int = 2) -> np.ndarray:
+def clean_mask(mask: np.ndarray, min_object_px: int = 20, min_hole_px: int = 64,
+               opening_radius: int = 0, closing_radius: int = 1) -> np.ndarray:
     """Speckle removal + hole filling + smoothing on a binary mask.
 
     Order matters:
-      1. Opening (erode-then-dilate) strips isolated speckle noise / thin
-         spurious bridges without eating into the main blob much.
+      1. Optional opening (erode-then-dilate) strips isolated speckle noise.
+         It is OFF by default because oil slicks can be narrow.
       2. Closing (dilate-then-erode) fills small gaps/holes and smooths
          jagged edges from the raw sigmoid threshold.
       3. remove_small_objects drops any remaining blobs below min_object_px
@@ -130,12 +130,23 @@ def clean_mask(mask: np.ndarray, min_object_px: int = 64, min_hole_px: int = 64,
          (avoids donut-shaped polygons from noisy interior pixels).
     """
     m = mask.astype(bool)
+    # Opening is intentionally OFF by default. A disk opening first erodes
+    # the mask, which can completely erase the narrow elongated streaks that
+    # are common in SAR oil-spill predictions.
     if opening_radius > 0:
         m = opening(m, disk(opening_radius))
+
     if closing_radius > 0:
         m = closing(m, disk(closing_radius))
-    m = remove_small_objects(m, min_size=min_object_px)
-    m = remove_small_holes(m, area_threshold=min_hole_px)
+
+    if min_object_px > 1:
+        m = remove_small_objects(m, min_size=min_object_px)
+
+    # scikit-image 0.26+ deprecates area_threshold in favor of max_size.
+    # max_size removes/fills holes whose area is <= max_size.
+    if min_hole_px > 0:
+        m = remove_small_holes(m, max_size=min_hole_px)
+
     return m
 
 
@@ -193,20 +204,69 @@ def mask_to_polygons(mask: np.ndarray, transform) -> list[dict]:
 # --------------------------------------------------------------------------
 
 def run_postprocess(mask_path, source_image, output_dir, manual_bounds=None,
-                    min_object_px=64, min_hole_px=64, opening_radius=2, closing_radius=2):
+                    min_object_px=20, min_hole_px=64, opening_radius=0, closing_radius=1):
     mask_path = Path(mask_path)
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     stem = mask_path.stem.replace("_mask", "")
 
+    # ------------------------------------------------------------------
+    # Read and validate the model mask.
+    # ------------------------------------------------------------------
     with Image.open(mask_path) as img:
-        raw_mask = np.array(img.convert("L")) > 127
-    h, w = raw_mask.shape
+        gray = np.array(img.convert("L"))
 
-    cleaned = clean_mask(raw_mask, min_object_px=min_object_px, min_hole_px=min_hole_px,
-                         opening_radius=opening_radius, closing_radius=closing_radius)
+    h, w = gray.shape
 
-    px_before, px_after = int(raw_mask.sum()), int(cleaned.sum())
+    # The inference pipeline normally writes a binary 0/255 PNG. Keep the
+    # threshold at 127, but print enough information to catch a wrong/empty
+    # mask path immediately.
+    unique_values = np.unique(gray)
+    raw_mask = gray > 127
+    px_before = int(raw_mask.sum())
+
+    print(f"[input] mask={mask_path}")
+    print(f"[input] shape={w}x{h}, dtype={gray.dtype}, min={int(gray.min())}, "
+          f"max={int(gray.max())}, oil_px={px_before}")
+
+    if px_before == 0:
+        preview = unique_values[:20].tolist()
+        suffix = "..." if unique_values.size > 20 else ""
+        warnings.warn(
+            f"[mask] {stem}: input mask contains 0 pixels above threshold 127. "
+            f"Unique grayscale values: {preview}{suffix}. "
+            f"Post-processing cannot recover detections from an empty mask. "
+            f"Check that --mask points to the actual *_mask.png produced by "
+            f"infer_pipeline.py."
+        )
+
+    # ------------------------------------------------------------------
+    # Conservative cleanup.
+    # ------------------------------------------------------------------
+    cleaned = clean_mask(
+        raw_mask,
+        min_object_px=min_object_px,
+        min_hole_px=min_hole_px,
+        opening_radius=opening_radius,
+        closing_radius=closing_radius,
+    )
+
+    px_after = int(cleaned.sum())
+
+    # Safety guard: never let morphology silently turn a non-empty model
+    # prediction into an empty spill. If that happens, fall back to the raw
+    # binary prediction. This makes the GIS pipeline fail-safe while still
+    # reporting that the requested cleanup was too aggressive.
+    if px_before > 0 and px_after == 0:
+        warnings.warn(
+            f"[cleanup] {stem}: requested cleanup erased ALL {px_before} "
+            f"predicted-oil pixels. Falling back to the raw model mask so the "
+            f"GIS output is not silently blank. Reduce --min-object-px and/or "
+            f"--opening-radius if you want stronger cleanup."
+        )
+        cleaned = raw_mask.copy()
+        px_after = int(cleaned.sum())
+
     print(f"[cleanup] {stem}: {px_before} -> {px_after} oil px "
          f"({'+' if px_after >= px_before else ''}{px_after - px_before} px change)")
 
@@ -318,10 +378,10 @@ def parse_args():
     p.add_argument("--manual-bounds", default=None,
                   help='"min_lon,min_lat,max_lon,max_lat" — use when source image has no embedded CRS '
                        "but you know its real-world corner coordinates")
-    p.add_argument("--min-object-px", type=int, default=64, help="Drop blobs smaller than this (pixels)")
+    p.add_argument("--min-object-px", type=int, default=20, help="Drop blobs smaller than this (pixels); default 20")
     p.add_argument("--min-hole-px", type=int, default=64, help="Fill interior holes smaller than this (pixels)")
-    p.add_argument("--opening-radius", type=int, default=2, help="Morphological opening disk radius (speckle removal)")
-    p.add_argument("--closing-radius", type=int, default=2, help="Morphological closing disk radius (gap filling)")
+    p.add_argument("--opening-radius", type=int, default=0, help="Morphological opening disk radius; default 0 to preserve thin oil streaks")
+    p.add_argument("--closing-radius", type=int, default=1, help="Morphological closing disk radius; default 1")
     return p.parse_args()
 
 

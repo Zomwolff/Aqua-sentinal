@@ -345,7 +345,7 @@ def load_image_as_array(
 
     if c != 3:
 
-        if rescale:
+        if rescale or raw.dtype != np.uint8:
 
             vmin = float(np.nanmin(raw))
             vmax = float(np.nanmax(raw))
