@@ -15,6 +15,19 @@ outputs/
 sample_check.png
 # NOTE: predictions_sample.png is intentionally tracked (referenced by evaluation_report.md)
 
+# Logs / temp files
+*.log
+*.tmp
+*~
+
+# GDAL/QGIS sidecars (statistics, overviews) created when rasters are opened
+*.aux.xml
+*.ovr
+
+# Coverage reports
+.coverage
+htmlcov/
+
 # Python bytecode / caches
 __pycache__/
 *.py[cod]
