@@ -24,3 +24,17 @@ mpmath==1.3.0
 sympy==1.14.0
 packaging==26.3
 stringzilla==5.1.2
+
+# Post-processing / GIS dependencies (geo_postprocess.py: rasterio, geopandas,
+# shapely, scikit-image; pyproj/pyogrio/pandas resolve as their dependencies).
+# Exact versions from the working dev venv.
+rasterio==1.5.1
+geopandas==1.1.4
+shapely==2.1.2
+scikit-image==0.26.0
+pandas==3.0.5
+pyproj==3.8.0
+
+# B2 classifier training + inference (train_b2.py, b2_lookalike.py).
+scikit-learn==1.9.0
+joblib==1.6.0

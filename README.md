@@ -98,6 +98,19 @@ Each service runs uvicorn on port 8000 inside its container and is exposed on a 
 | 8014 | response-decision | Recommends priority response actions |
 | 8015 | api-gateway | Public REST API + live WebSocket relay to the dashboard |
 
+## SAR oil-spill pipeline — B1 segmentation + B2 look-alike classifier
+
+Deep-learning SAR spill detection lives in `sar-LinkNet-ResNet34/` (LinkNet + ResNet34, **separate from** the `sar-spill-intelligence` CFAR microservice on port 8008):
+
+```powershell
+cd sar-LinkNet-ResNet34
+.\.venv\Scripts\python.exe infer_pipeline.py --checkpoint checkpoints/best_model.pth --input path\to\scene.tif --output-dir outputs/demo --rescale
+.\.venv\Scripts\python.exe geo_postprocess.py --mask outputs/demo/scene_mask.png --source-image path\to\scene.tif --output-dir outputs/demo --glcm-band 1
+.\.venv\Scripts\python.exe b2_lookalike.py --input outputs/demo/scene_spill_meta.json --output outputs/b2_predictions.json
+```
+
+That chain produces the mask → GIS polygons + 14 per-candidate B2 features (GLCM/shape/edge/context) → OIL/LOOK_ALIKE predictions from `models/b2_random_forest.joblib`. Batch training data via `at.py`, classifier training via `train_b2.py`. **Full teammate guide (setup, flags, outputs, troubleshooting, honest model limitations): [`sar-LinkNet-ResNet34/README.md`](sar-LinkNet-ResNet34/README.md).**
+
 ## Project structure
 
 ```
@@ -114,6 +127,8 @@ Each service runs uvicorn on port 8000 inside its container and is exposed on a 
 │   └── geo_layers/           # Coastlines, EEZ, protected areas
 ├── services/                 # 15 FastAPI microservices, one container each
 │   └── <service>/            # Dockerfile, requirements.txt, app/main.py
+├── sar-LinkNet-ResNet34/     # SAR DL pipeline: B1 inference, GIS postprocess,
+│                             # B2 features/training/inference (own README + venv)
 ├── dashboard/                # React + Vite + Leaflet frontend
 ├── simulator/                # Data replay simulator (script, not a server)
 ├── shared/                   # Shared Python modules (mounted into all services)

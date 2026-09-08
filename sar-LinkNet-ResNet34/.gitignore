@@ -9,11 +9,31 @@ checkpoints/
 # Dataset (large, local only)
 dataset/
 
-# Generated outputs (masks, overlays, demo runs, logs)
+# Generated outputs (masks, overlays, demo runs, batch runs, B2 vectors)
 outputs/
 *.csv
 sample_check.png
 # NOTE: predictions_sample.png is intentionally tracked (referenced by evaluation_report.md)
+
+# Trained classifier artifacts (rebuild with train_b2.py; too large/niche to track)
+models/
+*.joblib
+
+# Raw/local datasets (recreate per machine; see README for sources)
+data_raw_*.csv
+
+# Logs / temp files
+*.log
+*.tmp
+*~
+
+# GDAL/QGIS sidecars (statistics, overviews) created when rasters are opened
+*.aux.xml
+*.ovr
+
+# Coverage reports
+.coverage
+htmlcov/
 
 # Python bytecode / caches
 __pycache__/
