@@ -339,6 +339,54 @@ body {
   border: 1px solid #bae6fd;
 }
 
+.cost-summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  margin-bottom: 10px;
+}
+
+.cost-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cost-chart-row {
+  display: grid;
+  grid-template-columns: 32px 1fr;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: #64748b;
+}
+
+.cost-band-track {
+  height: 18px;
+  background: #f1f5f9;
+  overflow: hidden;
+}
+
+.cost-band {
+  height: 100%;
+  min-width: 4%;
+  background: #f59e0b;
+  color: #451a03;
+  font-size: 9px;
+  line-height: 18px;
+  padding-left: 4px;
+  white-space: nowrap;
+}
+
+.cost-note {
+  display: block;
+  color: #64748b;
+  font-size: 10px;
+  line-height: 1.35;
+  margin-top: 8px;
+}
+
 .recommendations-list {
   display: flex;
   flex-direction: column;
