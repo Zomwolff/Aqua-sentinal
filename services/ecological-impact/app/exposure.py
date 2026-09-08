@@ -275,9 +275,10 @@ async def calculate_ecological_impact_for_spill(
                 })
     
     # Calculate time_to_first_exposure for each receptor type
+    # Note: Check ALL footprint types to find earliest exposure
     for receptor_type in receptor_types:
         first_exposure_hours = calculate_time_to_first_exposure(
-            [r for r in results if r["footprint_type"] == "best_estimate"],
+            results,  # Check all footprints, not just best_estimate
             receptor_type
         )
         

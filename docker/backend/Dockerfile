@@ -4,16 +4,18 @@
 # evidence-fusion (weighted-sum combiner over SAR+AIS+environmental+optical
 # evidence), source-attribution (backward search over AIS tracks near an
 # estimated spill origin), severity-impact and response-decision (geospatial
-# heuristics + lookup tables), and drift-forecast (physics-based particle
+# heuristics + lookup tables), drift-forecast (physics-based particle
 # advection — ITOPF 3%-wind-drift rule run forward/backward; NOT a trained
 # model, moved here rather than into the `eo` container so `eo` can mean
-# exactly one thing: the optical satellite CNN).
+# exactly one thing: the optical satellite CNN), and ecological-impact
+# (spatial exposure calculation — PostGIS intersection of forecast polygons
+# with ecological receptors).
 #
 # Each original service keeps its own untouched app/ + shared/ tree under
 # /svc/<name>, copied exactly as its original Dockerfile did — no source
 # edits (except evidence-fusion/app/{evidence.py,worker.py}, which gained a
 # few additive lines to read/forward optical evidence from the eo service —
-# see docker/EO_CORRECTION.md). supervisord runs all six, each still bound
+# see docker/EO_CORRECTION.md). supervisord runs all seven, each still bound
 # to its ORIGINAL port. api-gateway (:8015) is the only one published to the
 # host.
 FROM python:3.11-slim
@@ -64,6 +66,21 @@ COPY shared/__init__.py /svc/drift-forecast/shared/__init__.py
 COPY services/shared/redis_client.py /svc/drift-forecast/shared/redis_client.py
 COPY services/drift-forecast/app /svc/drift-forecast/app
 RUN sed -i 's#sys\.path\.insert(0, "/app")#sys.path.insert(0, "/svc/drift-forecast")#' /svc/drift-forecast/app/*.py
+
+# ── ecological-impact :8016 (spatial exposure calculation) ────────────────────
+RUN mkdir -p /svc/ecological-impact
+COPY shared/db /svc/ecological-impact/shared/db
+COPY shared/__init__.py /svc/ecological-impact/shared/__init__.py
+COPY services/shared/redis_client.py /svc/ecological-impact/shared/redis_client.py
+COPY services/ecological-impact/app /svc/ecological-impact/app
+RUN sed -i 's#sys\.path\.insert(0, "/app")#sys.path.insert(0, "/svc/ecological-impact")#' /svc/ecological-impact/app/*.py
+
+# ── weather-ingestion (environmental forecast data polling) ───────────────────
+RUN mkdir -p /svc/weather-ingestion/app
+COPY shared/db /svc/weather-ingestion/shared/db
+COPY shared/__init__.py /svc/weather-ingestion/shared/__init__.py
+COPY services/data-ingestion/app/weather.py /svc/weather-ingestion/app/weather.py
+RUN echo 'import asyncio\nimport sys\nimport logging\nlogging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")\nsys.path.insert(0, "/svc/weather-ingestion")\nfrom shared.db.connection import create_pool, close_pool\nfrom app.weather import weather_polling_loop\n\nasync def main():\n    await create_pool()\n    try:\n        await weather_polling_loop()\n    finally:\n        await close_pool()\n\nif __name__ == "__main__":\n    asyncio.run(main())' > /svc/weather-ingestion/app/worker.py
 
 # ── api-gateway :8015 (public entrypoint) ─────────────────────────────────────
 RUN mkdir -p /svc/api-gateway

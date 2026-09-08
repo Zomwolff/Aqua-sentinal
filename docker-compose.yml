@@ -10,6 +10,10 @@ x-common-env: &common-env
   AIS_BBOX_MIN_LON: ${AIS_BBOX_MIN_LON:-68.0}
   AIS_BBOX_MAX_LAT: ${AIS_BBOX_MAX_LAT:-25.0}
   AIS_BBOX_MAX_LON: ${AIS_BBOX_MAX_LON:-77.5}
+  WEATHER_BBOX_MIN_LAT: ${WEATHER_BBOX_MIN_LAT:-14.0}
+  WEATHER_BBOX_MIN_LON: ${WEATHER_BBOX_MIN_LON:-68.0}
+  WEATHER_BBOX_MAX_LAT: ${WEATHER_BBOX_MAX_LAT:-25.0}
+  WEATHER_BBOX_MAX_LON: ${WEATHER_BBOX_MAX_LON:-77.5}
 
 # Shared by sar (Sentinel-1) and eo (Sentinel-2) — both talk to the same GEE
 # service account.

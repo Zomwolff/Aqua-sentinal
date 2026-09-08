@@ -57,6 +57,14 @@ async def _persist_ecological_impacts(pool, impacts: list[Dict]) -> int:
         try:
             metadata_json = json.dumps(impact.get("metadata", {}))
             
+            # Debug: Log TTFE value for sensitive_coastline
+            if impact["receptor_type"] == "sensitive_coastline" and impact.get("time_to_first_exposure_hours") is not None:
+                log.info(
+                    "DEBUG: Inserting TTFE for sensitive_coastline: horizon=%s footprint=%s ttfe=%s",
+                    impact["horizon_hours"], impact["footprint_type"], 
+                    impact.get("time_to_first_exposure_hours")
+                )
+            
             await pool.execute(
                 """
                 INSERT INTO ecological_impact (
