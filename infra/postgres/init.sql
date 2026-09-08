@@ -194,7 +194,21 @@ CREATE TABLE IF NOT EXISTS spill_candidates (
     confidence           DOUBLE PRECISION CHECK (confidence IS NULL OR confidence BETWEEN 0 AND 1),  -- Step 5 heuristic confidence
     classification_label spill_candidate_status_enum,        -- Step 4/5 classification label
     texture_features     JSONB,                              -- Step 5 GLCM texture features
-    is_synthetic         BOOLEAN NOT NULL DEFAULT FALSE      -- provenance: synthetic demo injection
+    is_synthetic         BOOLEAN NOT NULL DEFAULT FALSE,     -- provenance: synthetic demo injection
+    -- B2 Look-Alike Classifier features (nullable; see migrations/002_b2_features.sql)
+    mean_backscatter     DOUBLE PRECISION,                   -- raw SAR dB mean in candidate
+    std_backscatter      DOUBLE PRECISION,                   -- raw SAR dB std in candidate
+    glcm_contrast        DOUBLE PRECISION,                   -- authoritative B2 source: geo_postprocess.py
+    glcm_homogeneity     DOUBLE PRECISION,
+    glcm_energy          DOUBLE PRECISION,                   -- true energy = sqrt(ASM)
+    glcm_correlation     DOUBLE PRECISION,
+    perimeter_m          DOUBLE PRECISION CHECK (perimeter_m IS NULL OR perimeter_m > 0),
+    elongation           DOUBLE PRECISION CHECK (elongation IS NULL OR elongation >= 0),
+    boundary_irregularity DOUBLE PRECISION CHECK (boundary_irregularity IS NULL OR boundary_irregularity > 0),
+    edge_sharpness       DOUBLE PRECISION,                   -- outside-minus-inside boundary SAR (dB)
+    wind_speed_kmh       DOUBLE PRECISION,                   -- 10-m wind, NULL when unmatched
+    distance_to_nearest_vessel_km DOUBLE PRECISION CHECK (distance_to_nearest_vessel_km IS NULL OR distance_to_nearest_vessel_km >= 0),
+    persistence_count    INTEGER CHECK (persistence_count IS NULL OR persistence_count >= 1)
 );
 
 CREATE INDEX IF NOT EXISTS idx_spill_candidates_geom       ON spill_candidates USING GIST (geom);

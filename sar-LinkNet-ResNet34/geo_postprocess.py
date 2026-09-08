@@ -71,6 +71,7 @@ import warnings
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 from PIL import Image
 
 try:
@@ -85,7 +86,14 @@ except ImportError as e:
 import geopandas as gpd
 from shapely.geometry import shape as shp_shape
 from scipy import ndimage as ndi
-from skimage.morphology import remove_small_objects, remove_small_holes, opening, closing, disk
+from skimage.morphology import remove_small_objects, remove_small_holes, opening, closing, disk, dilation, erosion
+from skimage.measure import regionprops
+
+try:
+    from pyproj import Geod as _Geod
+    _HAS_GEOD = True
+except ImportError:  # pragma: no cover
+    _HAS_GEOD = False
 
 try:
     from skimage.feature import graycomatrix, graycoprops  # noqa: F401
@@ -258,6 +266,8 @@ def mask_to_polygons(mask: np.ndarray, transform) -> list[dict]:
 # angle, polarization, age, oil type, processing and look-alikes.
 
 GLCM_DEFAULT_LEVELS = 32
+# Legacy manual dB fallback (kept for direct extract_candidate_textures callers).
+# The run_postprocess CLI defaults to None = auto scene p1/p99 range instead.
 GLCM_DEFAULT_MIN_DB = -30.0
 GLCM_DEFAULT_MAX_DB = 0.0
 GLCM_DEFAULT_DISTANCES = [1, 2]
@@ -444,6 +454,566 @@ def sar_band_stats(values: np.ndarray) -> dict:
     }
 
 
+def resolve_glcm_range(sar: np.ndarray, min_db, max_db):
+    """Resolve the fixed GLCM normalization range for a scene.
+
+    Explicit values are honored verbatim (source "manual"). When either bound
+    is None (the default), the range is auto-fit from SCENE-level percentiles
+    (p1/p99 of finite band values) so heterogeneous products each get a
+    window covering their actual dynamic range. The resolved range still
+    applies identically to every candidate in the scene (fixed-range
+    normalization -- never per-candidate). Degenerate constant scenes fall
+    back to [value-1, value+1] rather than crashing.
+
+    Returns (min_db, max_db, range_source).
+    """
+    if min_db is not None and max_db is not None:
+        if float(min_db) >= float(max_db):
+            raise ValueError(f"--glcm-min-db ({min_db}) must be < --glcm-max-db ({max_db})")
+        return float(min_db), float(max_db), "manual"
+    f = np.asarray(sar, dtype=np.float64).ravel()
+    f = f[np.isfinite(f)]
+    if f.size == 0:
+        raise ValueError("no finite SAR pixels to derive GLCM range from")
+    auto_min = float(np.percentile(f, 1)) if min_db is None else float(min_db)
+    auto_max = float(np.percentile(f, 99)) if max_db is None else float(max_db)
+    if not auto_max > auto_min:
+        mid = float(auto_min)
+        auto_min, auto_max = mid - 1.0, mid + 1.0
+    if min_db is not None and not auto_max > float(min_db):
+        raise ValueError(f"--glcm-min-db ({min_db}) must be < derived max ({auto_max})")
+    if max_db is not None and not float(max_db) > auto_min:
+        raise ValueError(f"derived min ({auto_min}) must be < --glcm-max-db ({max_db})")
+    return auto_min, auto_max, "auto_p01_p99"
+
+
+# --------------------------------------------------------------------------
+# B2 Look-Alike Classifier — candidate feature helpers
+# --------------------------------------------------------------------------
+# Every helper below returns real measured values or None (with a reason);
+# NOTHING is fabricated. Missing contextual evidence (no weather/AIS/other
+# scenes) stays missing (null) so the Random Forest can treat it as absent.
+#
+# Formulas:
+#   mean/std_backscatter : mean/std of raw SAR dB values inside the candidate
+#                          mask, finite values only, NoData excluded.
+#   perimeter_m          : metric perimeter of the candidate polygon. Projected
+#                          CRS -> planar length (metre units verified, else null).
+#                          Geographic CRS -> geodesic length via pyproj.Geod.
+#                          NEVER degrees reported as meters.
+#   elongation           : regionprops major_axis_length / minor_axis_length on
+#                          the candidate mask (same approach as
+#                          services/lookalike-engine/app/shape_filters.py),
+#                          capped at 1e6 for degenerate (near-zero minor axis).
+#   boundary_irregularity: perimeter_m^2 / (4*pi*area_m2); ~1 for a circle.
+#                          perimeter and area must both be metric.
+#   edge_sharpness       : mean SAR outside the boundary band minus mean SAR
+#                          inside the boundary band (dilated/eroded disk(3)
+#                          bands, finite values only). Positive = backscatter
+#                          drops going inside (dark-region edge).
+#   wind_speed_kmh       : matched 10-m wind from weather records (nearest in
+#                          space among samples within +-window of acquisition).
+#   distance_to_nearest_vessel_km: min geodesic distance from candidate
+#                          centroid to correlated AIS positions (km).
+#   persistence_count    : detections of the same region across distinct SAR
+#                          scenes INCLUDING the current scene (1 = only here).
+
+ELONGATION_CAP = 1e6
+_PX_EPS = float(np.finfo(np.float64).eps)
+
+# Short Shapefile (<=10 char) aliases for the B2 scalar attributes. GeoJSON
+# keeps the full names; this map is stored in spill_meta.json as shp_field_map.
+SHP_FIELD_MAP = {
+    "candidate_id": "cand_id",
+    "area_m2": "area_m2",
+    "perimeter_m": "perim_m",
+    "elongation": "elong",
+    "boundary_irregularity": "bnd_irreg",
+    "edge_sharpness": "edge_sharp",
+    "mean_backscatter": "mean_bs",
+    "std_backscatter": "std_bs",
+    "glcm_contrast": "glcm_con",
+    "glcm_homogeneity": "glcm_hom",
+    "glcm_energy": "glcm_en",
+    "glcm_correlation": "glcm_corr",
+    "wind_speed_kmh": "wind_kmh",
+    "distance_to_nearest_vessel_km": "ves_km",
+    "persistence_count": "persist_n",
+}
+
+B2_FEATURE_COLUMNS = [
+    "mean_backscatter", "std_backscatter",
+    "glcm_contrast", "glcm_homogeneity", "glcm_energy", "glcm_correlation",
+    "area_km2", "perimeter_m", "elongation", "boundary_irregularity",
+    "edge_sharpness", "wind_speed_kmh", "distance_to_nearest_vessel_km",
+    "persistence_count",
+]
+
+B2_META_COLUMNS = [
+    "candidate_id", "scene_id", "source_id", "label", "label_name",
+    "category", "scene_datetime", "centroid_lat", "centroid_lon",
+]
+
+
+def _backscatter_stats(sar_crop: np.ndarray, valid_mask: np.ndarray):
+    """Mean/std of raw SAR dB inside the candidate (finite valid pixels only)."""
+    vals = np.asarray(sar_crop, dtype=np.float64)[np.asarray(valid_mask, dtype=bool)]
+    vals = vals[np.isfinite(vals)]
+    if vals.size == 0:
+        return None, None
+    return float(np.mean(vals)), float(np.std(vals))
+
+
+def _edge_sharpness(sar_crop: np.ndarray, cand_mask: np.ndarray):
+    """Outside-band mean minus inside-band mean SAR (disk(3) boundary bands).
+
+    Returns (value, reason); value is None when either band has no finite
+    SAR pixel -- reported as missing, never invented.
+    """
+    dark = np.asarray(cand_mask, dtype=bool)
+    arr = np.asarray(sar_crop, dtype=np.float64)
+    try:
+        dilated = dilation(dark, footprint=disk(3))
+        eroded = erosion(dark, footprint=disk(3))
+    except Exception as e:
+        return None, f"morphology_failed: {e}"
+    outer = arr[dilated & ~dark]
+    inner = arr[dark & ~eroded]
+    outer = outer[np.isfinite(outer)]
+    inner = inner[np.isfinite(inner)]
+    if outer.size == 0 or inner.size == 0:
+        return None, "insufficient_boundary_pixels"
+    return float(np.mean(outer) - np.mean(inner)), "ok"
+
+
+def _elongation(cand_mask: np.ndarray):
+    """Major/minor axis ratio via regionprops (capped at 1e6 when degenerate)."""
+    try:
+        props = regionprops(np.asarray(cand_mask, dtype=np.int32))
+    except Exception:
+        return None
+    if not props:
+        return None
+    region = max(props, key=lambda p: p.area)
+    try:
+        minor = float(region.axis_minor_length)
+        major = float(region.axis_major_length)
+    except Exception:
+        return None
+    if not (np.isfinite(minor) and np.isfinite(major)):
+        return None
+    if minor <= _PX_EPS:
+        return float(ELONGATION_CAP)
+    return float(major / minor)
+
+
+def _geod():
+    if not _HAS_GEOD:
+        raise SystemExit("Missing dependency for metric geometry. Run: pip install pyproj")
+    return _Geod(ellps="WGS84")
+
+
+def _candidate_polygon_metrics(cand_bool_full: np.ndarray, transform, crs, is_geo):
+    """Metric perimeter (+native polygon) for ONE candidate mask.
+
+    Vectorizes the single-candidate mask with the source transform, then:
+      projected CRS with metre units -> planar length (meters);
+      geographic CRS                  -> geodesic length via pyproj.Geod;
+      pixel space                     -> perimeter_m None (never fabricated).
+    Returns dict with keys: polygon_native (shapely|None), polygon_wgs84
+    (GeoJSON-dict|None), perimeter_m (float|None), perimeter_status (str).
+    """
+    out = {"polygon_native": None, "polygon_wgs84": None,
+           "perimeter_m": None, "perimeter_status": "not_computed"}
+    try:
+        geoms = [g for g, v in rio_shapes(cand_bool_full.astype(np.uint8),
+                                          mask=cand_bool_full.astype(bool),
+                                          transform=transform) if v == 1]
+    except Exception as e:
+        out["perimeter_status"] = f"vectorize_failed: {e}"
+        return out
+    if not geoms:
+        out["perimeter_status"] = "empty_geometry"
+        return out
+    try:
+        from shapely.geometry import shape as _shape
+        polys = [_shape(g) for g in geoms]
+        poly = max(polys, key=lambda p: p.area)
+    except Exception as e:
+        out["perimeter_status"] = f"geometry_failed: {e}"
+        return out
+    out["polygon_native"] = poly
+    if not is_geo or crs is None:
+        out["perimeter_status"] = "pixel_space_no_metric"
+        return out
+    try:
+        if crs.is_projected:
+            unit = ""
+            try:
+                unit = (crs.axis_info[0].unit_name or "").lower()
+            except Exception:
+                unit = ""
+            if unit and unit != "metre":
+                out["perimeter_status"] = f"projected_non_metre_unit:{unit}"
+                return out
+            out["perimeter_m"] = float(poly.length)
+            out["perimeter_status"] = "ok_projected_metres"
+        else:
+            g = _geod()
+            total = g.geometry_length(poly)
+            out["perimeter_m"] = float(total)
+            out["perimeter_status"] = "ok_geodesic"
+        wgs = transform_geom(crs, "EPSG:4326", shp_shape(poly.__geo_interface__).__geo_interface__)
+        out["polygon_wgs84"] = wgs
+    except Exception as e:
+        out["perimeter_m"] = None
+        out["perimeter_status"] = f"metric_failed: {e}"
+    return out
+
+
+def _boundary_irregularity(perimeter_m, area_m2):
+    """perimeter^2 / (4*pi*area); ~1 for a circle. None when not computable."""
+    try:
+        if perimeter_m is None or area_m2 is None:
+            return None
+        p, a = float(perimeter_m), float(area_m2)
+        if not (np.isfinite(p) and np.isfinite(a)) or a <= 0 or p < 0:
+            return None
+        return float(p * p / (4.0 * np.pi * a))
+    except Exception:
+        return None
+
+
+def _parse_time(value):
+    if value is None:
+        return None
+    try:
+        from datetime import datetime
+        s = str(value).strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            from datetime import timezone
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
+def _centroid_lonlat(polygon_wgs84, bbox_xyxy, transform):
+    """Candidate centroid as (lon, lat); falls back to bbox center via transform."""
+    try:
+        if polygon_wgs84 is not None:
+            from shapely.geometry import shape as _shape
+            c = _shape(polygon_wgs84).representative_point()
+            return float(c.x), float(c.y)
+    except Exception:
+        pass
+    try:
+        xmin, ymin, xmax, ymax = bbox_xyxy
+        cx = (xmin + xmax + 1) / 2.0
+        cy = (ymin + ymax + 1) / 2.0
+        from rasterio.transform import xy as _xy
+        lon, lat = _xy(transform, cy, cx, offset="center")
+        return float(lon), float(lat)
+    except Exception:
+        return None
+
+
+def _match_wind(centroid_lonlat, acquisition_time, records, window_h=3.0):
+    """Nearest weather sample in space among records within +-window_h of acquisition.
+
+    records: list of dicts with lat, lon, timestamp (ISO), wind_speed_kmh, source.
+    Mirrors the existing evidence-fusion lookup (time window, then nearest).
+    Returns (value|None, matched_dict|None, reason).
+    """
+    if not records:
+        return None, None, "no_weather_source"
+    if centroid_lonlat is None:
+        return None, None, "no_centroid"
+    if acquisition_time is None:
+        return None, None, "no_acquisition_time"
+    try:
+        import math
+        lon0, lat0 = centroid_lonlat
+        best, best_d2 = None, None
+        for r in records:
+            try:
+                ts = _parse_time(r.get("timestamp"))
+                if ts is None:
+                    continue
+                if abs((ts - acquisition_time).total_seconds()) > float(window_h) * 3600.0:
+                    continue
+                d2 = (float(r["lat"]) - lat0) ** 2 + (float(r["lon"]) - lon0) ** 2
+                if best is None or d2 < best_d2:
+                    best, best_d2 = r, d2
+            except Exception:
+                continue
+        if best is None:
+            return None, None, "no_sample_in_window"
+        val = best.get("wind_speed_kmh")
+        if val is None or not np.isfinite(float(val)):
+            return None, None, "matched_sample_missing_wind"
+        matched = {"wind_speed_kmh": float(val),
+                   "timestamp": best.get("timestamp"),
+                   "source": best.get("source", "weather_csv"),
+                   "distance_deg": float(math.sqrt(best_d2))}
+        return float(val), matched, "ok"
+    except Exception as e:
+        return None, None, f"wind_match_failed: {e}"
+
+
+def _nearest_vessel_km(centroid_lonlat, acquisition_time, records, window_h=24.0):
+    """Min geodesic distance (km) from candidate centroid to AIS positions.
+
+    records: list of dicts with lat, lon, optional timestamp/mmsi. Time filter
+    applies only when BOTH acquisition and record timestamps exist (mirrors
+    the existing correlation-window pattern). Returns
+    (km|None, detail|None, reason); None (not 0) when nothing correlates.
+    """
+    if not records:
+        return None, None, "no_ais_source"
+    if centroid_lonlat is None:
+        return None, None, "no_centroid"
+    try:
+        g = _geod()
+        lon0, lat0 = centroid_lonlat
+        best_m, best_rec = None, None
+        for r in records:
+            try:
+                rts = _parse_time(r.get("timestamp"))
+                if rts is not None and acquisition_time is not None:
+                    if abs((rts - acquisition_time).total_seconds()) > float(window_h) * 3600.0:
+                        continue
+                _, _, dist_m = g.inv(lon0, lat0, float(r["lon"]), float(r["lat"]))
+                if best_m is None or dist_m < best_m:
+                    best_m, best_rec = float(dist_m), r
+            except Exception:
+                continue
+        if best_m is None or best_rec is None:
+            return None, None, "no_vessel_in_window"
+        detail = {"distance_m": float(best_m), "distance_km": float(best_m / 1000.0),
+                  "mmsi": best_rec.get("mmsi"), "timestamp": best_rec.get("timestamp")}
+        return float(best_m / 1000.0), detail, "ok"
+    except Exception as e:
+        return None, None, f"vessel_match_failed: {e}"
+
+
+def _geod_area(geom_wgs84):
+    """Geodesic area (m^2, always >= 0) of a lon/lat GeoJSON geometry."""
+    from shapely.geometry import shape as _shape
+    return abs(float(_geod().geometry_area_perimeter(_shape(geom_wgs84))[0]))
+
+
+def _persistence_count(polygon_wgs84, scene_id, acquisition_time,
+                       other_scenes, iou_thresh=0.1, window_h=720.0):
+    """Scene-to-scene match count INCLUDING the current scene (min 1 if valid).
+
+    other_scenes: list of {scene_id, acquisition_time (ISO|None),
+    polygons_wgs84 (list of GeoJSON dicts)}. A scene matches when any of its
+    polygons has IoU >= iou_thresh with this candidate (IoU from geodesic
+    areas) AND (when both timestamps exist) |dt| <= window_h. Unique scenes
+    counted once; the current scene always counts itself.
+    Returns (count, matched_scene_ids, reason).
+    """
+    if polygon_wgs84 is None:
+        return None, [], "no_geometry"
+    try:
+        from shapely.geometry import shape as _shape
+        mine = _shape(polygon_wgs84)
+        if (not mine.is_valid) or mine.area == 0:
+            return None, [], "invalid_geometry"
+        my_area = _geod_area(polygon_wgs84)
+        if my_area <= 0:
+            return None, [], "zero_area"
+    except Exception as e:
+        return None, [], f"persistence_failed: {e}"
+    if not other_scenes:
+        # Convention: the count INCLUDES the current scene, so a candidate
+        # seen nowhere else still has persistence_count = 1.
+        return 1, [], "single_scene_default"
+    try:
+        matched = []
+        for sc in other_scenes or []:
+            sid = str(sc.get("scene_id", ""))
+            if sid and sid == str(scene_id):
+                continue  # never count the same scene twice
+            sts = _parse_time(sc.get("acquisition_time"))
+            if sts is not None and acquisition_time is not None:
+                if abs((sts - acquisition_time).total_seconds()) > float(window_h) * 3600.0:
+                    continue
+            hit = False
+            for pg in sc.get("polygons_wgs84", []) or []:
+                try:
+                    other = _shape(pg)
+                    if (not other.is_valid) or other.area == 0:
+                        continue
+                    inter = mine.intersection(other)
+                    if inter.is_empty:
+                        continue
+                    ia = _geod_area(inter.__geo_interface__)
+                    oa = _geod_area(pg)
+                    denom = my_area + oa - ia
+                    iou = (ia / denom) if denom > 0 else 0.0
+                    if iou >= float(iou_thresh):
+                        hit = True
+                        break
+                except Exception:
+                    continue
+            if hit:
+                matched.append(sid or f"scene_{len(matched)}")
+        seen, uniq = set(), []
+        for s in matched:
+            if s not in seen:
+                seen.add(s)
+                uniq.append(s)
+        return 1 + len(uniq), uniq, "ok"
+    except Exception as e:
+        return None, [], f"persistence_failed: {e}"
+
+
+def _read_csv_records(path, required):
+    """Read a CSV of contextual records; returns list of dicts (raw strings)."""
+    import csv
+    recs = []
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        cols = set(reader.fieldnames or [])
+        missing = [c for c in required if c not in cols]
+        if missing:
+            raise ValueError(f"{path}: missing required columns {missing} (have {sorted(cols)})")
+        for row in reader:
+            recs.append({k: (v.strip() if isinstance(v, str) else v) for k, v in row.items()})
+    return recs
+
+
+def _load_other_scenes(paths, scene_ids, times):
+    """Load external scene polygons for persistence matching (GeoJSON files)."""
+    scenes = []
+    for i, p in enumerate(paths or []):
+        sid = scene_ids[i] if scene_ids and i < len(scene_ids) else Path(p).stem
+        tm = times[i] if times and i < len(times) else None
+        try:
+            gdf = gpd.read_file(p)
+            if gdf.crs is not None and str(gdf.crs) != "EPSG:4326":
+                gdf = gdf.to_crs(epsg=4326)
+            polys = []
+            for geom in gdf.geometry:
+                try:
+                    if geom is not None and (not geom.is_empty):
+                        polys.append(geom.__geo_interface__)
+                except Exception:
+                    continue
+            scenes.append({"scene_id": str(sid), "acquisition_time": tm,
+                           "polygons_wgs84": polys})
+        except Exception as e:
+            warnings.warn(f"[persistence] skipping {p}: {e}")
+    return scenes
+
+
+def _validate_b2_entry(entry, texture_config):
+    """Per-candidate B2 validation; returns a list of issue strings (empty = clean).
+
+    Checks: non-negative area/perimeter, finite elongation >= 0,
+    boundary_irregularity None-or-(finite and >= ~1 for non-degenerate),
+    finite GLCM means, config consistency, explicit units (km/h, km).
+    Never rejects the scene -- issues are recorded, not fatal.
+    """
+    issues = []
+    try:
+        a = entry.get("area_m2")
+        if a is not None and (not np.isfinite(float(a)) or float(a) < 0):
+            issues.append("invalid_area_m2")
+        p = entry.get("perimeter_m")
+        if p is not None and (not np.isfinite(float(p)) or float(p) <= 0):
+            issues.append("invalid_perimeter_m")
+        e = entry.get("elongation")
+        if e is not None and (not np.isfinite(float(e)) or float(e) < 0):
+            issues.append("invalid_elongation")
+        b = entry.get("boundary_irregularity")
+        if b is not None:
+            bv = float(b)
+            if not np.isfinite(bv):
+                issues.append("nonfinite_boundary_irregularity")
+            elif bv < 0.999 and entry.get("area_m2"):
+                issues.append(f"boundary_irregularity_below_1:{bv:.4f}")
+        t = (entry.get("texture") or {}).get("glcm") or {}
+        for k in ("contrast_mean", "homogeneity_mean", "energy_mean", "correlation_mean"):
+            if k in t and not np.isfinite(float(t[k])):
+                issues.append(f"nonfinite_glcm_{k}")
+        if texture_config:
+            if entry.get("glcm_config_snapshot") != {
+                    "levels": texture_config.get("levels"),
+                    "sar_min_db": texture_config.get("sar_min_db"),
+                    "sar_max_db": texture_config.get("sar_max_db"),
+                    "distances": texture_config.get("distances"),
+                    "angles_degrees": texture_config.get("angles_degrees")}:
+                issues.append("glcm_config_mismatch")
+        pc = entry.get("persistence_count")
+        if pc is not None and (not isinstance(pc, int) or pc < 1):
+            issues.append("invalid_persistence_count")
+    except Exception as ex:
+        issues.append(f"validation_failed: {ex}")
+    return issues
+
+
+def _gis_attributes(polygons_native, candidates):
+    """B2 scalar attributes per exported polygon, aligned with polygons_native.
+
+    Each polygon is matched to the candidate whose native polygon contains the
+    polygon's representative point (connectivity differences between labeling
+    and vectorization can make counts/order differ, so positional matching is
+    used instead of assuming order). Unmatched polygons get nulls.
+    Returns a list of dicts with full B2 field names (renamed to SHP_FIELD_MAP
+    aliases only for the Shapefile write).
+    """
+    rows = []
+    cand_polys = []
+    for c in candidates:
+        try:
+            cp = c.get("polygon_native")
+            cand_polys.append(cp if cp is not None else None)
+        except Exception:
+            cand_polys.append(None)
+    for g in polygons_native:
+        row = {k: None for k in SHP_FIELD_MAP}
+        try:
+            geom = shp_shape(g)
+            pt = geom.representative_point()
+            match = None
+            for c, cp in zip(candidates, cand_polys):
+                try:
+                    if cp is not None and cp.contains(pt):
+                        match = c
+                        break
+                except Exception:
+                    continue
+            if match is not None:
+                t = (match.get("texture") or {}).get("glcm") or {}
+                row.update({
+                    "candidate_id": match.get("candidate_id"),
+                    "area_m2": match.get("area_m2"),
+                    "perimeter_m": match.get("perimeter_m"),
+                    "elongation": match.get("elongation"),
+                    "boundary_irregularity": match.get("boundary_irregularity"),
+                    "edge_sharpness": match.get("edge_sharpness"),
+                    "mean_backscatter": match.get("mean_backscatter"),
+                    "std_backscatter": match.get("std_backscatter"),
+                    "glcm_contrast": t.get("contrast_mean"),
+                    "glcm_homogeneity": t.get("homogeneity_mean"),
+                    "glcm_energy": t.get("energy_mean"),
+                    "glcm_correlation": t.get("correlation_mean"),
+                    "wind_speed_kmh": match.get("wind_speed_kmh"),
+                    "distance_to_nearest_vessel_km": match.get("distance_to_nearest_vessel_km"),
+                    "persistence_count": match.get("persistence_count"),
+                })
+        except Exception:
+            pass
+        rows.append(row)
+    return rows
+
+
 def load_sar_band(source_image: Path, shape_hw: tuple, band: int = GLCM_DEFAULT_BAND):
     """Read the EXPLICITLY selected SAR backscatter band (float64 HxW).
 
@@ -505,7 +1075,9 @@ def extract_candidate_textures(cleaned: np.ndarray, sar: np.ndarray,
                                symmetric: bool = GLCM_DEFAULT_SYMMETRIC,
                                min_texture_pixels: int = GLCM_DEFAULT_MIN_TEXTURE_PIXELS,
                                sar_band: int = GLCM_DEFAULT_BAND,
-                               sar_polarization: str = "unknown"):
+                               sar_polarization: str = "unknown",
+                               range_source: str = "manual",
+                               context: dict | None = None):
     """Mask-aware GLCM/Haralick extraction, one feature set per candidate.
 
     Args:
@@ -520,6 +1092,11 @@ def extract_candidate_textures(cleaned: np.ndarray, sar: np.ndarray,
         distances/angles_deg: GLCM geometry; defaults [1,2] / [0,45,90,135].
         sar_band/sar_polarization: recorded verbatim in texture_config for
             reproducibility ("unknown" unless raster metadata proves otherwise).
+        context: optional B2 context dict with keys transform, crs, is_geo,
+            acquisition_time (datetime|None), weather_records (list),
+            weather_window_h, wind_override (dict|None), ais_records (list),
+            ais_window_h, other_scenes (list), persist_iou, persist_window_h,
+            scene_id. Missing context -> contextual B2 fields stay null.
 
     Returns:
         (candidates, texture_config): candidates is a list of per-candidate
@@ -543,6 +1120,7 @@ def extract_candidate_textures(cleaned: np.ndarray, sar: np.ndarray,
         "method": "GLCM_Haralick",
         "sar_band": int(sar_band),
         "sar_polarization": str(sar_polarization),
+        "range_source": str(range_source),
         "levels": int(levels),
         "sar_min_db": float(min_db),
         "sar_max_db": float(max_db),
@@ -577,6 +1155,12 @@ def extract_candidate_textures(cleaned: np.ndarray, sar: np.ndarray,
     finite_sar = np.isfinite(sar)
     base_valid = valid_sar if valid_sar is not None else np.ones_like(cleaned, dtype=bool)
     offsets = _glcm_offsets(distances, angles_deg)
+    ctx = context or {}
+    transform = ctx.get("transform")
+    crs = ctx.get("crs")
+    is_geo = bool(ctx.get("is_geo", False))
+    acq_time = ctx.get("acquisition_time")
+    scene_id = ctx.get("scene_id", stem)
 
     candidates = []
     n_ok = 0
@@ -589,6 +1173,7 @@ def extract_candidate_textures(cleaned: np.ndarray, sar: np.ndarray,
         xmin, xmax = xs.start, xs.stop - 1
         cand_mask = (labeled[ys, xs] == cid)  # 2D, spatial layout preserved
         sar_crop = sar[ys, xs]                # 2D SAR crop, same window
+        full_mask = (labeled == cid)  # full-scene mask: boundary bands extend past the bbox
         texture_valid = cand_mask & base_valid[ys, xs] & finite_sar[ys, xs]
 
         cand_px = int(cand_mask.sum())
@@ -674,6 +1259,81 @@ def extract_candidate_textures(cleaned: np.ndarray, sar: np.ndarray,
             "texture": {"glcm": glcm_summary},
             "texture_status": "ok",
         })
+        # ---- B2 features: SAR-backed (mean/std/edge) ----
+        bs_mean, bs_std = _backscatter_stats(sar_crop, texture_valid)
+        entry["mean_backscatter"] = bs_mean
+        entry["std_backscatter"] = bs_std
+        edge_val, edge_reason = _edge_sharpness(sar, full_mask)
+        entry["edge_sharpness"] = edge_val
+        entry["edge_status"] = edge_reason
+        elong = _elongation(cand_mask)
+        entry["elongation"] = elong
+        # ---- B2 features: geometry (metric perimeter) ----
+        if transform is not None:
+            metrics = _candidate_polygon_metrics(full_mask, transform, crs, is_geo)
+        else:
+            metrics = {"polygon_native": None, "polygon_wgs84": None,
+                       "perimeter_m": None, "perimeter_status": "no_transform"}
+        entry["perimeter_m"] = metrics["perimeter_m"]
+        entry["perimeter_status"] = metrics["perimeter_status"]
+        # Shapely object kept for GIS attribute mapping; stripped before JSON
+        # serialization in _meta_base (polygon_wgs84 dict form is kept).
+        entry["polygon_native"] = metrics["polygon_native"]
+        entry["polygon_wgs84"] = metrics["polygon_wgs84"]
+        centroid = _centroid_lonlat(metrics["polygon_wgs84"],
+                                    [int(xmin), int(ymin), int(xmax), int(ymax)],
+                                    transform) if transform is not None else None
+        entry["centroid_lonlat"] = list(centroid) if centroid else None
+        # area_m2 is stamped later in run_postprocess; irregularity needs it,
+        # so compute a provisional metric area here when possible.
+        entry["_area_m2_provisional"] = None
+        try:
+            if metrics["polygon_native"] is not None and is_geo and crs is not None:
+                if crs.is_projected:
+                    entry["_area_m2_provisional"] = float(metrics["polygon_native"].area)
+                elif metrics["polygon_wgs84"] is not None:
+                    entry["_area_m2_provisional"] = _geod_area(metrics["polygon_wgs84"])
+        except Exception:
+            pass
+        entry["boundary_irregularity"] = _boundary_irregularity(
+            metrics["perimeter_m"], entry["_area_m2_provisional"])
+        # ---- B2 features: contextual (wind / AIS / persistence) ----
+        wind_val, wind_matched, wind_reason = (None, None, "no_weather_context")
+        if ctx.get("wind_override") is not None:
+            wo = ctx["wind_override"]
+            try:
+                wind_val = float(wo["wind_speed_kmh"])
+                wind_matched = {"wind_speed_kmh": wind_val,
+                                "timestamp": wo.get("timestamp"),
+                                "source": wo.get("source", "manual_override")}
+                wind_reason = "ok_manual_override"
+            except Exception:
+                wind_reason = "invalid_wind_override"
+        elif ctx.get("weather_records"):
+            wind_val, wind_matched, wind_reason = _match_wind(
+                centroid, acq_time, ctx["weather_records"],
+                ctx.get("weather_window_h", 3.0))
+        entry["wind_speed_kmh"] = wind_val
+        entry["wind_match"] = wind_matched
+        entry["wind_status"] = wind_reason
+        ves_km, ves_detail, ves_reason = _nearest_vessel_km(
+            centroid, acq_time, ctx.get("ais_records") or [],
+            ctx.get("ais_window_h", 24.0)) if ctx.get("ais_records") else (None, None, "no_ais_source")
+        entry["distance_to_nearest_vessel_km"] = ves_km
+        entry["vessel_match"] = ves_detail
+        entry["vessel_status"] = ves_reason
+        p_count, p_scenes, p_reason = _persistence_count(
+            metrics["polygon_wgs84"], scene_id, acq_time,
+            ctx.get("other_scenes"), ctx.get("persist_iou", 0.1),
+            ctx.get("persist_window_h", 720.0))
+        entry["persistence_count"] = p_count
+        entry["persistence_scenes"] = p_scenes
+        entry["persistence_status"] = p_reason
+        entry["glcm_config_snapshot"] = {
+            "levels": int(levels), "sar_min_db": float(min_db),
+            "sar_max_db": float(max_db), "distances": distances,
+            "angles_degrees": [int(a) if float(a).is_integer() else float(a) for a in angles_deg]}
+        entry["validation_warnings"] = _validate_b2_entry(entry, texture_config)
         print(f"[texture] candidate {cid}: contrast={glcm_summary['contrast_mean']:.3f} "
               f"homogeneity={glcm_summary['homogeneity_mean']:.3f} "
               f"energy={glcm_summary['energy_mean']:.3f} "
@@ -683,6 +1343,18 @@ def extract_candidate_textures(cleaned: np.ndarray, sar: np.ndarray,
         candidates.append(entry)
 
     print(f"[texture] extracted texture for {n_ok}/{len(candidates)} candidate(s)")
+    # Uniform schema: skipped candidates carry explicit nulls, never fake zeros.
+    for e in candidates:
+        for k in ("mean_backscatter", "std_backscatter", "edge_sharpness",
+                  "edge_status", "elongation", "perimeter_m",
+                  "perimeter_status", "polygon_native", "polygon_wgs84",
+                  "centroid_lonlat",
+                  "boundary_irregularity", "wind_speed_kmh", "wind_match",
+                  "wind_status", "distance_to_nearest_vessel_km",
+                  "vessel_match", "vessel_status", "persistence_count",
+                  "persistence_scenes", "persistence_status",
+                  "glcm_config_snapshot", "validation_warnings"):
+            e.setdefault(k, None)
     return candidates, texture_config
 
 
@@ -692,11 +1364,17 @@ def extract_candidate_textures(cleaned: np.ndarray, sar: np.ndarray,
 
 def run_postprocess(mask_path, source_image, output_dir, manual_bounds=None,
                     min_object_px=20, min_hole_px=64, opening_radius=0, closing_radius=1,
-                    glcm_levels=GLCM_DEFAULT_LEVELS, glcm_min_db=GLCM_DEFAULT_MIN_DB,
-                    glcm_max_db=GLCM_DEFAULT_MAX_DB, glcm_distances=None,
+                    glcm_levels=GLCM_DEFAULT_LEVELS, glcm_min_db=None,
+                    glcm_max_db=None, glcm_distances=None,
                     glcm_angles=None, glcm_symmetric=GLCM_DEFAULT_SYMMETRIC,
                     glcm_min_pixels=GLCM_DEFAULT_MIN_TEXTURE_PIXELS,
                     glcm_band=GLCM_DEFAULT_BAND,
+                    acquisition_time=None, source_id=None,
+                    wind_speed_kmh=None, wind_timestamp=None, wind_source="manual_override",
+                    weather_csv=None, weather_window_h=3.0,
+                    ais_csv=None, ais_window_h=24.0,
+                    persist_scene=None, persist_time=None, persist_scene_id=None,
+                    persist_iou=0.1, persist_window_h=720.0,
                     enable_glcm=True):
     mask_path = Path(mask_path)
     out_dir = Path(output_dir)
@@ -792,29 +1470,74 @@ def run_postprocess(mask_path, source_image, output_dir, manual_bounds=None,
     texture_config = None
     sar_band_note = None
     sar_input = None
+    acq_time = _parse_time(acquisition_time) if acquisition_time else None
+    if acquisition_time and acq_time is None:
+        warnings.warn(f"[b2] could not parse --acquisition-time '{acquisition_time}'; "
+                      f"time-gated matching (weather/AIS/persistence) will be degraded.")
+    # ---- B2 contextual inputs (all optional; absent -> null, never synthetic) ----
+    weather_records, weather_status = [], "no_weather_csv"
+    if weather_csv:
+        try:
+            weather_records = _read_csv_records(
+                weather_csv, ["lat", "lon", "timestamp", "wind_speed_kmh"])
+            weather_status = f"{len(weather_records)} records from {weather_csv}"
+        except Exception as e:
+            warnings.warn(f"[b2] weather CSV unusable: {e}")
+    wind_override = None
+    if wind_speed_kmh is not None:
+        wind_override = {"wind_speed_kmh": float(wind_speed_kmh),
+                         "timestamp": wind_timestamp, "source": wind_source}
+    ais_records, ais_status = [], "no_ais_csv"
+    if ais_csv:
+        try:
+            ais_records = _read_csv_records(ais_csv, ["lat", "lon"])
+            ais_status = f"{len(ais_records)} records from {ais_csv}"
+        except Exception as e:
+            warnings.warn(f"[b2] AIS CSV unusable: {e}")
+    # Resolve georeferencing BEFORE texture so per-candidate metric geometry
+    # (perimeter) uses the same transform later used for polygonization.
+    transform, crs, is_geo = get_source_transform_and_crs(Path(source_image), manual_bounds, (h, w))
+    other_scenes = _load_other_scenes(persist_scene, persist_scene_id, persist_time)
+    b2_context = {
+        "transform": transform, "crs": crs, "is_geo": is_geo,
+        "acquisition_time": acq_time, "scene_id": stem,
+        "weather_records": weather_records, "weather_window_h": float(weather_window_h),
+        "wind_override": wind_override,
+        "ais_records": ais_records, "ais_window_h": float(ais_window_h),
+        "other_scenes": other_scenes, "persist_iou": float(persist_iou),
+        "persist_window_h": float(persist_window_h),
+    }
+    print(f"[b2] weather: {weather_status}; ais: {ais_status}; "
+          f"persistence scenes: {len(other_scenes)}; acquisition: {acq_time}")
     if enable_glcm and int(cleaned.sum()) > 0:
         try:
             sar, sar_band_note, sar_input = load_sar_band(Path(source_image), (h, w), band=glcm_band)
             print(f"[texture] {stem}: SAR band: {sar_band_note}; "
                   f"finite min={float(np.nanmin(sar)):.3g} max={float(np.nanmax(sar)):.3g}")
-            if float(np.nanmin(sar)) >= glcm_max_db or float(np.nanmax(sar)) <= glcm_min_db:
+            res_min_db, res_max_db, range_source = resolve_glcm_range(
+                sar, glcm_min_db, glcm_max_db)
+            print(f"[texture] {stem}: GLCM range [{res_min_db:.3g},{res_max_db:.3g}] "
+                  f"(source={range_source})")
+            if float(np.nanmin(sar)) >= res_max_db or float(np.nanmax(sar)) <= res_min_db:
                 warnings.warn(
                     f"[texture] {stem}: all SAR values fall outside the clip range "
-                    f"[{glcm_min_db},{glcm_max_db}] dB -- quantization will saturate to a "
+                    f"[{res_min_db},{res_max_db}] dB -- quantization will saturate to a "
                     f"constant level and texture will be degenerate. If the source is a "
                     f"0..255 PNG/preview rather than dB backscatter, texture features are "
                     f"not physically meaningful (GIS outputs are unaffected)."
                 )
             candidates, texture_config = extract_candidate_textures(
                 cleaned, sar, valid, stem,
-                levels=glcm_levels, min_db=glcm_min_db, max_db=glcm_max_db,
+                levels=glcm_levels, min_db=res_min_db, max_db=res_max_db,
                 distances=glcm_distances, angles_deg=glcm_angles,
                 symmetric=glcm_symmetric, min_texture_pixels=glcm_min_pixels,
                 sar_band=sar_input["sar_band"],
                 sar_polarization=sar_input["sar_polarization"],
+                range_source=range_source,
+                context=b2_context,
             )
         except ValueError:
-            raise  # bad band / dimension mismatch: fail loudly, never silently resize
+            raise  # bad band / range / dimension mismatch: fail loudly, never silently resize
         except Exception as e:
             warnings.warn(f"[texture] {stem}: texture extraction failed ({e}); "
                           f"continuing with GIS outputs but no texture features.")
@@ -825,7 +1548,8 @@ def run_postprocess(mask_path, source_image, output_dir, manual_bounds=None,
             "method": "GLCM_Haralick",
             "sar_band": int(glcm_band), "sar_polarization": "unknown",
             "levels": int(glcm_levels),
-            "sar_min_db": float(glcm_min_db), "sar_max_db": float(glcm_max_db),
+            "sar_min_db": glcm_min_db, "sar_max_db": glcm_max_db,
+            "range_source": "unresolved_empty_mask",
             "distances": [int(d) for d in (glcm_distances or list(GLCM_DEFAULT_DISTANCES))],
             "angles_degrees": list(glcm_angles or list(GLCM_DEFAULT_ANGLES_DEG)),
             "symmetric": bool(glcm_symmetric), "masked": True,
@@ -833,7 +1557,6 @@ def run_postprocess(mask_path, source_image, output_dir, manual_bounds=None,
             "quantization": f"uniform_{int(glcm_levels)}_levels",
         }
 
-    transform, crs, is_geo = get_source_transform_and_crs(Path(source_image), manual_bounds, (h, w))
     polygons_native = mask_to_polygons(cleaned, transform)
 
     n_polys = len(polygons_native)
@@ -854,11 +1577,36 @@ def run_postprocess(mask_path, source_image, output_dir, manual_bounds=None,
     for i, c in enumerate(candidates):
         c["area_m2"] = per_candidate_area_m2[i]
         c["area_px"] = int(c["candidate_pixel_count"])
+        # Finalize B2 shape features against the stamped area (consistent units):
+        # prefer the provisional geodesic/planar polygon area when the stamped
+        # area is an apportioned estimate; otherwise use the stamped area.
+        try:
+            prov = c.pop("_area_m2_provisional", None)
+            final_area = c["area_m2"] if c["area_m2"] is not None else prov
+            if prov is not None and c["area_m2"] is None:
+                c["area_m2"] = float(prov)
+                final_area = float(prov)
+            c["boundary_irregularity"] = _boundary_irregularity(
+                c.get("perimeter_m"), final_area)
+            c["validation_warnings"] = _validate_b2_entry(c, texture_config)
+        except Exception as e:
+            warnings.warn(f"[b2] candidate {c.get('candidate_id')}: finalize failed: {e}")
+    n_warn = sum(1 for c in candidates if c.get("validation_warnings"))
+    print(f"[b2] validation: {n_warn}/{len(candidates)} candidate(s) with warnings")
 
     def _meta_base(extra):
+        for c in candidates:
+            # Shapely objects are needed for GIS attribute mapping but are not
+            # JSON-serializable; the lon/lat dict form is kept as polygon_wgs84.
+            c.pop("polygon_native", None)
         base = {"stem": stem, "n_polygons": n_polys, "n_candidates": len(candidates),
                 "sar_band": sar_band_note, "sar_input": sar_input,
-                "texture_config": texture_config,
+                "texture_config": texture_config, "shp_field_map": SHP_FIELD_MAP,
+                "scene_datetime": acq_time.isoformat() if acq_time else None,
+                "source_id": source_id or stem,
+                "b2_context_status": {
+                    "weather": weather_status, "ais": ais_status,
+                    "persistence_scenes": len(other_scenes)},
                 "candidates": candidates}
         base.update(extra)
         return base
@@ -875,15 +1623,27 @@ def run_postprocess(mask_path, source_image, output_dir, manual_bounds=None,
             f"{'!'*70}"
         )
         tag = "PIXEL_SPACE_NOT_GEOREFERENCED"
+        _attr_rows = _gis_attributes(polygons_native, candidates)
         gdf_native = gpd.GeoDataFrame(
-            {"id": range(n_polys), "source": [tag] * n_polys},
+            {"id": range(n_polys), "source": [tag] * n_polys, **{
+                k: [_r[k] for _r in _attr_rows] for k in SHP_FIELD_MAP}},
             geometry=[shp_shape(g) for g in polygons_native], crs=None,
         )
+        gdf_shp = gpd.GeoDataFrame(
+            {"id": range(n_polys), **{
+                SHP_FIELD_MAP[k]: [_r[k] for _r in _attr_rows] for k in SHP_FIELD_MAP}},
+            geometry=[shp_shape(g) for g in polygons_native], crs=None,
+        )
+        for _col in SHP_FIELD_MAP.values():
+            try:
+                gdf_shp[_col] = pd.to_numeric(gdf_shp[_col], errors="coerce")
+            except Exception:
+                pass
         geojson_path = out_dir / f"{stem}_spill.{tag}.geojson"
         shp_path = out_dir / f"{stem}_spill.{tag}.shp"
         gdf_native.to_file(geojson_path, driver="GeoJSON")
         if n_polys > 0:
-            gdf_native.to_file(shp_path, driver="ESRI Shapefile")
+            gdf_shp.to_file(shp_path, driver="ESRI Shapefile")
         else:
             print("  [note] no polygons to write to shapefile (empty mask)")
         print(f"[write] {geojson_path.name}, {shp_path.name if n_polys else '(shapefile skipped, no polygons)'}")
@@ -898,18 +1658,17 @@ def run_postprocess(mask_path, source_image, output_dir, manual_bounds=None,
         return result
 
     # Georeferenced path: write native-CRS shapefile + WGS84 GeoJSON.
+    # Geometry frames are built first (area needs them); B2 attribute columns
+    # are assigned AFTER the per-candidate areas are final so GeoJSON/SHP/meta
+    # always agree. Geometry/IDs/CRS behavior unchanged.
     gdf_native = gpd.GeoDataFrame(
-        {"id": range(n_polys)}, geometry=[shp_shape(g) for g in polygons_native], crs=crs.to_wkt(),
+        {"id": range(n_polys)},
+        geometry=[shp_shape(g) for g in polygons_native], crs=crs.to_wkt(),
     )
-    shp_path = out_dir / f"{stem}_spill.shp"
-    if n_polys > 0:
-        gdf_native.to_file(shp_path, driver="ESRI Shapefile")
-    else:
-        print("  [note] no polygons to write to shapefile (empty mask)")
-
-    gdf_wgs84 = gdf_native.to_crs(epsg=4326) if n_polys > 0 else gdf_native.set_crs(epsg=4326, allow_override=True)
-    geojson_path = out_dir / f"{stem}_spill.geojson"
-    gdf_wgs84.to_file(geojson_path, driver="GeoJSON")
+    gdf_shp = gpd.GeoDataFrame(
+        {"id": range(n_polys)},
+        geometry=[shp_shape(g) for g in polygons_native], crs=crs.to_wkt(),
+    )
 
     total_area_m2 = None
     try:
@@ -927,16 +1686,43 @@ def run_postprocess(mask_path, source_image, output_dir, manual_bounds=None,
     except Exception as e:
         warnings.warn(f"[area] could not compute area estimate: {e}")
 
-    print(f"[write] {geojson_path.name} (EPSG:4326), "
-         f"{shp_path.name if n_polys else '(shapefile skipped, no polygons)'} ({crs.to_string()})")
     if total_area_m2 is not None:
         area_method = "exact, native projected CRS" if crs.is_projected else "reprojected to local UTM zone"
         print(f"[area] spill area: {total_area_m2:,.0f} m^2 "
-             f"({total_area_m2/1e6:.4f} km^2) -- {area_method}")
+              f"({total_area_m2/1e6:.4f} km^2) -- {area_method}")
         if candidates and (crs is not None and not crs.is_projected):
             total_px = sum(c["candidate_pixel_count"] for c in candidates) or 1
             for c in candidates:
                 c["area_m2"] = float(total_area_m2 * c["candidate_pixel_count"] / total_px)
+            # Area changed after finalization -> refresh dependent B2 fields.
+            for c in candidates:
+                c["boundary_irregularity"] = _boundary_irregularity(
+                    c.get("perimeter_m"), c.get("area_m2"))
+                c["validation_warnings"] = _validate_b2_entry(c, texture_config)
+
+    # B2 scalars ride along as attributes (full names in GeoJSON, <=10-char
+    # SHP aliases per shp_field_map).
+    _attr_rows = _gis_attributes(polygons_native, candidates)
+    for _k in SHP_FIELD_MAP:
+        gdf_native[_k] = [_r[_k] for _r in _attr_rows]
+        try:
+            gdf_shp[SHP_FIELD_MAP[_k]] = pd.to_numeric(
+                [_r[_k] for _r in _attr_rows], errors="coerce")
+        except Exception:
+            gdf_shp[SHP_FIELD_MAP[_k]] = [_r[_k] for _r in _attr_rows]
+    # DBF has no null-numeric: None -> NaN (written as NULL). GeoJSON/meta
+    # keep exact values (ints stay ints).
+    shp_path = out_dir / f"{stem}_spill.shp"
+    if n_polys > 0:
+        gdf_shp.to_file(shp_path, driver="ESRI Shapefile")
+    else:
+        print("  [note] no polygons to write to shapefile (empty mask)")
+
+    gdf_wgs84 = gdf_native.to_crs(epsg=4326) if n_polys > 0 else gdf_native.set_crs(epsg=4326, allow_override=True)
+    geojson_path = out_dir / f"{stem}_spill.geojson"
+    gdf_wgs84.to_file(geojson_path, driver="GeoJSON")
+    print(f"[write] {geojson_path.name} (EPSG:4326), "
+          f"{shp_path.name if n_polys else '(shapefile skipped, no polygons)'} ({crs.to_string()})")
 
     result = _meta_base({"georeferenced": True, "crs": crs.to_string(),
                          "geojson": str(geojson_path),
@@ -966,10 +1752,11 @@ def parse_args():
                         "select the intended Sentinel-1 band from your export recipe; bands are never averaged)")
     p.add_argument("--glcm-levels", type=int, default=GLCM_DEFAULT_LEVELS,
                    help="GLCM gray levels after uniform quantization; default 32")
-    p.add_argument("--glcm-min-db", type=float, default=GLCM_DEFAULT_MIN_DB,
-                   help="Lower dB clip for SAR normalization (configurable; default -30.0, not universal)")
-    p.add_argument("--glcm-max-db", type=float, default=GLCM_DEFAULT_MAX_DB,
-                   help="Upper dB clip for SAR normalization (configurable; default 0.0)")
+    p.add_argument("--glcm-min-db", type=float, default=None,
+                   help="Lower dB clip (default: auto = scene p1 percentile; "
+                        "explicit value recorded as manual)")
+    p.add_argument("--glcm-max-db", type=float, default=None,
+                   help="Upper dB clip (default: auto = scene p99 percentile)")
     p.add_argument("--glcm-distances", type=int, nargs="+", default=list(GLCM_DEFAULT_DISTANCES),
                    help="GLCM pixel distances, e.g. --glcm-distances 1 2")
     p.add_argument("--glcm-angles", type=float, nargs="+", default=list(GLCM_DEFAULT_ANGLES_DEG),
@@ -980,6 +1767,35 @@ def parse_args():
                    help="Skip GLCM texture extraction (GIS outputs only)")
     p.add_argument("--glcm-asymmetric", action="store_true",
                    help="Use asymmetric (directional) GLCM counting; default is symmetric")
+    p.add_argument("--acquisition-time", default=None,
+                   help="Scene acquisition timestamp (ISO 8601) for time-gated B2 matching")
+    p.add_argument("--source-id", default=None,
+                   help="Source/scene identifier recorded in B2 metadata (default: mask stem)")
+    p.add_argument("--wind-speed-kmh", type=float, default=None,
+                   help="Explicit 10-m wind speed (km/h) applied to all candidates; "
+                        "recorded with timestamp/source, never synthesized")
+    p.add_argument("--wind-timestamp", default=None, help="ISO timestamp of the wind observation")
+    p.add_argument("--wind-source", default="manual_override",
+                   help="Provenance label for the wind value")
+    p.add_argument("--weather-csv", default=None,
+                   help="CSV with lat,lon,timestamp,wind_speed_kmh[,source]; nearest sample "
+                        "within --weather-window-h is matched per candidate centroid")
+    p.add_argument("--weather-window-h", type=float, default=3.0,
+                   help="Weather temporal match window in hours (default 3.0, mirrors evidence-fusion)")
+    p.add_argument("--ais-csv", default=None,
+                   help="CSV with lat,lon[,timestamp,mmsi]; min geodesic distance per candidate")
+    p.add_argument("--ais-window-h", type=float, default=24.0,
+                   help="AIS temporal match window in hours (default 24.0)")
+    p.add_argument("--persist-scene", action="append", default=None,
+                   help="Other-scene GeoJSON for persistence matching (repeatable)")
+    p.add_argument("--persist-time", action="append", default=None,
+                   help="ISO acquisition time per --persist-scene, same order (repeatable)")
+    p.add_argument("--persist-scene-id", action="append", default=None,
+                   help="Scene id per --persist-scene, same order (repeatable)")
+    p.add_argument("--persist-iou", type=float, default=0.1,
+                   help="IoU threshold for cross-scene candidate matching (default 0.1)")
+    p.add_argument("--persist-window-h", type=float, default=720.0,
+                   help="Cross-scene temporal window in hours (default 720 = 30 days)")
     return p.parse_args()
 
 
@@ -993,6 +1809,14 @@ def main():
         glcm_distances=args.glcm_distances, glcm_angles=args.glcm_angles,
         glcm_symmetric=not args.glcm_asymmetric, glcm_min_pixels=args.glcm_min_pixels,
         glcm_band=args.glcm_band,
+        acquisition_time=args.acquisition_time, source_id=args.source_id,
+        wind_speed_kmh=args.wind_speed_kmh, wind_timestamp=args.wind_timestamp,
+        wind_source=args.wind_source, weather_csv=args.weather_csv,
+        weather_window_h=args.weather_window_h,
+        ais_csv=args.ais_csv, ais_window_h=args.ais_window_h,
+        persist_scene=args.persist_scene, persist_time=args.persist_time,
+        persist_scene_id=args.persist_scene_id,
+        persist_iou=args.persist_iou, persist_window_h=args.persist_window_h,
         enable_glcm=not args.no_glcm,
     )
 

@@ -69,7 +69,12 @@ def _darkness_score(texture_features: Dict[str, Any]) -> float:
 
 
 def _texture_score(texture_features: Dict[str, Any]) -> float:
-    """Structured texture: penalise uniformity but reward measurable contrast."""
+    """Structured texture: penalise uniformity but reward measurable contrast.
+
+    NOTE: ``energy`` is true Haralick energy (sqrt of ASM) since the texture
+    fix; previously the key carried raw ASM. Both lie in [0, 1] with identical
+    endpoints, so this heuristic keeps its qualitative meaning.
+    """
     energy = texture_features.get("energy")
     contrast = texture_features.get("contrast")
     uniform_term = 1.0 - _fin(energy, fallback=1.0)
