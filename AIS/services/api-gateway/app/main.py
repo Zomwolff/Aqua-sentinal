@@ -1268,6 +1268,38 @@ async def get_spill_incident(spill_id: str):
     }
 
 
+@app.get("/cost-projection/{spill_id}", tags=["SpillIntelligence"])
+async def get_cost_projection(spill_id: str):
+    """Public read-through for the response-decision cost projection."""
+    pool = await _get_pool()
+    row = await pool.fetchrow(
+        """
+        SELECT nosdcp_tier, estimated_volume_tonnes,
+               point_usd, low_usd, high_usd, point_inr, low_inr, high_inr,
+               cost_curve, matched_vessels, landfall_eta, created_at
+        FROM cost_projections
+        WHERE spill_id = $1
+        ORDER BY created_at DESC LIMIT 1
+        """, spill_id,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="No cost projection for spill_id")
+    result = dict(row)
+    for key in ("cost_curve", "matched_vessels"):
+        if isinstance(result[key], str):
+            result[key] = json.loads(result[key])
+    result["spill_id"] = spill_id
+    result["volume_basis"] = (
+        "Planning approximation from area and assumed 0.1 mm slick thickness; "
+        "SAR does not measure thickness."
+    )
+    for key in ("estimated_volume_tonnes", "point_usd", "low_usd", "high_usd", "point_inr", "low_inr", "high_inr"):
+        result[key] = float(result[key])
+    if isinstance(result["created_at"], datetime):
+        result["created_at"] = result["created_at"].isoformat()
+    return result
+
+
 @app.get("/spill/incidents/{spill_id}/attribution", tags=["SpillIntelligence"])
 async def get_spill_attribution(spill_id: str):
     """Source attribution results for a spill — which vessels were nearby and scored."""

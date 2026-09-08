@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import { getSpillIncident } from "../lib/apiClient";
+import { getCostProjection, getSpillIncident } from "../lib/apiClient";
 import { getSeverityColor, getPriorityColor, formatScore } from "../lib/spillIncidentHelpers";
 
 export function IncidentDetailPanel({ spillId, onClose }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [costProjection, setCostProjection] = useState(null);
 
   useEffect(() => {
     let mounted = true;
@@ -21,6 +22,12 @@ export function IncidentDetailPanel({ spillId, onClose }) {
       } catch (e) {
         console.error("Failed to fetch incident details", e);
         if (mounted) setLoading(false);
+      }
+      try {
+        const projection = await getCostProjection(spillId);
+        if (mounted) setCostProjection(projection);
+      } catch (e) {
+        if (mounted) setCostProjection(null);
       }
     };
     
@@ -105,6 +112,34 @@ export function IncidentDetailPanel({ spillId, onClose }) {
                     </span>
                   ))}
                 </div>
+              </Section>
+            )}
+
+            {costProjection && (
+              <Section title="Response Cost Projection">
+                <div className="cost-summary">
+                  <strong>{costProjection.nosdcp_tier}</strong>
+                  <span>USD {costProjection.low_usd.toLocaleString()} - {costProjection.high_usd.toLocaleString()}</span>
+                </div>
+                <div className="cost-chart" aria-label="Low to high response cost by forecast horizon">
+                  {costProjection.cost_curve.map((point) => {
+                    const ceiling = costProjection.high_usd || 1;
+                    const width = Math.max(4, (point.high_usd / ceiling) * 100);
+                    return (
+                      <div className="cost-chart-row" key={point.horizon_hours}>
+                        <span>+{point.horizon_hours}h</span>
+                        <div className="cost-band-track">
+                          <div className="cost-band" style={{ width: `${width}%` }}>
+                            <span>USD {point.low_usd.toLocaleString()} - {point.high_usd.toLocaleString()}</span>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <small className="cost-note">{costProjection.volume_basis}</small>
+                <Row label="Landfall estimate" value={costProjection.landfall_eta} />
+                <Row label="Certified vessels" value={String(costProjection.matched_vessels.length)} />
               </Section>
             )}
 

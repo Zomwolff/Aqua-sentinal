@@ -1,6 +1,6 @@
 """Response Decision Service - FastAPI entry point."""
 from __future__ import annotations
-import asyncio, logging, sys, time
+import asyncio, json, logging, sys, time
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -76,6 +76,43 @@ async def get_recommendations(spill_id: str):
         }
         for r in rows
     ])
+
+
+@app.get("/cost-projection/{spill_id}")
+async def get_cost_projection(spill_id: str):
+    pool = get_pool()
+    row = await pool.fetchrow(
+        """
+        SELECT nosdcp_tier, estimated_volume_tonnes,
+               point_usd, low_usd, high_usd, point_inr, low_inr, high_inr,
+               cost_curve, matched_vessels, landfall_eta, created_at
+        FROM cost_projections
+        WHERE spill_id = $1
+        ORDER BY created_at DESC
+        LIMIT 1
+        """, spill_id,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="No cost projection for spill_id")
+
+    def decode_json(value):
+        if isinstance(value, str):
+            return json.loads(value)
+        return value
+
+    return {
+        "spill_id": spill_id,
+        "nosdcp_tier": row["nosdcp_tier"],
+        "estimated_volume_tonnes": float(row["estimated_volume_tonnes"]),
+        "volume_basis": "Planning approximation from area and assumed 0.1 mm slick thickness; SAR does not measure thickness.",
+        "point_usd": float(row["point_usd"]), "low_usd": float(row["low_usd"]),
+        "high_usd": float(row["high_usd"]), "point_inr": float(row["point_inr"]),
+        "low_inr": float(row["low_inr"]), "high_inr": float(row["high_inr"]),
+        "cost_curve": decode_json(row["cost_curve"]),
+        "matched_vessels": decode_json(row["matched_vessels"]),
+        "landfall_eta": row["landfall_eta"],
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+    }
 
 
 @app.patch("/recommendations/{recommendation_id}/acknowledge")

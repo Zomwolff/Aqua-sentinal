@@ -54,7 +54,10 @@ RUN sed -i 's#sys\.path\.insert(0, "/app")#sys.path.insert(0, "/svc/severity-imp
 
 # ── response-decision :8014 ───────────────────────────────────────────────────
 RUN mkdir -p /svc/response-decision
-COPY services/shared /svc/response-decision/shared
+COPY shared/db /svc/response-decision/shared/db
+COPY shared/__init__.py /svc/response-decision/shared/__init__.py
+COPY services/shared/redis_client.py /svc/response-decision/shared/redis_client.py
+COPY services/shared/geo_utils.py /svc/response-decision/shared/geo_utils.py
 COPY services/response-decision/app /svc/response-decision/app
 RUN sed -i 's#sys\.path\.insert(0, "/app")#sys.path.insert(0, "/svc/response-decision")#' /svc/response-decision/app/*.py
 
