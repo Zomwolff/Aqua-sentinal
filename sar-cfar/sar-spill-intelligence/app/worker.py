@@ -347,6 +347,7 @@ async def _process_sar_message(
             raw_image=raw_image,
             filtered_image=filtered_image,
             cleaned_mask=cleaned_mask,
+            candidate_mask=binary_mask,
             bright_target_mask=bright_target_mask,
             affine=list(affine),
             shape=binary_mask.shape,

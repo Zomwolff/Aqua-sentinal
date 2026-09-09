@@ -8,4 +8,6 @@ python-multipart
 python-dotenv
 tenacity
 numpy>=1.26
+scipy>=1.11
+shapely>=2.0
 supervisor

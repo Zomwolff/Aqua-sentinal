@@ -46,6 +46,7 @@ def save_scene_artifact(
     affine: Sequence[float],
     shape: Sequence[int],
     crs: Optional[str] = None,
+    candidate_mask: Optional[np.ndarray] = None,
 ) -> str:
     """Persist one scene's processed-artifact bundle; returns the directory.
 
@@ -77,6 +78,9 @@ def save_scene_artifact(
     imsave(os.path.join(path, "filtered_image.png"), (img_norm * 255).astype(np.uint8), check_contrast=False)
 
     np.save(os.path.join(path, "cleaned_mask.npy"), np.asarray(cleaned_mask))
+    if candidate_mask is not None:
+        np.save(os.path.join(path, "candidate_mask.npy"), np.asarray(candidate_mask, dtype=bool))
+        imsave(os.path.join(path, "candidate_mask.png"), (np.asarray(candidate_mask, dtype=bool) * 255).astype(np.uint8), check_contrast=False)
     imsave(os.path.join(path, "cleaned_mask.png"), (np.asarray(cleaned_mask) * 255).astype(np.uint8), check_contrast=False)
 
     np.save(os.path.join(path, "bright_target_mask.npy"), np.asarray(bright_target_mask))
@@ -176,3 +180,22 @@ def crop_region(array: np.ndarray, bbox: tuple) -> np.ndarray:
     """Slice ``array[r0:r1, c0:c1]`` for a pixel bbox."""
     r0, r1, c0, c1 = bbox
     return np.asarray(array)[r0:r1, c0:c1]
+
+
+def candidate_pixel_mask(geometry: Dict[str, Any], affine: Sequence[float], bbox: tuple) -> np.ndarray:
+    """Rasterize a candidate polygon at pixel centres, preserving its holes."""
+    from skimage.draw import polygon
+
+    r0, r1, c0, c1 = bbox
+    result = np.zeros((r1 - r0, c1 - c0), dtype=bool)
+    inverse = ~_as_affine(affine)
+    polygons = [geometry["coordinates"]] if geometry["type"] == "Polygon" else geometry["coordinates"]
+    for rings in polygons:
+        part = np.zeros_like(result)
+        for index, ring in enumerate(rings):
+            pixels = [inverse * (float(x), float(y)) for x, y in ring]
+            cols, rows = np.asarray(pixels).T
+            rr, cc = polygon(rows - r0 - 0.5, cols - c0 - 0.5, shape=result.shape)
+            part[rr, cc] = index == 0
+        result |= part
+    return result

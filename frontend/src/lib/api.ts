@@ -19,7 +19,7 @@ export function artifactUrl(sceneId: string, filename: string): string {
 export const SAR_ARTIFACT_FILENAMES = {
   raw: "raw_image.png",
   filtered: "filtered_image.png",
-  cfar: "bright_target_mask.png",
+  cfar: "candidate_mask.png",
   final: "cleaned_mask.png",
 } as const;
 

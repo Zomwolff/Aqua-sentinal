@@ -387,6 +387,8 @@ async def _process_incident_fused(
     STATE["last_spill_id"] = spill_id
 
     candidates_raw = data.get("candidates")
+    if isinstance(candidates_raw, str):
+        candidates_raw = json.loads(candidates_raw)
     if candidates_raw is None:
         raise ValueError("incident.fused message missing candidates array; Evidence Fusion is required to provide candidate vessels")
     if not isinstance(candidates_raw, list):
@@ -431,6 +433,8 @@ async def _process_incident_fused(
         "current_speed_ms": 0.0,
         "current_dir_deg": 0.0,
     }
+    if isinstance(environment, str):
+        environment = json.loads(environment)
 
     scored = []
     for vessel in unique_vessels[:20]:  # cap at 20 candidates

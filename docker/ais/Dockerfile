@@ -33,6 +33,7 @@ RUN sed -i 's#sys\.path\.insert(0, "/app")#sys.path.insert(0, "/svc/ais-analytic
 # ── anomaly-detection :8003 ───────────────────────────────────────────────────
 RUN mkdir -p /svc/anomaly-detection
 COPY AIS/services/anomaly-detection/app /svc/anomaly-detection/app
+COPY AIS/services/calibration /svc/anomaly-detection/calibration
 COPY services/shared /svc/anomaly-detection/shared
 RUN sed -i 's#sys\.path\.insert(0, "/app")#sys.path.insert(0, "/svc/anomaly-detection")#' /svc/anomaly-detection/app/*.py
 

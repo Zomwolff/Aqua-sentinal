@@ -232,7 +232,19 @@ def is_likely_calm_water(
     if descriptors["perimeter_area_ratio"] > max_perimeter_area_ratio:
         return False
 
-    return _edge_gradient(intensity, dark) <= float(max_edge_gradient)
+    # A smoothed boundary can be diffuse even when the region's interior is
+    # substantially darker than its surroundings. Require both measurements
+    # to be weak before rejecting it as calm water.
+    outer = dilation(dark, footprint=disk(3)) & ~dark
+    inside_values = intensity[dark & np.isfinite(intensity)]
+    outside_values = intensity[outer & np.isfinite(intensity)]
+    if not inside_values.size or not outside_values.size:
+        return False
+    regional_contrast = float(outside_values.mean() - inside_values.mean())
+    return (
+        _edge_gradient(intensity, dark) <= float(max_edge_gradient)
+        and regional_contrast <= float(max_edge_gradient)
+    )
 
 
 def classify_candidate(

@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from shared.artifacts import (
+    candidate_pixel_mask,
     crop_region,
     geometry_to_pixel_bbox,
     load_scene_artifact,
@@ -152,7 +153,7 @@ async def _resolve_candidate(
     raw_image = artifact.get("raw_image")
     return {
         "geometry": geometry,
-        "dark_mask": crop_region(artifact["cleaned_mask"], bbox),
+        "dark_mask": crop_region(artifact["cleaned_mask"], bbox) & candidate_pixel_mask(geometry, metadata["affine"], bbox),
         "intensity": crop_region(artifact["filtered_image"], bbox),
         "bright_target": crop_region(artifact["bright_target_mask"], bbox),
         "raw_image": crop_region(raw_image, bbox) if raw_image is not None else None,
@@ -178,7 +179,10 @@ def _filtered_event(data: Dict[str, Any], result) -> Dict[str, Any]:
     }
     for key in ("geom_geojson", "centroid_lat", "centroid_lon", "area_m2", "pixel_count"):
         if result.get(key) is not None:
-            event[key] = result[key]
+            # PostGIS NUMERIC comes back as Decimal. Emit JSON numbers, not
+            # quoted Decimal strings that downstream float parsing rejects.
+            event[key] = (int(result[key]) if key == "pixel_count" else
+                          result[key] if key == "geom_geojson" else float(result[key]))
     texture = result.get("texture_features")
     if isinstance(texture, dict):
         event["texture_features"] = {
@@ -222,7 +226,14 @@ async def _process_candidates_message(data: Dict[str, Any], pool, redis) -> None
                                 "geometry": resolved["geometry"],
                                 "pixel_count": int(row["pixel_count"]),
                             },
-                            {"dark_mask": resolved["dark_mask"], "intensity": resolved["intensity"]},
+                            {
+                                "dark_mask": resolved["dark_mask"],
+                                # Segment on the denoised image, but measure
+                                # radiometric contrast on the original pixels.
+                                # Lee filtering mixes the boundary with nearby
+                                # water and must not erase rejection evidence.
+                                "intensity": resolved["raw_image"] if resolved["raw_image"] is not None else resolved["intensity"],
+                            },
                             resolved["bright_target"],
                         )
                     except Exception as exc:

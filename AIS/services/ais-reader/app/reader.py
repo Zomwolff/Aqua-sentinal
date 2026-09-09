@@ -378,6 +378,10 @@ async def _run_vesselapi(api_key: str, pool, redis) -> None:
 
 async def main() -> None:
     provider = os.environ.get("AIS_PROVIDER", "aisstream").lower()
+    if provider == "none":
+        log.info("Live AIS ingestion disabled (AIS_PROVIDER=none).")
+        await asyncio.Event().wait()
+        return
     key_name = "VESSELAPI_API_KEY" if provider == "vesselapi" else "AISSTREAM_API_KEY"
     api_key = os.environ.get(key_name, "")
     if not api_key:
