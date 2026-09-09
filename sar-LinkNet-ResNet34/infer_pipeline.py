@@ -6,6 +6,7 @@ directory of tiles), runs the trained checkpoint, and writes:
 
     {name}_mask.png
     {name}_overlay.png
+    {name}_probability.tif  (georeferenced GeoTIFF inputs only)
     {name}_stats.json
 
 Optional:
@@ -222,6 +223,44 @@ def get_raw_image_metadata(path: Path):
     raw = load_raw_image(path)
 
     return raw.shape, str(raw.dtype)
+
+
+def write_probability_geotiff(
+    input_path: Path,
+    output_path: Path,
+    probability: np.ndarray,
+) -> bool:
+    """Write probabilities with the input GeoTIFF's spatial metadata.
+
+    Non-georeferenced inputs are intentionally skipped rather than assigned
+    fabricated CRS or transform values. The source raster mask is copied to
+    the output so declared invalid pixels remain invalid without changing the
+    probability values written for valid pixels.
+    """
+    if rasterio is None or input_path.suffix.lower() not in {".tif", ".tiff"}:
+        return False
+
+    with rasterio.open(input_path) as src:
+        is_georeferenced = (
+            src.crs is not None
+            and src.transform != rasterio.Affine.identity()
+        )
+        if not is_georeferenced:
+            return False
+
+        profile = src.profile.copy()
+        profile.update(
+            count=1,
+            dtype="float32",
+            width=src.width,
+            height=src.height,
+        )
+
+        with rasterio.open(output_path, "w", **profile) as dst:
+            dst.write(np.asarray(probability, dtype=np.float32), 1)
+            dst.write_mask(src.read_masks(1))
+
+    return True
 
 
 # --------------------------------------------------------------------------
@@ -1125,6 +1164,24 @@ def run_inference(
         ).save(mask_path)
 
         # ----------------------------------------------------------
+        # Save georeferenced probability raster when possible.
+        # ----------------------------------------------------------
+
+        probability_path = out_dir / f"{stem}_probability.tif"
+        probability_written = write_probability_geotiff(
+            path,
+            probability_path,
+            prob,
+        )
+
+        if not probability_written:
+            probability_path = None
+            print(
+                f"  [probability] {path.name}: skipped GeoTIFF output; "
+                "input has no usable CRS/transform or is not a GeoTIFF"
+            )
+
+        # ----------------------------------------------------------
         # Save overlay.
         # ----------------------------------------------------------
 
@@ -1177,6 +1234,22 @@ def run_inference(
             "oil_pixel_count": oil_count,
 
             "oil_pixel_fraction": oil_frac,
+
+            "probability_min": float(prob.min()),
+
+            "probability_max": float(prob.max()),
+
+            "probability_mean": float(prob.mean()),
+
+            "probability_output_path": (
+                str(probability_path)
+                if probability_path is not None
+                else None
+            ),
+
+            "probability_georeferenced": bool(
+                probability_written
+            ),
 
             "threshold": threshold,
 

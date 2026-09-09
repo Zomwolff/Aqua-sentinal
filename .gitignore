@@ -16,3 +16,9 @@ tiff_data/
 *.zip
 documentation
 env (16)
+inference_output/
+optical imagery/batch_inference.py
+fusion_outputs/
+final_fusion_pipeline.py
+fusion_pipeline.py
+wakashio_probability_fusion.py
