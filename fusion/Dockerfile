@@ -12,4 +12,4 @@ COPY fusion /app/fusion
 COPY models /app/models
 
 ENV PYTHONPATH=/app
-ENTRYPOINT ["python", "-c", "from fusion import detect_oil; import numpy as np, sys; m=detect_oil(sys.argv[1], sys.argv[2]); print(m.shape, m.dtype, np.unique(m))"]
+CMD ["uvicorn", "fusion.app:app", "--host", "0.0.0.0", "--port", "8017"]

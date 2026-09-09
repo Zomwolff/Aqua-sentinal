@@ -48,6 +48,9 @@ function App() {
   const [sarUploadOpen, setSarUploadOpen] = useState(false);
   const [sarUploadMmsi, setSarUploadMmsi] = useState("");
   const [sarUploadFile, setSarUploadFile] = useState<File | null>(null);
+  const [s2File, setS2File] = useState<File | null>(null);
+  const [s2Bands, setS2Bands] = useState<File[]>([]);
+  const [fusionResult, setFusionResult] = useState<any>(null);
   const [sarUploading, setSarUploading] = useState(false);
   const [sarUploadError, setSarUploadError] = useState("");
   const [protectedAreas, setProtectedAreas] = useState<any[]>([]);
@@ -576,17 +579,18 @@ function App() {
   const openSarUpload = () => {
     setSarUploadMmsi(selectedVessel?.mmsi || vessels[0]?.mmsi || "");
     setSarUploadFile(null);
+    setS2File(null); setS2Bands([]);
     setSarUploadError("");
     setSarUploadOpen(true);
   };
 
   const handleSarUpload = async (event: FormEvent) => {
     event.preventDefault();
-    if (!sarUploadMmsi || !sarUploadFile || sarUploading) return;
+    if (!sarUploadFile || (!s2File && !s2Bands.length) || sarUploading) return;
     setSarUploading(true);
     setSarUploadError("");
     try {
-      await uploadSarImage(sarUploadMmsi, sarUploadFile);
+      const form=new FormData(); form.append('sentinel1',sarUploadFile); if(s2File) form.append('sentinel2',s2File); s2Bands.forEach(f=>form.append('sentinel2_bands',f)); const res=await fetch('/fusion/upload',{method:'POST',body:form}); if(!res.ok) throw new Error((await res.json()).detail||'Fusion failed'); setFusionResult(await res.json());
       const target = vessels.find((v) => v.mmsi === sarUploadMmsi);
       setSarUploadOpen(false);
       if (target) {
@@ -715,6 +719,7 @@ function App() {
                setVesselDetail(null);
             }}
             liveEvent={liveEvent}
+            fusionResult={fusionResult}
          />
       )}
       
@@ -773,10 +778,10 @@ function App() {
         <div className="sar-upload-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !sarUploading) setSarUploadOpen(false); }}>
           <form className="sar-upload-dialog" onSubmit={handleSarUpload}>
             <div className="sar-upload-title">
-              <div><small>MANUAL INGESTION</small><h2>Add SAR Image</h2></div>
+              <div><small>MANUAL INGESTION</small><h2>Add Sentinel Pair</h2></div>
               <button type="button" aria-label="Close SAR upload" onClick={() => setSarUploadOpen(false)} disabled={sarUploading}>×</button>
             </div>
-            <p>The image will run through despeckling, CFAR detection, morphological cleaning, polygon extraction, evidence fusion, severity, attribution, forecasting, and response recommendations.</p>
+            <p>Sentinel-1 + Sentinel-2 ONNX fusion. SAR 0.50 · EO 0.15.</p>
             <label>
               <span>ASSOCIATE WITH VESSEL</span>
               <select value={sarUploadMmsi} onChange={(event) => setSarUploadMmsi(event.target.value)} required>
@@ -784,6 +789,8 @@ function App() {
                 {vessels.map((vessel) => <option key={vessel.mmsi} value={vessel.mmsi}>{vessel.name} · MMSI {vessel.mmsi}</option>)}
               </select>
             </label>
+            <label><span>SENTINEL-2 MULTIBAND TIFF</span><input type="file" accept=".tif,.tiff" onChange={e=>{setS2File(e.target.files?.[0]||null);setS2Bands([])}} /><small>Required bands are selected and reordered automatically.</small></label>
+            <label><span>OR INDIVIDUAL S2 BANDS</span><input type="file" accept=".tif,.tiff" multiple onChange={e=>{setS2Bands(Array.from(e.target.files||[]));setS2File(null)}} /></label>
             <label>
               <span>SAR RASTER</span>
               <input type="file" accept=".tif,.tiff,.png,.jpg,.jpeg,image/tiff,image/png,image/jpeg" onChange={(event) => setSarUploadFile(event.target.files?.[0] || null)} required />
@@ -792,7 +799,7 @@ function App() {
             {sarUploadError && <div className="sar-upload-error" role="alert">{sarUploadError}</div>}
             <div className="sar-upload-actions">
               <button type="button" onClick={() => setSarUploadOpen(false)} disabled={sarUploading}>CANCEL</button>
-              <button type="submit" disabled={!sarUploadMmsi || !sarUploadFile || sarUploading}>{sarUploading ? "SUBMITTING…" : "RUN SAR PIPELINE"}</button>
+              <button type="submit" disabled={!sarUploadFile || (!s2File&&!s2Bands.length) || sarUploading}>{sarUploading ? "RUNNING…" : "RUN FUSION"}</button>
             </div>
           </form>
         </div>

@@ -213,6 +213,15 @@ services:
     networks:
       - aqua-net
 
+  fusion:
+    build:
+      context: .
+      dockerfile: fusion/Dockerfile
+    volumes:
+      - sar-scene-artifacts:/data/artifacts
+    ports: ["8017:8017"]
+    networks: [aqua-net]
+
   simulator:
     build: ./simulator
     restart: unless-stopped

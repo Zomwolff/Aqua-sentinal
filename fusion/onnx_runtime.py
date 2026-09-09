@@ -85,6 +85,14 @@ def _sar_probability(path: Path, model_path: Path):
     return (accumulated / np.maximum(counts, 1))[:height, :width].astype(np.float32)
 
 
+def predict_sar_probability(path, model_path):
+    """Return SAR probability and its source validity mask."""
+    path = Path(path).resolve()
+    with rasterio.open(path) as source:
+        valid = source.read_masks(1) > 0
+    return _sar_probability(path, model_path), valid
+
+
 def _band_token(name):
     match = _BAND_PATTERN.search(name.upper())
     if not match: return None
@@ -108,10 +116,24 @@ def _band_files(directory: Path):
 def _prepare_eo(path: Path, temporary: Path):
     if path.is_file():
         with rasterio.open(path) as source:
-            if source.count != 10: raise ValueError(f"Sentinel-2 GeoTIFF must have 10 bands, found {source.count}")
-            detected = [_band_token(value or "") for value in source.descriptions]
-            if detected != list(CANONICAL_BANDS): raise ValueError(f"Missing or incorrectly ordered band descriptions: {detected}")
-        return path
+            selected = {}
+            for index, description in enumerate(source.descriptions, 1):
+                band = _band_token(description or "")
+                if band in CANONICAL_BANDS:
+                    if band in selected: raise ValueError(f"Duplicate Sentinel-2 band: {band}")
+                    selected[band] = index
+            missing = [band for band in CANONICAL_BANDS if band not in selected]
+            if missing: raise ValueError(f"Missing required Sentinel-2 bands: {missing}")
+            # Keep only the model bands (B2..B12), discard e.g. B1/B9/B10/QA,
+            # and write the trained canonical order.
+            if source.count == 10 and [selected[b] for b in CANONICAL_BANDS] == list(range(1, 11)): return path
+            output = temporary / "sentinel2_10band.tif"
+            profile = source.profile.copy(); profile.update(count=10, dtype="float32", nodata=None, compress="deflate")
+            with rasterio.open(output, "w", **profile) as destination:
+                for out_index, band in enumerate(CANONICAL_BANDS, 1):
+                    destination.write(source.read(selected[band]).astype(np.float32), out_index)
+                    destination.set_band_description(out_index, band)
+        return output
     bands = _band_files(path)
     output = temporary / "sentinel2_10band.tif"
     with rasterio.open(bands["B2"]) as reference:
@@ -157,22 +179,42 @@ def _eo_probability(path: Path, model_path: Path):
                 blend = np.maximum(np.exp(-0.5 * (((yy - cy) / max(hh / 3, 1)) ** 2 + ((xx - cx) / max(ww / 3, 1)) ** 2)).astype(np.float32), 1e-3)
                 accumulated[y:y + hh, x:x + ww] += probability[:hh, :ww] * blend; weights[y:y + hh, x:x + ww] += blend
         result = (accumulated / np.maximum(weights, 1e-8)).astype(np.float32); result[~valid] = 0
-        return result
+        return result, valid
+
+
+def predict_eo_probability(path, model_path):
+    """Return EO probability and the valid-pixel mask on the EO grid."""
+    return _eo_probability(Path(path).resolve(), model_path)
+
+
+def align_probability_pair(sar_path, sar_probability, sar_valid, eo_path, eo_valid):
+    """Align a SAR probability array to the EO input grid using geospatial metadata."""
+    with tempfile.TemporaryDirectory(prefix="fusion_pair_") as temp:
+        temp = Path(temp)
+        sar_raster = temp / "sar_probability.tif"
+        eo_raster = temp / "eo_reference.tif"
+        with rasterio.open(sar_path) as source:
+            profile = source.profile.copy(); profile.update(count=1, dtype="float32", nodata=0)
+            with rasterio.open(sar_raster, "w", **profile) as destination:
+                destination.write(sar_probability, 1); destination.write_mask(sar_valid.astype(np.uint8) * 255)
+        eo_reference = _prepare_eo(Path(eo_path).resolve(), temp)
+        with rasterio.open(eo_reference) as source:
+            profile = source.profile.copy(); profile.update(count=1, dtype="float32", nodata=0)
+            with rasterio.open(eo_raster, "w", **profile) as destination:
+                destination.write(np.zeros((source.height, source.width), dtype=np.float32), 1)
+                destination.write_mask(eo_valid.astype(np.uint8) * 255)
+        with rasterio.open(sar_raster) as sar, rasterio.open(eo_raster) as eo:
+            aligned = np.zeros((eo.height, eo.width), dtype=np.float32)
+            aligned_valid = np.zeros((eo.height, eo.width), dtype=np.uint8)
+            source_values = sar.read(1); source_values[sar.read_masks(1) == 0] = -9999
+            reproject(source_values, aligned, src_transform=sar.transform, src_crs=sar.crs, src_nodata=-9999, dst_transform=eo.transform, dst_crs=eo.crs, dst_nodata=0, resampling=Resampling.bilinear)
+            reproject((sar.read_masks(1) > 0).astype(np.uint8), aligned_valid, src_transform=sar.transform, src_crs=sar.crs, src_nodata=0, dst_transform=eo.transform, dst_crs=eo.crs, dst_nodata=0, resampling=Resampling.nearest)
+            valid = (aligned_valid > 0) & (eo.read_masks(1) > 0)
+        return np.clip(aligned, 0, 1), valid
 
 
 def detect_oil_onnx(sentinel1_path, sentinel2_path, sar_onnx: Path, eo_onnx: Path):
-    with tempfile.TemporaryDirectory(prefix="fusion_onnx_align_") as temp:
-        temp = Path(temp)
-        sar_values = _sar_probability(Path(sentinel1_path).resolve(), sar_onnx)
-        eo_values = _eo_probability(Path(sentinel2_path).resolve(), eo_onnx)
-        with rasterio.open(sentinel1_path) as source:
-            profile = source.profile.copy(); profile.update(count=1, dtype="float32", nodata=0)
-            sar_path = temp / "sar.tif"
-            with rasterio.open(sar_path, "w", **profile) as destination: destination.write(sar_values, 1)
-        eo_reference = _prepare_eo(Path(sentinel2_path).resolve(), temp)
-        with rasterio.open(eo_reference) as source:
-            profile = source.profile.copy(); profile.update(count=1, dtype="float32", nodata=0)
-            eo_path = temp / "eo.tif"
-            with rasterio.open(eo_path, "w", **profile) as destination: destination.write(eo_values, 1)
-        aligned, valid = align_sar_probability(sar_path, eo_path)
-        return ((eo_values >= EO_THRESHOLD) & valid).astype(np.uint8), aligned, eo_values
+    sar_values, sar_valid = predict_sar_probability(sentinel1_path, sar_onnx)
+    eo_values, eo_valid = predict_eo_probability(sentinel2_path, eo_onnx)
+    aligned, valid = align_probability_pair(sentinel1_path, sar_values, sar_valid, sentinel2_path, eo_valid)
+    return ((eo_values >= EO_THRESHOLD) & valid).astype(np.uint8), aligned, eo_values

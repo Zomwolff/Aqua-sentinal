@@ -37,7 +37,7 @@ type TaskingInfo = {
   reason?: any;
 };
 
-export function SARTaskingPipeline({ liveEvent, historicalSceneId, tasking }: { liveEvent?: any; historicalSceneId?: string | null; tasking?: TaskingInfo | null }) {
+export function SARTaskingPipeline({ liveEvent, historicalSceneId, tasking, fusionResult }: { liveEvent?: any; historicalSceneId?: string | null; tasking?: TaskingInfo | null; fusionResult?: any }) {
   const [isOpen, setIsOpen] = useState(false);
   const [activeScene, setActiveScene] = useState<string | null>(null);
   const [currentStep, setCurrentStep] = useState<string | null>(null);
@@ -71,6 +71,7 @@ export function SARTaskingPipeline({ liveEvent, historicalSceneId, tasking }: { 
     }
   }, [liveEvent]);
 
+  if (fusionResult?.artifacts) return <div className="sar-pipeline-panel"><div className="panel-header"><h3>{fusionResult.oil_spill_detected ? "OIL SPILL DETECTED" : "NO OIL SPILL"}</h3></div><div className="panel-content"><div className="artifacts-grid">{[["Sentinel-1", "s1"], ["SAR mask · 0.50", "sar"], ["Sentinel-2", "s2"], ["Final EO mask · 0.15", "final"]].map(([label,key]) => <div className="artifact-item" key={key}><div className="artifact-label">{label}</div><img src={fusionResult.artifacts[key]} alt={label} /></div>)}</div></div></div>;
   if (!isOpen) return null;
 
   const currentIndex = currentStep ? steps.indexOf(currentStep) : -1;

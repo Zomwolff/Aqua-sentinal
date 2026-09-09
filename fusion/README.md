@@ -9,17 +9,26 @@ mask = detect_oil("S1.tif", "S2.tif")
 # uint8 NumPy array, values 0 (not oil) or 1 (oil)
 ```
 
-`sentinel2_path` may be a 10-band GeoTIFF with canonical band descriptions or a directory containing separate files whose names contain `B02`, `B03`, `B04`, `B05`, `B06`, `B07`, `B08`, `B8A`, `B11`, and `B12`. Separate bands are detected by filename, ordered canonically, and resampled to the B2 grid when required.
+All three modes are supported:
 
-The package uses ONNX exports of the existing SAR and EO networks. It preserves the reference preprocessing, tiling, stitching, band order, and normalization constants. It aligns SAR probability to the EO grid. The production thresholds are SAR `0.50` and EO `0.15`. The final mask is EO-primary:
-
-```text
-EO_MASK = EO_probability >= 0.15
-SAR_MASK = SAR_probability >= 0.50
-FINAL_MASK = EO_MASK
+```python
+sar_mask = detect_oil(sentinel1_path="S1.tif")
+eo_mask = detect_oil(sentinel2_path="S2.tif")
+fused_mask = detect_oil(sentinel1_path="S1.tif", sentinel2_path="S2.tif")
 ```
 
-SAR agreement is internal supporting evidence; SAR-only detections are rejected and SAR does not erase EO detections. The public API returns no probabilities, metadata, or intermediate masks.
+For a clear scene-level decision, use `detect_oil_result(...)`. It reports `oil_spill_detected` based on whether the returned mask contains at least one detected pixel. The CLI prints `OIL_SPILL_DETECTED` or `NO_OIL_SPILL`.
+
+`sentinel2_path` may be a 10-band GeoTIFF with canonical band descriptions or a directory containing separate files whose names contain `B02`, `B03`, `B04`, `B05`, `B06`, `B07`, `B08`, `B8A`, `B11`, and `B12`. Separate bands are detected by filename, ordered canonically, and resampled to the B2 grid when required.
+
+The package uses ONNX exports of the existing SAR and EO networks. It preserves the reference preprocessing, tiling, stitching, band order, and normalization constants. It aligns SAR probability to the EO grid. Standalone SAR uses threshold `0.50`; standalone EO uses threshold `0.15`. For fused inputs, the continuous probabilities are compared on the common EO grid and thresholded at `0.50` after weighted fusion. A single multiband EO GeoTIFF uses 75% SAR / 25% EO; a separate-band EO directory uses 50% / 50%.
+
+```text
+FUSED_PROBABILITY = SAR_WEIGHT * SAR_probability + EO_WEIGHT * EO_probability
+FINAL_MASK = FUSED_PROBABILITY >= 0.50
+```
+
+The public API returns no probabilities, metadata, or intermediate masks. `detect_oil_result` provides the explicit mode and scene-level boolean when needed.
 
 ## Local validation
 

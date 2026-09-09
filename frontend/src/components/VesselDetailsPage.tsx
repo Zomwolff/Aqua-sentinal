@@ -8,6 +8,7 @@ interface Props {
   vesselDetail: any;
   onBack: () => void;
   liveEvent?: any;
+  fusionResult?: any;
 }
 
 const SAR_STEPS = [
@@ -20,7 +21,7 @@ const SAR_STEPS = [
   { id: "sar_complete", label: "Spill Processing Complete", detail: "Candidates persisted and fused" },
 ];
 
-export function VesselDetailsPage({ vesselDetail, onBack, liveEvent }: Props) {
+export function VesselDetailsPage({ vesselDetail, onBack, liveEvent, fusionResult }: Props) {
   const [images, setImages] = useState<Partial<Record<SarArtifactKey, string>>>({});
   const [liveStep, setLiveStep] = useState<string | null>(null);
   const [cacheBuster, setCacheBuster] = useState<number>(Date.now());
@@ -319,7 +320,20 @@ export function VesselDetailsPage({ vesselDetail, onBack, liveEvent }: Props) {
         </div>
 
         <div className="idp-main-view">
-          {sar_tasking ? (
+          {fusionResult?.artifacts ? (
+            <div className="idp-card full-height">
+              <h3>Fusion Results</h3>
+              <div className={fusionResult.oil_spill_detected ? "idp-verdict spill" : "idp-verdict clear"} style={{ marginBottom: "14px", fontWeight: 700 }}>
+                {fusionResult.oil_spill_detected ? "OIL SPILL DETECTED" : "NO OIL SPILL"}
+                {fusionResult.weights && <small style={{ marginLeft: "10px", opacity: 0.75 }}>SAR {Math.round(fusionResult.weights.sar * 100)}% · EO {Math.round(fusionResult.weights.eo * 100)}%</small>}
+              </div>
+              <div className="idp-sar-grid">
+                {[["1. SENTINEL-1", "s1"], ["2. SAR MASK · 0.50", "sar"], ["3. SENTINEL-2", "s2"], ["4. FINAL EO MASK · 0.15", "final"]].map(([label, key]) => (
+                  <div className="sar-artifact" key={key}><div className="sar-label">{label}</div><div className="sar-img-wrapper"><img src={fusionResult.artifacts[key]} alt={label} /></div></div>
+                ))}
+              </div>
+            </div>
+          ) : sar_tasking ? (
             <div className="idp-card full-height">
               <div className="sar-header-flex">
                 <h3>SAR Processing Pipeline</h3>
