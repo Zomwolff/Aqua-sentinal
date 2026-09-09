@@ -1,0 +1,178 @@
+from pathlib import Path
+import json
+import re
+import tempfile
+
+import numpy as np
+import rasterio
+from rasterio.enums import Resampling
+from rasterio.warp import reproject
+
+from .alignment import align_sar_probability
+from .config import CANONICAL_BANDS, EO_NORMALIZATION, EO_THRESHOLD, SAR_THRESHOLD
+
+_MEAN = np.asarray([0.485, 0.456, 0.406], dtype=np.float32)
+_STD = np.asarray([0.229, 0.224, 0.225], dtype=np.float32)
+_BAND_PATTERN = re.compile(r"(?:^|[^A-Z0-9])B(8A|0?[2-8]|1[12])(?:[^A-Z0-9]|$)", re.IGNORECASE)
+
+
+def _session(path: Path):
+    import onnxruntime as ort
+    return ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+
+
+def _sigmoid(values):
+    values = np.asarray(values, dtype=np.float32)
+    result = np.empty_like(values, dtype=np.float32)
+    positive = values >= 0
+    result[positive] = 1.0 / (1.0 + np.exp(-values[positive]))
+    exp_values = np.exp(values[~positive])
+    result[~positive] = exp_values / (1.0 + exp_values)
+    return result
+
+
+def _load_sar_image(path: Path):
+    with rasterio.open(path) as source:
+        raw = source.read()
+    channels = raw.shape[0]
+    values = raw.astype(np.float64)
+    low = float(np.nanmin(values))
+    high = float(np.nanmax(values))
+    values = ((values - low) / (high - low + 1e-12) * 255.0).clip(0, 255)
+    if channels == 4:
+        values = values[:3]
+        channels = 3
+    if channels == 1:
+        gray = values[0]
+        return np.repeat(gray[..., None], 3, axis=2).astype(np.uint8)
+    if channels != 3:
+        gray = np.mean(values, axis=0, dtype=np.float64)
+        return np.repeat(gray[..., None], 3, axis=2).astype(np.uint8)
+    image = np.transpose(values, (1, 2, 0)).astype(np.uint8)
+    if np.array_equal(image[..., 0], image[..., 1]) and np.array_equal(image[..., 1], image[..., 2]):
+        return image
+    gray = np.mean(image.astype(np.float32), axis=2)
+    return np.repeat(gray[..., None], 3, axis=2).clip(0, 255).astype(np.uint8)
+
+
+def _sar_tiles(image, tile=256, overlap=32):
+    height, width = image.shape[:2]
+    stride = tile - overlap
+    rows = [0] if height <= tile else list(range(0, height - tile + 1, stride))
+    cols = [0] if width <= tile else list(range(0, width - tile + 1, stride))
+    if rows[-1] != max(height - tile, 0): rows.append(max(height - tile, 0))
+    if cols[-1] != max(width - tile, 0): cols.append(max(width - tile, 0))
+    padded_height = max(height, rows[-1] + tile)
+    padded_width = max(width, cols[-1] + tile)
+    padded = np.pad(image, ((0, padded_height - height), (0, padded_width - width), (0, 0)), mode="reflect")
+    return padded, [(padded[y:y + tile, x:x + tile], y, x) for y in rows for x in cols], (height, width), (padded_height, padded_width)
+
+
+def _sar_probability(path: Path, model_path: Path):
+    image = _load_sar_image(path)
+    padded, patches, (height, width), (padded_height, padded_width) = _sar_tiles(image)
+    session = _session(model_path)
+    input_name = session.get_inputs()[0].name
+    accumulated = np.zeros((padded_height, padded_width), dtype=np.float64)
+    counts = np.zeros_like(accumulated)
+    for patch, y, x in patches:
+        array = patch.astype(np.float32) / 255.0
+        array = ((array - _MEAN) / _STD).transpose(2, 0, 1)[None]
+        logits = session.run(None, {input_name: array.astype(np.float32)})[0][:, 0]
+        probability = _sigmoid(logits)[0]
+        accumulated[y:y + 256, x:x + 256] += probability
+        counts[y:y + 256, x:x + 256] += 1
+    return (accumulated / np.maximum(counts, 1))[:height, :width].astype(np.float32)
+
+
+def _band_token(name):
+    match = _BAND_PATTERN.search(name.upper())
+    if not match: return None
+    token = match.group(1).upper()
+    return "B8A" if token == "8A" else f"B{int(token)}"
+
+
+def _band_files(directory: Path):
+    found = {}
+    for path in directory.iterdir():
+        if path.is_file() and path.suffix.lower() in {".tif", ".tiff"}:
+            band = _band_token(path.name)
+            if band:
+                if band in found: raise ValueError(f"Duplicate Sentinel-2 band: {band}")
+                found[band] = path
+    missing = [band for band in CANONICAL_BANDS if band not in found]
+    if missing: raise ValueError(f"Missing required Sentinel-2 bands: {missing}")
+    return found
+
+
+def _prepare_eo(path: Path, temporary: Path):
+    if path.is_file():
+        with rasterio.open(path) as source:
+            if source.count != 10: raise ValueError(f"Sentinel-2 GeoTIFF must have 10 bands, found {source.count}")
+            detected = [_band_token(value or "") for value in source.descriptions]
+            if detected != list(CANONICAL_BANDS): raise ValueError(f"Missing or incorrectly ordered band descriptions: {detected}")
+        return path
+    bands = _band_files(path)
+    output = temporary / "sentinel2_10band.tif"
+    with rasterio.open(bands["B2"]) as reference:
+        if reference.crs is None: raise ValueError("Sentinel-2 reference band has no CRS")
+        profile = reference.profile.copy(); profile.update(count=10, dtype="float32", nodata=None, compress="deflate")
+        with rasterio.open(output, "w", **profile) as destination:
+            for index, band in enumerate(CANONICAL_BANDS, 1):
+                with rasterio.open(bands[band]) as source:
+                    if source.crs is None: raise ValueError(f"Sentinel-2 band {band} has no CRS")
+                    values = np.zeros((reference.height, reference.width), dtype=np.float32)
+                    if source.crs == reference.crs and source.width == reference.width and source.height == reference.height and source.transform == reference.transform:
+                        values[:] = source.read(1).astype(np.float32)
+                    else:
+                        reproject(source.read(1).astype(np.float32), values, src_transform=source.transform, src_crs=source.crs, dst_transform=reference.transform, dst_crs=reference.crs, resampling=Resampling.bilinear)
+                    destination.write(values, index); destination.set_band_description(index, band)
+    return output
+
+
+def _eo_probability(path: Path, model_path: Path):
+    with tempfile.TemporaryDirectory(prefix="fusion_eo_stack_") as temp:
+        prepared = _prepare_eo(Path(path).resolve(), Path(temp))
+        normalization = json.loads(EO_NORMALIZATION.read_text(encoding="utf-8"))
+        mean = np.asarray(normalization["mean"], dtype=np.float32)
+        std = np.asarray(normalization["std"], dtype=np.float32)
+        with rasterio.open(prepared) as source:
+            raw = source.read().astype(np.float32)
+            valid = np.all(np.isfinite(raw), axis=0)
+            normalized = (raw - mean[:, None, None]) / std[:, None, None]
+            normalized[:, ~valid] = 0
+            height, width = source.height, source.width
+        session = _session(model_path); input_name = session.get_inputs()[0].name
+        stride = 224; ys = [0] if height <= 256 else list(range(0, height - 256 + 1, stride)); xs = [0] if width <= 256 else list(range(0, width - 256 + 1, stride))
+        if ys[-1] != max(height - 256, 0): ys.append(max(height - 256, 0))
+        if xs[-1] != max(width - 256, 0): xs.append(max(width - 256, 0))
+        accumulated = np.zeros((height, width), dtype=np.float64); weights = np.zeros_like(accumulated)
+        for y in ys:
+            for x in xs:
+                tile = normalized[:, y:y + 256, x:x + 256]; hh, ww = tile.shape[1:]
+                if hh != 256 or ww != 256: tile = np.pad(tile, ((0, 0), (0, 256 - hh), (0, 256 - ww)))
+                logits = session.run(None, {input_name: tile[None].astype(np.float32)})[0][0]
+                probability = _sigmoid(logits)
+                yy, xx = np.mgrid[0:hh, 0:ww]; cy, cx = (hh - 1) / 2, (ww - 1) / 2
+                blend = np.maximum(np.exp(-0.5 * (((yy - cy) / max(hh / 3, 1)) ** 2 + ((xx - cx) / max(ww / 3, 1)) ** 2)).astype(np.float32), 1e-3)
+                accumulated[y:y + hh, x:x + ww] += probability[:hh, :ww] * blend; weights[y:y + hh, x:x + ww] += blend
+        result = (accumulated / np.maximum(weights, 1e-8)).astype(np.float32); result[~valid] = 0
+        return result
+
+
+def detect_oil_onnx(sentinel1_path, sentinel2_path, sar_onnx: Path, eo_onnx: Path):
+    with tempfile.TemporaryDirectory(prefix="fusion_onnx_align_") as temp:
+        temp = Path(temp)
+        sar_values = _sar_probability(Path(sentinel1_path).resolve(), sar_onnx)
+        eo_values = _eo_probability(Path(sentinel2_path).resolve(), eo_onnx)
+        with rasterio.open(sentinel1_path) as source:
+            profile = source.profile.copy(); profile.update(count=1, dtype="float32", nodata=0)
+            sar_path = temp / "sar.tif"
+            with rasterio.open(sar_path, "w", **profile) as destination: destination.write(sar_values, 1)
+        eo_reference = _prepare_eo(Path(sentinel2_path).resolve(), temp)
+        with rasterio.open(eo_reference) as source:
+            profile = source.profile.copy(); profile.update(count=1, dtype="float32", nodata=0)
+            eo_path = temp / "eo.tif"
+            with rasterio.open(eo_path, "w", **profile) as destination: destination.write(eo_values, 1)
+        aligned, valid = align_sar_probability(sar_path, eo_path)
+        return ((eo_values >= EO_THRESHOLD) & valid).astype(np.uint8), aligned, eo_values
