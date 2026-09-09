@@ -4,7 +4,7 @@ import {
   fetchVessels, fetchIncidents, fetchIncidentDetail, fetchVesselDetail,
   fetchVesselTrack, triggerLiveAisFetch, fetchProtectedAreas,
   fetchDarkVessels, fetchStsEvents, fetchSpoofingSuspects,
-  uploadSarImage,
+  uploadSarImage, uploadFusionPair,
 } from "./lib/api";
 import { useLiveFeeds } from "./hooks/useLiveFeeds";
 import { SARTaskingPipeline } from "./components/SARTaskingPipeline";
@@ -48,6 +48,9 @@ function App() {
   const [sarUploadOpen, setSarUploadOpen] = useState(false);
   const [sarUploadMmsi, setSarUploadMmsi] = useState("");
   const [sarUploadFile, setSarUploadFile] = useState<File | null>(null);
+  const [sentinel2File, setSentinel2File] = useState<File | null>(null);
+  const [sentinel2Bands, setSentinel2Bands] = useState<File[]>([]);
+  const [fusionResults, setFusionResults] = useState<any>(null);
   const [sarUploading, setSarUploading] = useState(false);
   const [sarUploadError, setSarUploadError] = useState("");
   const [protectedAreas, setProtectedAreas] = useState<any[]>([]);
@@ -576,24 +579,27 @@ function App() {
   const openSarUpload = () => {
     setSarUploadMmsi(selectedVessel?.mmsi || vessels[0]?.mmsi || "");
     setSarUploadFile(null);
+    setSentinel2File(null);
+    setSentinel2Bands([]);
     setSarUploadError("");
     setSarUploadOpen(true);
   };
 
   const handleSarUpload = async (event: FormEvent) => {
     event.preventDefault();
-    if (!sarUploadMmsi || !sarUploadFile || sarUploading) return;
+    if (!sarUploadFile || sarUploading || (!sentinel2File && sentinel2Bands.length === 0)) return;
     setSarUploading(true);
     setSarUploadError("");
     try {
-      await uploadSarImage(sarUploadMmsi, sarUploadFile);
-      const target = vessels.find((v) => v.mmsi === sarUploadMmsi);
+      const result = await uploadFusionPair(sarUploadFile, sentinel2File || undefined, sentinel2Bands.length ? sentinel2Bands : undefined);
+      setFusionResults(result);
       setSarUploadOpen(false);
+      const target = vessels.find((v) => v.mmsi === sarUploadMmsi);
       if (target) {
         await focusFlaggedVessel(target);
       }
     } catch (error) {
-      setSarUploadError(error instanceof Error ? error.message : "Unable to submit this SAR image.");
+      setSarUploadError(error instanceof Error ? error.message : "Unable to run Sentinel fusion.");
     } finally {
       setSarUploading(false);
     }
@@ -773,28 +779,51 @@ function App() {
         <div className="sar-upload-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !sarUploading) setSarUploadOpen(false); }}>
           <form className="sar-upload-dialog" onSubmit={handleSarUpload}>
             <div className="sar-upload-title">
-              <div><small>MANUAL INGESTION</small><h2>Add SAR Image</h2></div>
+              <div><small>MANUAL INGESTION</small><h2>Add Sentinel Imagery</h2></div>
               <button type="button" aria-label="Close SAR upload" onClick={() => setSarUploadOpen(false)} disabled={sarUploading}>×</button>
             </div>
-            <p>The image will run through despeckling, CFAR detection, morphological cleaning, polygon extraction, evidence fusion, severity, attribution, forecasting, and response recommendations.</p>
+            <p>Upload an overlapping Sentinel-1 and Sentinel-2 pair. The ONNX models run at SAR 0.50 and EO 0.15 thresholds.</p>
+            {vessels.length > 0 && (
+              <label>
+                <span>ASSOCIATE WITH VESSEL (OPTIONAL)</span>
+                <select value={sarUploadMmsi} onChange={(event) => setSarUploadMmsi(event.target.value)}>
+                  <option value="">No vessel association</option>
+                  {vessels.map((vessel) => <option key={vessel.mmsi} value={vessel.mmsi}>{vessel.name} · MMSI {vessel.mmsi}</option>)}
+                </select>
+              </label>
+            )}
             <label>
-              <span>ASSOCIATE WITH VESSEL</span>
-              <select value={sarUploadMmsi} onChange={(event) => setSarUploadMmsi(event.target.value)} required>
-                <option value="" disabled>Select a tracked vessel</option>
-                {vessels.map((vessel) => <option key={vessel.mmsi} value={vessel.mmsi}>{vessel.name} · MMSI {vessel.mmsi}</option>)}
-              </select>
+              <span>SENTINEL-1 RASTER</span>
+              <input type="file" accept=".tif,.tiff,image/tiff" onChange={(event) => setSarUploadFile(event.target.files?.[0] || null)} required />
+              <small>GeoTIFF only. It must overlap the Sentinel-2 scene.</small>
             </label>
             <label>
-              <span>SAR RASTER</span>
-              <input type="file" accept=".tif,.tiff,.png,.jpg,.jpeg,image/tiff,image/png,image/jpeg" onChange={(event) => setSarUploadFile(event.target.files?.[0] || null)} required />
-              <small>GeoTIFF (EPSG:4326) preserves embedded coordinates. PNG/JPEG is centred on the selected vessel at 10 m/pixel. Maximum 50 MB.</small>
+              <span>SENTINEL-2 10-BAND GEOTIFF</span>
+              <input type="file" accept=".tif,.tiff,image/tiff" onChange={(event) => { setSentinel2File(event.target.files?.[0] || null); if (event.target.files?.length) setSentinel2Bands([]); }} />
+              <small>One GeoTIFF containing B2, B3, B4, B5, B6, B7, B8, B8A, B11 and B12 in that order.</small>
+            </label>
+            <label>
+              <span>OR INDIVIDUAL SENTINEL-2 BANDS</span>
+              <input type="file" accept=".tif,.tiff,image/tiff" multiple onChange={(event) => { const files = Array.from(event.target.files || []); setSentinel2Bands(files); if (files.length) setSentinel2File(null); }} />
+              <small>Select all ten GeoTIFFs together; filenames must identify B2 through B12.</small>
             </label>
             {sarUploadError && <div className="sar-upload-error" role="alert">{sarUploadError}</div>}
             <div className="sar-upload-actions">
               <button type="button" onClick={() => setSarUploadOpen(false)} disabled={sarUploading}>CANCEL</button>
-              <button type="submit" disabled={!sarUploadMmsi || !sarUploadFile || sarUploading}>{sarUploading ? "SUBMITTING…" : "RUN SAR PIPELINE"}</button>
+              <button type="submit" disabled={!sarUploadFile || (!sentinel2File && !sentinel2Bands.length) || sarUploading}>{sarUploading ? "RUNNING…" : "RUN FUSION"}</button>
             </div>
           </form>
+        </div>
+      )}
+      {fusionResults && (
+        <div className="sar-upload-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setFusionResults(null); }}>
+          <div className="sar-upload-dialog">
+            <div className="sar-upload-title"><div><small>FUSION COMPLETE</small><h2>Sentinel Results</h2></div><button type="button" onClick={() => setFusionResults(null)}>×</button></div>
+            <p>SAR threshold 0.50 · EO threshold 0.15</p>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
+              {[["Sentinel-1", "sentinel1_input.png"], ["SAR mask", "sentinel1_mask.png"], ["Sentinel-2", "sentinel2_input.png"], ["Final EO mask", "final_fused_mask.png"]].map(([label, file]) => <div key={file}><small>{label}</small><img style={{ display: "block", width: "100%", marginTop: "6px" }} src={fusionResults.artifacts[file]} alt={label} /></div>)}
+            </div>
+          </div>
         </div>
       )}
     </div>

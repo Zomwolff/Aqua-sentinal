@@ -108,10 +108,34 @@ def _band_files(directory: Path):
 def _prepare_eo(path: Path, temporary: Path):
     if path.is_file():
         with rasterio.open(path) as source:
-            if source.count != 10: raise ValueError(f"Sentinel-2 GeoTIFF must have 10 bands, found {source.count}")
-            detected = [_band_token(value or "") for value in source.descriptions]
-            if detected != list(CANONICAL_BANDS): raise ValueError(f"Missing or incorrectly ordered band descriptions: {detected}")
-        return path
+            # A Sentinel-2 product can carry extra bands (for example B1, B9,
+            # B10, or QA). Select the model's required bands by description
+            # rather than rejecting a valid product solely because it has more
+            # than ten bands, then write them in the trained canonical order.
+            indices = {}
+            for index, description in enumerate(source.descriptions, 1):
+                band = _band_token(description or "")
+                if band in CANONICAL_BANDS:
+                    if band in indices:
+                        raise ValueError(f"Duplicate Sentinel-2 band: {band}")
+                    indices[band] = index
+            missing = [band for band in CANONICAL_BANDS if band not in indices]
+            if missing:
+                raise ValueError(
+                    f"Sentinel-2 GeoTIFF is missing required band descriptions: {missing}. "
+                    "Expected B2, B3, B4, B5, B6, B7, B8, B8A, B11 and B12."
+                )
+            # Do not rewrite an already-canonical ten-band raster.
+            if source.count == len(CANONICAL_BANDS) and [indices[band] for band in CANONICAL_BANDS] == list(range(1, 11)):
+                return path
+            profile = source.profile.copy()
+            profile.update(count=len(CANONICAL_BANDS), dtype="float32", nodata=None, compress="deflate")
+            output = temporary / "sentinel2_10band.tif"
+            with rasterio.open(output, "w", **profile) as destination:
+                for output_index, band in enumerate(CANONICAL_BANDS, 1):
+                    destination.write(source.read(indices[band]).astype(np.float32), output_index)
+                    destination.set_band_description(output_index, band)
+            return output
     bands = _band_files(path)
     output = temporary / "sentinel2_10band.tif"
     with rasterio.open(bands["B2"]) as reference:

@@ -85,6 +85,19 @@ export async function uploadSarImage(mmsi: string | number, image: File) {
   return res.json();
 }
 
+export async function uploadFusionPair(sentinel1: File, sentinel2?: File, sentinel2Bands?: File[]) {
+  const form = new FormData();
+  form.append("sentinel1", sentinel1);
+  if (sentinel2) form.append("sentinel2", sentinel2);
+  for (const band of sentinel2Bands || []) form.append("sentinel2_bands", band);
+  const res = await fetch(`${API_BASE}/fusion/upload`, { method: "POST", body: form });
+  if (!res.ok) {
+    const payload = await res.json().catch(() => null);
+    throw new Error(payload?.detail || "Failed to run Sentinel fusion");
+  }
+  return res.json();
+}
+
 export async function fetchProtectedAreas() {
   const res = await fetch(`${API_BASE}/protected-areas`);
   if (!res.ok) throw new Error("Failed to fetch protected areas");

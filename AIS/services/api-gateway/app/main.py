@@ -82,6 +82,7 @@ _SERVICES = {
     "severity-impact":      "http://backend:8013",
     "response-decision":    "http://backend:8014",
     "sar-spill-intelligence": "http://sar:8008",
+    "fusion":               "http://fusion:8017",
 }
 
 # ── DB / Redis helpers (direct connections for aggregation) ───────────────────
@@ -987,6 +988,36 @@ async def upload_sar_image(mmsi: int, image: UploadFile = File(...)):
             detail = response.json().get("detail", "SAR upload was rejected.")
         except ValueError:
             detail = "SAR upload was rejected."
+        raise HTTPException(status_code=response.status_code, detail=detail)
+    return response.json()
+
+
+@app.post("/fusion/upload", tags=["Fusion"])
+async def upload_fusion_pair(
+    sentinel1: UploadFile = File(...),
+    sentinel2: Optional[UploadFile] = File(None),
+    sentinel2_bands: Optional[List[UploadFile]] = File(None),
+):
+    """Proxy a user-provided Sentinel-1/Sentinel-2 pair to the ONNX fusion service."""
+    if bool(sentinel2) == bool(sentinel2_bands):
+        raise HTTPException(status_code=422, detail="Provide one 10-band Sentinel-2 GeoTIFF or its individual band files.")
+    files = [("sentinel1", (sentinel1.filename, await sentinel1.read(), sentinel1.content_type or "image/tiff"))]
+    if sentinel2:
+        files.append(("sentinel2", (sentinel2.filename, await sentinel2.read(), sentinel2.content_type or "image/tiff")))
+    else:
+        for band in sentinel2_bands or []:
+            files.append(("sentinel2_bands", (band.filename, await band.read(), band.content_type or "image/tiff")))
+    try:
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            response = await client.post(f"{_SERVICES['fusion']}/upload", files=files)
+    except httpx.RequestError as exc:
+        log.error("Fusion service unavailable: %s", exc)
+        raise HTTPException(status_code=503, detail="Fusion service is unavailable.")
+    if response.status_code >= 400:
+        try:
+            detail = response.json().get("detail", "Fusion upload was rejected.")
+        except ValueError:
+            detail = "Fusion upload was rejected."
         raise HTTPException(status_code=response.status_code, detail=detail)
     return response.json()
 
