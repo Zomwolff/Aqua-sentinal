@@ -283,7 +283,7 @@ async def _correlate_sar_detection(detection: Dict[str, Any], pool, redis) -> No
         log.error("SAR correlation error: %s", e)
 
 
-async def run_dark_vessel_detector() -> None:
+async def run_dark_vessel_detector(on_heartbeat=None) -> None:
     """
     Main background coroutine. Runs two concurrent tasks:
       1. Periodic AIS-gap scanner (every SCAN_INTERVAL_S seconds)
@@ -306,6 +306,8 @@ async def run_dark_vessel_detector() -> None:
     last_gap_scan = 0.0
 
     while True:
+        if on_heartbeat is not None:
+            on_heartbeat()
         now = _time.time()
 
         if now - last_gap_scan >= SCAN_INTERVAL_S:

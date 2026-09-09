@@ -70,12 +70,16 @@ async def _worker_wrapper() -> None:
     while True:
         try:
             _state["heartbeat"] = time.time()
-            await run_dark_vessel_detector()
+            await run_dark_vessel_detector(on_heartbeat=_record_heartbeat)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             log.exception("Dark vessel detector crashed, restarting in 10s: %s", exc)
             await asyncio.sleep(10)
+
+
+def _record_heartbeat() -> None:
+    _state["heartbeat"] = time.time()
 
 
 app = FastAPI(title=SERVICE_NAME, version="1.0.0", lifespan=_lifespan)
