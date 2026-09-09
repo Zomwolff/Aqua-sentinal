@@ -73,7 +73,7 @@ services:
       <<: *depends-defaults
     environment:
       <<: *common-env
-      AIS_PROVIDER: ${AIS_PROVIDER:-aisstream}
+      AIS_PROVIDER: none
       AISSTREAM_API_KEY: ${AISSTREAM_API_KEY:-}
       VESSELAPI_API_KEY: ${VESSELAPI_API_KEY:-}
       VESSELAPI_BBOX_MIN_LAT: ${VESSELAPI_BBOX_MIN_LAT:-18.4}

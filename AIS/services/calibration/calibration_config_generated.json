@@ -1,0 +1,106 @@
+{
+  "version": "v2_bayesian_2024q1",
+  "generated_at": "2026-09-08T15:58:27.174742+00:00",
+  "thresholds": {
+    "sudden_stop_speed_threshold_kn": {
+      "value": 0.47392342836121676,
+      "unit": "knots",
+      "reasoning": "Speed above this threshold when not in port indicates sudden stop anomaly",
+      "confidence_interval": [
+        0.46121498162286223,
+        0.47941515057793666
+      ]
+    },
+    "erratic_course_variance_threshold_normalized": {
+      "value": 0.9451517088356535,
+      "unit": "normalized [0, 1] (1=maximally spread)",
+      "reasoning": "Normalized circular variance exceeding this indicates erratic course behavior",
+      "confidence_interval": [
+        0.8864346758038737,
+        0.9623273996751648
+      ],
+      "note": "This is a fix for the previous bug where 2500 was applied to normalized scale"
+    },
+    "loitering_score_threshold": {
+      "value": 0.8943811468281428,
+      "unit": "normalized [0, 1]",
+      "reasoning": "Loitering score exceeding this outside port indicates anomaly",
+      "confidence_interval": [
+        0.8407843848371512,
+        0.9257207246041105
+      ]
+    },
+    "ais_gap_threshold_minutes": {
+      "value": 141.90328229719177,
+      "unit": "minutes",
+      "reasoning": "Vessels silent longer than this (outside port) are flagged as dark",
+      "confidence_interval": [
+        130.21003969961401,
+        164.55195665100138
+      ]
+    }
+  },
+  "bayesian_parameters": {
+    "bayesian_prior_threat": {
+      "value": 0.3,
+      "reasoning": "Base rate of actual threats in population",
+      "count_positive": 150,
+      "count_total": 500
+    },
+    "trust_score_distribution_normal_operation": {
+      "mean": 0.8471685159182987,
+      "std": 0.10026397809598726,
+      "min": 0.5111571917343607,
+      "max": 1.0,
+      "percentile_25": 0.7801931223410999,
+      "percentile_50": 0.8474690623199141,
+      "percentile_75": 0.9259776622797689
+    },
+    "trust_score_distribution_loitering_anomaly": {
+      "mean": 0.6769874170103258,
+      "std": 0.17813688394699903,
+      "min": 0.34365009833610755,
+      "max": 0.9904583953853364,
+      "percentile_25": 0.5592811318987081,
+      "percentile_50": 0.6842082321885042,
+      "percentile_75": 0.8078171520810314
+    },
+    "trust_score_distribution_erratic_course": {
+      "mean": 0.7485458671517132,
+      "std": 0.1256783588166408,
+      "min": 0.5007855606349377,
+      "max": 1.0,
+      "percentile_25": 0.6468890214433027,
+      "percentile_50": 0.7697680730979151,
+      "percentile_75": 0.837380205761852
+    },
+    "trust_score_distribution_sudden_stop": {
+      "mean": 0.7259838732801172,
+      "std": 0.16486025457457723,
+      "min": 0.25894170480035794,
+      "max": 1.0,
+      "percentile_25": 0.6355051663387937,
+      "percentile_50": 0.7227636988373111,
+      "percentile_75": 0.8553016739190931
+    },
+    "trust_score_distribution_dark_vessel": {
+      "mean": 0.4786537419194899,
+      "std": 0.10914339006598861,
+      "min": 0.30484124671044294,
+      "max": 0.6960345504269928,
+      "percentile_25": 0.38063608622762324,
+      "percentile_50": 0.4738083953844556,
+      "percentile_75": 0.5615736082522202
+    },
+    "trust_score_distribution_sts_suspicious": {
+      "mean": 0.7015239973273715,
+      "std": 0.05989703321728715,
+      "min": 0.6022961319498755,
+      "max": 0.7915162030167635,
+      "percentile_25": 0.6382855360999085,
+      "percentile_50": 0.7195336565405407,
+      "percentile_75": 0.739159495531089
+    }
+  },
+  "model_parameters": {}
+}
