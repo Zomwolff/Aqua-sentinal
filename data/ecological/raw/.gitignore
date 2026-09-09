@@ -1,0 +1,19 @@
+# Large raw source files — not committed to git.
+# Re-acquire with: python scripts/acquire_ecological_data.py
+# All datasets are documented in data/ecological/manifest/manifest.json
+
+*.zip
+*.shp
+*.dbf
+*.shx
+*.prj
+*.cpg
+*.qpj
+*.tif
+*.tiff
+*.geotiff
+extracted/
+
+# Keep the directory structure
+!.gitignore
+!**/.gitkeep

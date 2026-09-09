@@ -13,6 +13,7 @@ FEATURE_KEYS = {
     "contrast",
     "homogeneity",
     "energy",
+    "asm",
     "correlation",
     "mean_backscatter",
     "std_backscatter",
@@ -73,6 +74,7 @@ def test_empty_region_returns_neutral_features():
     features = compute_glcm_features(raw, empty, levels=32)
     assert features["contrast"] == 0.0
     assert features["energy"] == 1.0
+    assert features["asm"] == 1.0
     assert features["homogeneity"] == 1.0
     assert features["mean_backscatter"] == 0.0
 
@@ -83,6 +85,18 @@ def test_nonfinite_masked_values_do_not_crash():
     raw[region][0:5] = np.nan
     features = compute_glcm_features(raw, region, levels=32)
     assert np.isfinite(list(features.values())).all()
+
+
+def test_energy_is_sqrt_of_asm():
+    # "energy" must be true Haralick energy (sqrt of ASM), not ASM itself.
+    # The legacy mislabeling stored ASM under the "energy" key; ASM is now
+    # preserved under its own key.
+    raw, region = _patch()
+    raw[region] = np.random.default_rng(6).normal(-5.0, 1.5, region.sum())
+    features = compute_glcm_features(raw, region, levels=32)
+    assert features["asm"] == pytest.approx(features["energy"] ** 2, rel=1e-9)
+    assert 0.0 <= features["energy"] <= 1.0
+    assert features["energy"] >= features["asm"] - 1e-12  # sqrt(x) >= x on [0,1]
 
 
 def test_quantization_levels_are_respected():

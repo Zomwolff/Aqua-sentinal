@@ -1,47 +1,27 @@
-x-backend-defaults: &backend-defaults
-  restart: unless-stopped
-  depends_on:
-    postgres:
-      condition: service_healthy
-    redis:
-      condition: service_healthy
-  networks:
-    - aqua-net
-  volumes:
-    - ./services/shared:/app/shared:ro
-  environment: &backend-env
-    POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
-    POSTGRES_PORT: 5432
-    POSTGRES_USER: ${POSTGRES_USER:-aqua_sentinel}
-    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me}
-    POSTGRES_DB: ${POSTGRES_DB:-aqua_sentinel}
-    REDIS_HOST: ${REDIS_HOST:-redis}
-    REDIS_PORT: ${REDIS_PORT:-6379}
-    PORT: ${PORT:-8000}
-    # AIS bounding box (Mumbai offshore)
-    AIS_BBOX_MIN_LAT: ${AIS_BBOX_MIN_LAT:-14.0}
-    AIS_BBOX_MIN_LON: ${AIS_BBOX_MIN_LON:-68.0}
-    AIS_BBOX_MAX_LAT: ${AIS_BBOX_MAX_LAT:-25.0}
-    AIS_BBOX_MAX_LON: ${AIS_BBOX_MAX_LON:-77.5}
-    # Analytics tuning
-    WINDOW_MINUTES: ${WINDOW_MINUTES:-15}
-    PROXIMITY_RADIUS_M: ${PROXIMITY_RADIUS_M:-1000}
-    # Anomaly detection
-    AIS_GAP_THRESHOLD_MINUTES: ${AIS_GAP_THRESHOLD_MINUTES:-30}
-    ERRATIC_COURSE_VARIANCE: ${ERRATIC_COURSE_VARIANCE:-2500}
-    LOITERING_THRESHOLD: ${LOITERING_THRESHOLD:-0.8}
-    # STS detection
-    STS_DISTANCE_THRESHOLD_M: ${STS_DISTANCE_THRESHOLD_M:-500}
-    STS_SPEED_THRESHOLD_KN: ${STS_SPEED_THRESHOLD_KN:-2.0}
-    STS_MIN_DURATION_MIN: ${STS_MIN_DURATION_MIN:-30}
-    # Spoof detection
-    MAX_PLAUSIBLE_AIS_ERROR_M: ${MAX_PLAUSIBLE_AIS_ERROR_M:-500}
-    MAX_PHYSICAL_SPEED_MS: ${MAX_PHYSICAL_SPEED_MS:-25.7}
-    # Risk engine
-    RISK_DECAY_RATE: ${RISK_DECAY_RATE:-0.05}
-    RISK_TIER_MEDIUM: ${RISK_TIER_MEDIUM:-20}
-    RISK_TIER_HIGH: ${RISK_TIER_HIGH:-50}
-    RISK_TIER_CRITICAL: ${RISK_TIER_CRITICAL:-75}
+x-common-env: &common-env
+  POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+  POSTGRES_PORT: 5432
+  POSTGRES_USER: ${POSTGRES_USER:-aqua_sentinel}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me}
+  POSTGRES_DB: ${POSTGRES_DB:-aqua_sentinel}
+  REDIS_HOST: ${REDIS_HOST:-redis}
+  REDIS_PORT: ${REDIS_PORT:-6379}
+  AIS_BBOX_MIN_LAT: ${AIS_BBOX_MIN_LAT:-14.0}
+  AIS_BBOX_MIN_LON: ${AIS_BBOX_MIN_LON:-68.0}
+  AIS_BBOX_MAX_LAT: ${AIS_BBOX_MAX_LAT:-25.0}
+  AIS_BBOX_MAX_LON: ${AIS_BBOX_MAX_LON:-77.5}
+
+# Shared by sar (Sentinel-1) and eo (Sentinel-2) — both talk to the same GEE
+# service account.
+x-gee-env: &gee-env
+  GEE_SERVICE_ACCOUNT: ${GEE_SERVICE_ACCOUNT:-}
+  GEE_PRIVATE_KEY_PATH: ${GEE_PRIVATE_KEY_PATH:-/run/secrets/gee-key.json}
+
+x-depends-defaults: &depends-defaults
+  postgres:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
 
 services:
 
@@ -58,6 +38,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./infra/postgres/migrations:/docker-entrypoint-initdb.d/migrations:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aqua_sentinel} -d ${POSTGRES_DB:-aqua_sentinel}"]
       interval: 5s
@@ -83,307 +64,149 @@ services:
     networks:
       - aqua-net
 
-  data-ingestion:
-    <<: *backend-defaults
+  ais:
     build:
       context: .
-      dockerfile: services/data-ingestion/Dockerfile
+      dockerfile: docker/ais/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      <<: *depends-defaults
     environment:
-      <<: *backend-env
-      SERVICE_NAME: data-ingestion
-      AIS_PROVIDER: none          # HTTP-only; actual AIS reading is done by ais-reader
-      AISSTREAM_API_KEY: ${AISSTREAM_API_KEY:-}
-      INJECT_SYNTHETIC: ${INJECT_SYNTHETIC:-false}
-      SAR_ALLOW_MOCK_FALLBACK: ${SAR_ALLOW_MOCK_FALLBACK:-false}
-      # Earth Engine service-account credentials (GEE). The secret value is read
-      # from .env (git-ignored); the key file is mounted read-only at runtime.
-      GEE_SERVICE_ACCOUNT: ${GEE_SERVICE_ACCOUNT:-}
-      GEE_PRIVATE_KEY_PATH: ${GEE_PRIVATE_KEY_PATH:-/run/secrets/gee-key.json}
-    # Override the default ./services/shared: mount: data-ingestion needs the
-    # canonical shared/spatial plus shared.db as a MODULE (services/shared/
-    # db.py). The db/ package is intentionally not mounted to avoid a
-    # module/package collision with the services/shared/db.py module.
-    # Mount sar-scene-artifacts so downloaded SAR rasters are visible to
-    # sar-spill-intelligence and lookalike-engine.
-    volumes:
-      - ./shared/spatial:/app/shared/spatial:ro
-      - ./shared/__init__.py:/app/shared/__init__.py:ro
-      - ./services/shared/redis_client.py:/app/shared/redis_client.py:ro
-      - ./services/shared/db.py:/app/shared/db.py:ro
-      - ./services/shared/geo_utils.py:/app/shared/geo_utils.py:ro
-      - ./services/shared/models.py:/app/shared/models.py:ro
-      - ./secret/gee-key.json:/run/secrets/gee-key.json:ro
-      - sar-scene-artifacts:/data/artifacts
-    ports:
-      - "8001:8000"
-
-  ais-reader:
-    <<: *backend-defaults
-    build:
-      context: .
-      dockerfile: AIS/services/ais-reader/Dockerfile
-    environment:
-      <<: *backend-env
-      SERVICE_NAME: ais-reader
+      <<: *common-env
       AIS_PROVIDER: ${AIS_PROVIDER:-aisstream}
-      AISSTREAM_API_KEY: ${AISSTREAM_API_KEY:-}   # secret — provide via .env only
+      AISSTREAM_API_KEY: ${AISSTREAM_API_KEY:-}
       VESSELAPI_API_KEY: ${VESSELAPI_API_KEY:-}
       VESSELAPI_BBOX_MIN_LAT: ${VESSELAPI_BBOX_MIN_LAT:-18.4}
       VESSELAPI_BBOX_MIN_LON: ${VESSELAPI_BBOX_MIN_LON:-71.5}
       VESSELAPI_BBOX_MAX_LAT: ${VESSELAPI_BBOX_MAX_LAT:-19.8}
       VESSELAPI_BBOX_MAX_LON: ${VESSELAPI_BBOX_MAX_LON:-73.0}
       VESSELAPI_POLL_INTERVAL_SECONDS: ${VESSELAPI_POLL_INTERVAL_SECONDS:-60}
-    restart: unless-stopped
-
-  ais-analytics:
-    <<: *backend-defaults
-    build:
-      context: .
-      dockerfile: AIS/services/ais-analytics/Dockerfile
-    environment:
-      <<: *backend-env
-      SERVICE_NAME: ais-analytics
-    ports:
-      - "8002:8000"
-
-  anomaly-detection:
-    <<: *backend-defaults
-    build:
-      context: .
-      dockerfile: AIS/services/anomaly-detection/Dockerfile
-    environment:
-      <<: *backend-env
-      SERVICE_NAME: anomaly-detection
-      ML_MODEL_DIR: /data/models
-      ML_TRAIN_INTERVAL_S: ${ML_TRAIN_INTERVAL_S:-3600}
-      ML_MAX_MODEL_AGE_H: ${ML_MAX_MODEL_AGE_H:-25}
-      ML_MIN_SAMPLES: ${ML_MIN_SAMPLES:-100}
-    volumes:
-      - ./services/shared:/app/shared:ro
-      - ml-models:/data/models
-    ports:
-      - "8003:8000"
-
-  dark-vessel-detection:
-    <<: *backend-defaults
-    build:
-      context: .
-      dockerfile: AIS/services/dark-vessel-detection/Dockerfile
-    environment:
-      <<: *backend-env
-      SERVICE_NAME: dark-vessel-detection
+      WINDOW_MINUTES: ${WINDOW_MINUTES:-15}
+      PROXIMITY_RADIUS_M: ${PROXIMITY_RADIUS_M:-1000}
+      AIS_GAP_THRESHOLD_MINUTES: ${AIS_GAP_THRESHOLD_MINUTES:-30}
+      ERRATIC_COURSE_VARIANCE: ${ERRATIC_COURSE_VARIANCE:-2500}
+      LOITERING_THRESHOLD: ${LOITERING_THRESHOLD:-0.8}
+      STS_DISTANCE_THRESHOLD_M: ${STS_DISTANCE_THRESHOLD_M:-500}
+      STS_SPEED_THRESHOLD_KN: ${STS_SPEED_THRESHOLD_KN:-2.0}
+      STS_MIN_DURATION_MIN: ${STS_MIN_DURATION_MIN:-30}
+      MAX_PLAUSIBLE_AIS_ERROR_M: ${MAX_PLAUSIBLE_AIS_ERROR_M:-500}
+      MAX_PHYSICAL_SPEED_MS: ${MAX_PHYSICAL_SPEED_MS:-25.7}
       DARK_VESSEL_GAP_MINUTES: ${DARK_VESSEL_GAP_MINUTES:-90}
       DARK_VESSEL_SCAN_INTERVAL_S: ${DARK_VESSEL_SCAN_INTERVAL_S:-300}
       DARK_VESSEL_MAX_MATCH_DISTANCE_M: ${DARK_VESSEL_MAX_MATCH_DISTANCE_M:-5000}
       DARK_VESSEL_MAX_MATCH_TIME_S: ${DARK_VESSEL_MAX_MATCH_TIME_S:-1800}
-    ports:
-      - "8004:8000"
+      RISK_DECAY_RATE: ${RISK_DECAY_RATE:-0.05}
+      RISK_TIER_MEDIUM: ${RISK_TIER_MEDIUM:-20}
+      RISK_TIER_HIGH: ${RISK_TIER_HIGH:-50}
+      RISK_TIER_CRITICAL: ${RISK_TIER_CRITICAL:-75}
+      ML_TRAIN_INTERVAL_S: ${ML_TRAIN_INTERVAL_S:-3600}
+      ML_MAX_MODEL_AGE_H: ${ML_MAX_MODEL_AGE_H:-25}
+      ML_MIN_SAMPLES: ${ML_MIN_SAMPLES:-100}
+    volumes:
+      - ml-models:/data/models
+    networks:
+      - aqua-net
 
-  ais-spoof-detection:
-    <<: *backend-defaults
+  sar:
     build:
       context: .
-      dockerfile: AIS/services/ais-spoof-detection/Dockerfile
+      dockerfile: docker/sar/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      <<: *depends-defaults
     environment:
-      <<: *backend-env
-      SERVICE_NAME: ais-spoof-detection
-    ports:
-      - "8005:8000"
-
-  sts-detection:
-    <<: *backend-defaults
-    build:
-      context: .
-      dockerfile: AIS/services/sts-detection/Dockerfile
-    environment:
-      <<: *backend-env
-      SERVICE_NAME: sts-detection
-    ports:
-      - "8006:8000"
-
-  vessel-risk-engine:
-    <<: *backend-defaults
-    build:
-      context: .
-      dockerfile: AIS/services/vessel-risk-engine/Dockerfile
-    environment:
-      <<: *backend-env
-      SERVICE_NAME: vessel-risk-engine
-    ports:
-      - "8007:8000"
-
-  sar-spill-intelligence:
-    <<: *backend-defaults
-    build:
-      context: .
-      dockerfile: sar/sar-spill-intelligence/Dockerfile
-    environment:
-      <<: *backend-env
-      SERVICE_NAME: sar-spill-intelligence
+      <<: [*common-env, *gee-env]
+      AIS_PROVIDER: none
+      INJECT_SYNTHETIC: ${INJECT_SYNTHETIC:-false}
+      SAR_ALLOW_MOCK_FALLBACK: ${SAR_ALLOW_MOCK_FALLBACK:-false}
       SAR_MIN_AREA_M2: ${SAR_MIN_AREA_M2:-}
       SAR_BRIGHT_TARGET_THRESHOLD: ${SAR_BRIGHT_TARGET_THRESHOLD:-}
       SAR_ARTIFACT_ROOT: ${SAR_ARTIFACT_ROOT:-/data/artifacts}
       SAR_CFAR_K: ${SAR_CFAR_K:-2.5}
-    # Override the default ./services/shared:/app/shared mount: the SAR service
-    # needs the canonical top-level shared package (shared/spatial, shared/db)
-    # together with the AIS-pipeline shared modules, merged into one /app/shared.
     volumes:
-      - ./shared/spatial:/app/shared/spatial:ro
-      - ./shared/db:/app/shared/db:ro
-      - ./shared/__init__.py:/app/shared/__init__.py:ro
-      - ./services/shared/redis_client.py:/app/shared/redis_client.py:ro
-      - ./services/shared/geo_utils.py:/app/shared/geo_utils.py:ro
-      - ./services/shared/models.py:/app/shared/models.py:ro
-      - ./services/shared/artifacts.py:/app/shared/artifacts.py:ro
+      - ./secret/gee-key.json:/run/secrets/gee-key.json:ro
       - sar-scene-artifacts:/data/artifacts
-    ports:
-      - "8008:8000"
+    networks:
+      - aqua-net
 
-  lookalike-engine:
-    <<: *backend-defaults
+  # ── eo: the real, ready-to-run model — Sentinel-2 10-band CNN ────────────
+  eo:
     build:
       context: .
-      dockerfile: services/lookalike-engine/Dockerfile
+      dockerfile: docker/eo/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      <<: *depends-defaults
     environment:
-      <<: *backend-env
-      SERVICE_NAME: lookalike-engine
-      SAR_ARTIFACT_ROOT: ${SAR_ARTIFACT_ROOT:-/data/artifacts}
-    # Override the default ./services/shared:/app/shared mount: this service
-    # needs the canonical top-level shared package (shared/spatial, shared/db)
-    # together with the AIS-pipeline shared modules, merged into one /app/shared.
+      <<: [*common-env, *gee-env]
+      EO_CLOUD_PCT_MAX: ${EO_CLOUD_PCT_MAX:-20}
+      EO_SEARCH_WINDOW_DAYS: ${EO_SEARCH_WINDOW_DAYS:-5}
+      EO_EXPORT_SCALE_M: ${EO_EXPORT_SCALE_M:-10}
     volumes:
-      - ./shared/spatial:/app/shared/spatial:ro
-      - ./shared/db:/app/shared/db:ro
-      - ./shared/__init__.py:/app/shared/__init__.py:ro
-      - ./services/shared/redis_client.py:/app/shared/redis_client.py:ro
-      - ./services/shared/geo_utils.py:/app/shared/geo_utils.py:ro
-      - ./services/shared/models.py:/app/shared/models.py:ro
-      - ./services/shared/artifacts.py:/app/shared/artifacts.py:ro
-      - sar-scene-artifacts:/data/artifacts
+      - ./secret/gee-key.json:/run/secrets/gee-key.json:ro
+      - sar-scene-artifacts:/data/artifacts   # writes under /data/artifacts/eo
     ports:
-      - "8009:8000"
+      - "8016:8016"
+    networks:
+      - aqua-net
 
-  evidence-fusion:
-    <<: *backend-defaults
+  backend:
     build:
       context: .
-      dockerfile: services/evidence-fusion/Dockerfile
+      dockerfile: docker/backend/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      <<: *depends-defaults
+      ais:
+        condition: service_started
+      sar:
+        condition: service_started
+      eo:
+        condition: service_started
     environment:
-      <<: *backend-env
-      SERVICE_NAME: evidence-fusion
+      <<: *common-env
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-*}
+      DASHBOARD_ORIGINS: "*"
       EVIDENCE_SPATIAL_WINDOW_M: ${EVIDENCE_SPATIAL_WINDOW_M:-5000}
       EVIDENCE_TEMPORAL_WINDOW_HOURS: ${EVIDENCE_TEMPORAL_WINDOW_HOURS:-6}
-    # Override the default ./services/shared:/app/shared mount: this service
-    # needs the canonical top-level shared package (shared/spatial, shared/db)
-    # together with the AIS-pipeline shared modules, merged into one /app/shared.
-    volumes:
-      - ./shared/spatial:/app/shared/spatial:ro
-      - ./shared/db:/app/shared/db:ro
-      - ./shared/__init__.py:/app/shared/__init__.py:ro
-      - ./services/shared/redis_client.py:/app/shared/redis_client.py:ro
-      - ./services/shared/geo_utils.py:/app/shared/geo_utils.py:ro
-      - ./services/shared/models.py:/app/shared/models.py:ro
-      - ./services/shared/artifacts.py:/app/shared/artifacts.py:ro
-    ports:
-      - "8010:8000"
-
-  source-attribution:
-    <<: *backend-defaults
-    build:
-      context: .
-      dockerfile: services/source-attribution/Dockerfile
-    environment:
-      <<: *backend-env
-      SERVICE_NAME: source-attribution
       ATTRIBUTION_SPATIAL_WINDOW_M: ${ATTRIBUTION_SPATIAL_WINDOW_M:-20000}
       ATTRIBUTION_TEMPORAL_WINDOW_H: ${ATTRIBUTION_TEMPORAL_WINDOW_H:-6.0}
-    # Override shared mount: needs canonical shared/db/ + shared/spatial/ packages
-    volumes:
-      - ./shared/db:/app/shared/db:ro
-      - ./shared/spatial:/app/shared/spatial:ro
-      - ./shared/__init__.py:/app/shared/__init__.py:ro
-      - ./services/shared/redis_client.py:/app/shared/redis_client.py:ro
-    ports:
-      - "8011:8000"
-
-  drift-forecast:
-    <<: *backend-defaults
-    build:
-      context: .
-      dockerfile: services/drift-forecast/Dockerfile
-    environment:
-      <<: *backend-env
-      SERVICE_NAME: drift-forecast
-    # Override shared mount: needs canonical shared/db/ + shared/spatial/ packages
-    volumes:
-      - ./shared/db:/app/shared/db:ro
-      - ./shared/spatial:/app/shared/spatial:ro
-      - ./shared/__init__.py:/app/shared/__init__.py:ro
-      - ./services/shared/redis_client.py:/app/shared/redis_client.py:ro
-    ports:
-      - "8012:8000"
-
-  severity-impact:
-    <<: *backend-defaults
-    build:
-      context: .
-      dockerfile: services/severity-impact/Dockerfile
-    environment:
-      <<: *backend-env
-      SERVICE_NAME: severity-impact
+      ATTRIBUTION_W_DISTANCE: ${ATTRIBUTION_W_DISTANCE:-0.25}
+      ATTRIBUTION_W_TRAJECTORY: ${ATTRIBUTION_W_TRAJECTORY:-0.25}
+      ATTRIBUTION_W_TIME: ${ATTRIBUTION_W_TIME:-0.20}
+      ATTRIBUTION_W_BEHAVIOR: ${ATTRIBUTION_W_BEHAVIOR:-0.15}
+      ATTRIBUTION_W_WIND: ${ATTRIBUTION_W_WIND:-0.15}
       SEVERITY_AREA_SATURATION_M2: ${SEVERITY_AREA_SATURATION_M2:-10000000}
       SEVERITY_PROTECTED_RADIUS_M: ${SEVERITY_PROTECTED_RADIUS_M:-10000}
       SEVERITY_COAST_RADIUS_M: ${SEVERITY_COAST_RADIUS_M:-20000}
-    # Override shared mount: needs canonical shared/db/ + shared/spatial/ packages
+      TASKING_DEDUP_HOURS: ${TASKING_DEDUP_HOURS:-6}
+      # drift-forecast (oil-spread v2 physics)
+      DRIFT_ENSEMBLE_PARTICLES: ${DRIFT_ENSEMBLE_PARTICLES:-500}
+      DRIFT_DIFFUSIVITY_M2_S: ${DRIFT_DIFFUSIVITY_M2_S:-10.0}
+      OIL_DENSITY_KG_M3: ${OIL_DENSITY_KG_M3:-850}
+      OIL_KINEMATIC_VISCOSITY_M2_S: ${OIL_KINEMATIC_VISCOSITY_M2_S:-0.00005}
+      OIL_WATER_INTERFACIAL_TENSION_N_M: ${OIL_WATER_INTERFACIAL_TENSION_N_M:-0.02}
+      WATER_DENSITY_KG_M3: ${WATER_DENSITY_KG_M3:-1025}
+      WINDAGE_MIN_PERCENT: ${WINDAGE_MIN_PERCENT:-1.0}
+      WINDAGE_MAX_PERCENT: ${WINDAGE_MAX_PERCENT:-4.0}
+      WINDAGE_RESAMPLE_INTERVAL_S: ${WINDAGE_RESAMPLE_INTERVAL_S:-900}
+      WIND_DEFLECTION_ENABLED: ${WIND_DEFLECTION_ENABLED:-false}
+      WIND_DEFLECTION_DEG: ${WIND_DEFLECTION_DEG:-20.0}
     volumes:
-      - ./shared/db:/app/shared/db:ro
-      - ./shared/spatial:/app/shared/spatial:ro
-      - ./shared/__init__.py:/app/shared/__init__.py:ro
-      - ./services/shared/redis_client.py:/app/shared/redis_client.py:ro
-    ports:
-      - "8013:8000"
-
-  response-decision:
-    <<: *backend-defaults
-    build:
-      context: .
-      dockerfile: services/response-decision/Dockerfile
-    environment:
-      <<: *backend-env
-      SERVICE_NAME: response-decision
-    # Override shared mount: needs canonical shared/db/ + shared/spatial/ packages
-    volumes:
-      - ./shared/db:/app/shared/db:ro
-      - ./shared/spatial:/app/shared/spatial:ro
-      - ./shared/__init__.py:/app/shared/__init__.py:ro
-      - ./services/shared/redis_client.py:/app/shared/redis_client.py:ro
-    ports:
-      - "8014:8000"
-
-  api-gateway:
-    <<: *backend-defaults
-    build:
-      context: .
-      dockerfile: AIS/services/api-gateway/Dockerfile
-    environment:
-      <<: *backend-env
-      SERVICE_NAME: api-gateway
-      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-*}
-      DASHBOARD_ORIGINS: "*"
-    volumes:
-      - ./shared/spatial:/app/shared/spatial:ro
       - sar-scene-artifacts:/data/artifacts:ro
     ports:
-      - "8015:8000"
+      - "8015:8015"
+    networks:
+      - aqua-net
 
-  dashboard:
+  frontend:
     build:
       context: ./frontend
       args:
         VITE_API_URL: ${VITE_API_URL:-}
     restart: unless-stopped
     depends_on:
-      api-gateway:
+      backend:
         condition: service_started
     ports:
       - "3000:80"
@@ -393,8 +216,9 @@ services:
   simulator:
     build: ./simulator
     restart: unless-stopped
+    profiles: ["tools"]
     depends_on:
-      data-ingestion:
+      ais:
         condition: service_started
     volumes:
       - ./data:/data:ro

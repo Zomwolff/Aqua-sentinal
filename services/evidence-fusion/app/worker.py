@@ -50,6 +50,12 @@ CONSUMER_GROUP = "evidence-fusion"
 VESSEL_RISK_STREAM = "vessel.risk"
 FILTERED_STREAM = "spill.candidates.filtered"
 FUSED_STREAM = "incident.fused"
+# Published by the `eo` service once its (async, possibly slow, possibly
+# never-arriving) Sentinel-2 check resolves for a candidate. Fusion itself
+# never waits on this — see fuse_evidence()'s docstring — this is late
+# enrichment only, for consumers that want to react when it does arrive.
+OPTICAL_STREAM = "optical.confirmed"
+ENRICHED_STREAM = "incident.enriched"
 
 STATE: Dict[str, Any] = {
     "heartbeat": None,
@@ -142,6 +148,25 @@ async def _fetch_environment(
     }
 
 
+def _optical_from_row(row) -> Dict[str, Any]:
+    """Best-effort optical evidence from the spill_candidates row.
+
+    Usually still empty at fusion time (see fuse_evidence's docstring) — the
+    eo service runs asynchronously and may take minutes (or find no
+    cloud-free scene at all). That is expected, not an error.
+    """
+    checked_at = row["optical_checked_at"] if row is not None else None
+    if checked_at is None:
+        return {"checked": False, "cloud_free": None, "oil_probability": None, "predicted_class": None}
+    return {
+        "checked": True,
+        "cloud_free": row["optical_cloud_free"],
+        "oil_probability": float(row["optical_oil_probability"]) if row["optical_oil_probability"] is not None else None,
+        "predicted_class": row["optical_predicted_class"],
+        "checked_at": checked_at.isoformat(),
+    }
+
+
 async def _handle_filtered_candidate(data: Dict[str, Any], pool, redis) -> None:
     """Fuse one spill.candidates.filtered message and publish incident.fused."""
     candidate = _candidate_from_payload(data)
@@ -155,7 +180,7 @@ async def _handle_filtered_candidate(data: Dict[str, Any], pool, redis) -> None:
         # error for other candidates, but no geometry means no correlation.
         log.warning("candidate %s not found in spill_candidates; skipping fusion", candidate_id)
         STATE["candidates_fused"] += 1
-        fused = fuse_evidence(candidate, None)
+        fused = fuse_evidence(candidate, None, optical=_optical_from_row(None))
         await publish_to_stream(redis, FUSED_STREAM, fused)
         STATE["last_candidate_id"] = candidate_id
         STATE["last_processed_at"] = datetime.now(timezone.utc).isoformat()
@@ -215,6 +240,7 @@ async def _handle_filtered_candidate(data: Dict[str, Any], pool, redis) -> None:
         area_m2=float(candidate.get("area_m2", area_m2)) if candidate.get("area_m2", area_m2) is not None else None,
         geom_geojson=candidate.get("geom_geojson", geom_geojson),
         environment=environment,
+        optical=_optical_from_row(row),
     )
     await publish_to_stream(redis, FUSED_STREAM, fused)
 
@@ -227,6 +253,30 @@ async def _handle_filtered_candidate(data: Dict[str, Any], pool, redis) -> None:
         candidate_id,
         len(candidates),
     )
+
+
+async def _process_optical_message(data: Dict[str, Any], pool=None, redis=None) -> None:
+    """Late enrichment: the eo service resolved (or gave up on) a candidate.
+
+    spill_candidates itself was already updated directly by the eo service
+    (it owns those columns); this just tells anyone downstream who already
+    reacted to the original incident.fused that optical evidence is now
+    available, without re-running vessel correlation or re-publishing a full
+    incident.fused record.
+    """
+    STATE["optical_messages"] = STATE.get("optical_messages", 0) + 1
+    candidate_id = data.get("candidate_id")
+    if candidate_id is None or redis is None:
+        return
+    await publish_to_stream(redis, ENRICHED_STREAM, {
+        "candidate_id": str(candidate_id),
+        "optical": {
+            "checked": True,
+            "cloud_free": _as_bool(data.get("cloud_free"), default=False) if "cloud_free" in data else None,
+            "oil_probability": float(data["oil_probability"]) if data.get("oil_probability") is not None else None,
+            "predicted_class": data.get("predicted_class"),
+        },
+    })
 
 
 async def _process_filtered_message(data: Dict[str, Any], pool, redis) -> None:
@@ -250,7 +300,7 @@ async def run_evidence_worker() -> None:
     """Consume vessel.risk and spill.candidates.filtered (shared pattern)."""
     pool = await create_pool()
     redis = await get_redis()
-    for stream in (VESSEL_RISK_STREAM, FILTERED_STREAM):
+    for stream in (VESSEL_RISK_STREAM, FILTERED_STREAM, OPTICAL_STREAM):
         await ensure_consumer_group(redis, stream, CONSUMER_GROUP)
     spatial_m, temporal_hours = correlation_windows()
     log.info(
@@ -265,6 +315,7 @@ async def run_evidence_worker() -> None:
         for stream, handler, consumer in (
             (VESSEL_RISK_STREAM, _process_vessel_risk_message, "evidence-vessel-risk"),
             (FILTERED_STREAM, _process_filtered_message, "evidence-filtered"),
+            (OPTICAL_STREAM, _process_optical_message, "evidence-optical"),
         ):
             messages = await consume_stream(
                 redis,

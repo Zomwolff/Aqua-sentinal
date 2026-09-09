@@ -4,10 +4,13 @@ recommendations, persists to response_recommendations, publishes to spill.respon
 """
 from __future__ import annotations
 import asyncio, logging, sys, time
+import json
 from typing import Any, Dict, Optional
 sys.path.insert(0, "/app")
 from shared.db.connection import create_pool
 from shared.redis_client import consume_stream, ensure_consumer_group, get_redis, publish_to_stream
+from app.cost_model import project_cost
+from app.dispatch import find_nearest_certified_vessels
 from app.rules import generate_recommendations
 
 log = logging.getLogger(__name__)
@@ -65,6 +68,21 @@ async def _fetch_3h_forecast(pool, spill_id: str):
     return None, None
 
 
+async def _fetch_incident_area(pool, spill_id: str) -> float:
+    row = await pool.fetchrow(
+        "SELECT area_km2 FROM spill_incidents WHERE id = $1", spill_id
+    )
+    return float(row["area_km2"] or 0.0) if row else 0.0
+
+
+def _landfall_eta(coast_distance_m: float) -> str:
+    if coast_distance_m > 20_000:
+        return "offshore"
+    if coast_distance_m >= 2_000:
+        return "6h"
+    return "1h"
+
+
 async def _process(data: Dict[str, Any], pool, redis) -> None:
     spill_id        = str(data.get("spill_id") or "")
     spill_lat       = _float(data.get("spill_lat"))
@@ -108,10 +126,38 @@ async def _process(data: Dict[str, Any], pool, redis) -> None:
         except Exception as e:
             log.error("response_recommendations insert failed spill=%s: %s", spill_id, e)
 
+    projection_written = False
+    # Cost/dispatch is deliberately isolated: a missing migration or empty
+    # certified-vessel table must never block the core recommendation path.
+    try:
+        area_km2 = await _fetch_incident_area(pool, spill_id)
+        projection = project_cost(area_km2, severity_level, population_risk)
+        matched_vessels = await find_nearest_certified_vessels(
+            pool, spill_lat, spill_lon
+        )
+        await pool.execute(
+            """
+            INSERT INTO cost_projections
+                (spill_id, nosdcp_tier, estimated_volume_tonnes,
+                 point_usd, low_usd, high_usd, point_inr, low_inr, high_inr,
+                 cost_curve, matched_vessels, landfall_eta)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12)
+            """,
+            spill_id, projection["nosdcp_tier"], projection["estimated_volume_tonnes"],
+            projection["point_usd"], projection["low_usd"], projection["high_usd"],
+            projection["point_inr"], projection["low_inr"], projection["high_inr"],
+            json.dumps(projection["cost_curve"]), json.dumps(matched_vessels),
+            _landfall_eta(coast_dist),
+        )
+        projection_written = True
+    except Exception as exc:
+        log.exception("Cost/dispatch projection failed spill=%s: %s", spill_id, exc)
+
     await publish_to_stream(redis, OUTPUT_STREAM, {
         "spill_id": spill_id, "severity_level": severity_level,
         "recommendations_count": len(recs),
         "top_priority": recs[0]["priority"] if recs else "LOW",
+        "cost_projection_written": projection_written,
         "is_synthetic": is_synthetic,
     })
     STATE["spills_processed"] += 1

@@ -58,14 +58,19 @@ async def health():
 
 @app.get("/forecasts/{spill_id}")
 async def get_forecasts(spill_id: str):
-    """All forecast horizons for a spill, with GeoJSON geometries."""
+    """All forecast horizons for a spill, with GeoJSON geometries and V2 separated physics metrics."""
     pool = get_pool()
     rows = await pool.fetch(
         """
         SELECT horizon_hours, forecast_time, generated_at,
                confidence, model_version,
                ST_AsGeoJSON(geom)::text AS geom_json,
-               ST_Area(geom::geography) AS area_m2
+               ST_AsGeoJSON(probability_50_geom)::text AS prob50_json,
+               ST_AsGeoJSON(probability_90_geom)::text AS prob90_json,
+               ST_Area(geom::geography) AS area_m2,
+               drift_distance_m, drift_velocity_ms, drift_bearing_deg,
+               physical_area_m2, physical_radius_m, expansion_ratio, spread_rate_m2_per_hour,
+               uncertainty_rms_m, uncertainty_std_east_m, uncertainty_std_north_m
         FROM forecasts
         WHERE spill_id = $1
         ORDER BY horizon_hours ASC
@@ -84,6 +89,21 @@ async def get_forecasts(spill_id: str):
             "model_version": r["model_version"],
             "area_m2":       float(r["area_m2"]) if r["area_m2"] else None,
             "geometry":      _json.loads(r["geom_json"]) if r["geom_json"] else None,
+            "probability_50_geometry": _json.loads(r["prob50_json"]) if r["prob50_json"] else None,
+            "probability_90_geometry": _json.loads(r["prob90_json"]) if r["prob90_json"] else None,
+            # V2 drift metrics
+            "drift_distance_m": float(r["drift_distance_m"]) if r["drift_distance_m"] else None,
+            "drift_velocity_ms": float(r["drift_velocity_ms"]) if r["drift_velocity_ms"] else None,
+            "drift_bearing_deg": float(r["drift_bearing_deg"]) if r["drift_bearing_deg"] else None,
+            # V2 physical spreading metrics
+            "physical_area_m2": float(r["physical_area_m2"]) if r["physical_area_m2"] else None,
+            "physical_radius_m": float(r["physical_radius_m"]) if r["physical_radius_m"] else None,
+            "expansion_ratio": float(r["expansion_ratio"]) if r["expansion_ratio"] else None,
+            "spread_rate_m2_per_hour": float(r["spread_rate_m2_per_hour"]) if r["spread_rate_m2_per_hour"] else None,
+            # V2 uncertainty metrics
+            "uncertainty_rms_m": float(r["uncertainty_rms_m"]) if r["uncertainty_rms_m"] else None,
+            "uncertainty_std_east_m": float(r["uncertainty_std_east_m"]) if r["uncertainty_std_east_m"] else None,
+            "uncertainty_std_north_m": float(r["uncertainty_std_north_m"]) if r["uncertainty_std_north_m"] else None,
         }
         for r in rows
     ])

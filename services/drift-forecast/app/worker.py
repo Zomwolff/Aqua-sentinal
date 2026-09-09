@@ -1,6 +1,12 @@
 """
 Drift Forecast worker — consumes spill.attributed, runs Lagrangian drift
 model, persists forecast polygons to the forecasts table.
+
+V2 CHANGES:
+- Separated drift, physical spreading, and uncertainty
+- Stores detailed metrics for each component
+- Wind deflection now optional/configurable
+- Windage sampled per particle (1-4% range)
 """
 from __future__ import annotations
 
@@ -30,7 +36,7 @@ CONSUMER_NAME  = "df-worker"
 INPUT_STREAM   = "spill.attributed"
 OUTPUT_STREAM  = "spill.forecast"
 MODEL_VERSION  = "1.0"          # analytic single-vector model
-ENSEMBLE_MODEL_VERSION = "2.0-particle-ensemble"
+ENSEMBLE_MODEL_VERSION = "2.0-separated-physics"  # V2: clarified model version
 
 # Minimum environmental samples required to trust the time-varying ensemble;
 # below this the analytic model is used (documented fallback, not a shortcut).
@@ -187,17 +193,50 @@ async def _process_spill_attributed(
         from datetime import timedelta
         forecast_time = acq + timedelta(hours=fc["horizon_hours"])
         try:
+            # V2: Store separated drift, physical spreading, and uncertainty metrics
             await pool.execute(
                 """
                 INSERT INTO forecasts
                     (spill_id, forecast_time, generated_at, horizon_hours,
-                     geom, model_version, confidence)
+                     geom, model_version, confidence,
+                     drift_distance_m, drift_velocity_ms, drift_bearing_deg,
+                     physical_area_m2, physical_radius_m, expansion_ratio, spread_rate_m2_per_hour,
+                     uncertainty_rms_m, uncertainty_std_east_m, uncertainty_std_north_m,
+                     probability_50_geom, probability_90_geom, convex_hull_geom,
+                     oil_properties, windage_range)
                 VALUES ($1, $2, NOW(), $3,
                         ST_SetSRID(ST_GeomFromText($4), 4326),
-                        $5, $6)
+                        $5, $6,
+                        $7, $8, $9,
+                        $10, $11, $12, $13,
+                        $14, $15, $16,
+                        CASE WHEN $17 != '' AND $17 IS NOT NULL THEN ST_SetSRID(ST_GeomFromText($17), 4326) ELSE NULL END,
+                        CASE WHEN $18 != '' AND $18 IS NOT NULL THEN ST_SetSRID(ST_GeomFromText($18), 4326) ELSE NULL END,
+                        CASE WHEN $19 != '' AND $19 IS NOT NULL THEN ST_SetSRID(ST_GeomFromText($19), 4326) ELSE NULL END,
+                        $20::jsonb, $21::numeric[])
                 """,
                 spill_id, forecast_time, fc["horizon_hours"],
                 fc["polygon_wkt"], model_version, fc["confidence"],
+                # Drift metrics
+                fc.get("drift_distance_m"),
+                fc.get("drift_velocity_ms"),
+                fc.get("drift_bearing_deg"),
+                # Physical spreading
+                fc.get("physical_area_m2"),
+                fc.get("physical_radius_m"),
+                fc.get("expansion_ratio"),
+                fc.get("spread_rate_m2_per_hour"),
+                # Uncertainty
+                fc.get("uncertainty_rms_m"),
+                fc.get("uncertainty_std_east_m"),
+                fc.get("uncertainty_std_north_m"),
+                # Probability geometries (convert empty strings to None)
+                fc.get("probability_50_wkt") if fc.get("probability_50_wkt") else None,
+                fc.get("probability_90_wkt") if fc.get("probability_90_wkt") else None,
+                fc.get("convex_hull_wkt") if fc.get("convex_hull_wkt") else None,
+                # Metadata
+                json.dumps(fc.get("oil_properties")) if fc.get("oil_properties") else None,
+                fc.get("windage_range"),
             )
             STATE["forecasts_written"] += 1
         except Exception as e:

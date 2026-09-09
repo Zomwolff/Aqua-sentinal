@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+python-multipart
+redis[hiredis]
+asyncpg
+pydantic>=2.0
+numpy
+matplotlib
+earthengine-api
+google-api-python-client
+google-auth

@@ -52,7 +52,11 @@ def candidate_lookup_sql() -> str:
                ST_Y(ST_Centroid(geom)) AS centroid_lat,
                area_m2,
                ST_AsGeoJSON(geom) AS geom_geojson,
-               acquisition_time
+               acquisition_time,
+               optical_oil_probability,
+               optical_predicted_class,
+               optical_cloud_free,
+               optical_checked_at
         FROM spill_candidates
         WHERE candidate_id = $1
     """
@@ -212,6 +216,7 @@ def fuse_evidence(
     area_m2: Optional[float] = None,
     geom_geojson: Optional[str] = None,
     environment: Optional[Dict[str, Any]] = None,
+    optical: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build the ``incident.fused`` payload.
 
@@ -220,6 +225,13 @@ def fuse_evidence(
     optional and forwarded when present. The candidate's real geometry is
     forwarded when the DB row was found (centroid_lat/centroid_lon/area_m2/
     geom_geojson), so downstream consumers never have to guess coordinates.
+
+    ``optical`` is Sentinel-2 secondary-verification evidence (see the `eo`
+    service). It is best-effort and usually still null at fusion time — the
+    optical fetch/CNN run asynchronously and are typically slower than SAR
+    fusion, and a cloud-free scene is not always available at all. A null
+    optical block is never treated as a negative signal; it means "not
+    checked yet", not "not oil".
 
     The result NEVER contains attribution fields.
     """
@@ -244,6 +256,12 @@ def fuse_evidence(
             "current_dir_deg": 0.0,
             "timestamp": None,
             "source": None,
+        },
+        "optical": optical or {
+            "checked": False,
+            "cloud_free": None,
+            "oil_probability": None,
+            "predicted_class": None,
         },
         "is_synthetic": candidate.get("is_synthetic", False),
     }
