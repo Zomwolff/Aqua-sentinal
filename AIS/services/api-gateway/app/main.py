@@ -1380,16 +1380,64 @@ async def get_spill_forecast(spill_id: str):
 
 
 @app.get("/spill/incidents/{spill_id}/severity", tags=["SpillIntelligence"])
-async def get_spill_severity(spill_id: str):
-    """Severity scorecard for a spill (area, protected area, population risk)."""
+async def get_spill_severity(
+    spill_id: str,
+    horizon_hours: Optional[float] = Query(None, description="Filter by horizon (1, 3, 6, 12, 24)"),
+    footprint_type: Optional[str] = Query(None, description="Filter by footprint (best_estimate, probability_90, current)"),
+):
+    """
+    Severity scorecard for a spill (V1: rule-based consequence assessment).
+    
+    Without filters: Returns overall/current severity plus all horizon-specific assessments.
+    With filters: Returns matching horizon/footprint combinations.
+    """
     pool = await _get_pool()
-    row = await pool.fetchrow(
-        "SELECT * FROM severity WHERE spill_id = $1", spill_id
+    
+    conditions = ["spill_id = $1"]
+    params = [spill_id]
+    idx = 2
+    
+    if horizon_hours is not None:
+        conditions.append(f"horizon_hours = ${idx}")
+        params.append(horizon_hours)
+        idx += 1
+    
+    if footprint_type:
+        conditions.append(f"footprint_type = ${idx}")
+        params.append(footprint_type)
+        idx += 1
+    
+    where = " AND ".join(conditions)
+    
+    rows = await pool.fetch(
+        f"""
+        SELECT * FROM severity 
+        WHERE {where}
+        ORDER BY COALESCE(horizon_hours, 0) ASC, footprint_type ASC, computed_at DESC
+        """,
+        *params,
     )
-    if not row:
+    
+    if not rows:
         raise HTTPException(status_code=404, detail="No severity data for this spill")
-    result = {k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in dict(row).items()}
-    return result
+    
+    def _parse_json(val):
+        if val is None:
+            return None
+        if isinstance(val, str):
+            try:
+                return json.loads(val)
+            except:
+                return val
+        return val
+    
+    return [
+        {
+            **{k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in dict(r).items()},
+            "primary_drivers": _parse_json(r.get("primary_drivers")),
+        }
+        for r in rows
+    ]
 
 
 @app.get("/spill/incidents/{spill_id}/recommendations", tags=["SpillIntelligence"])

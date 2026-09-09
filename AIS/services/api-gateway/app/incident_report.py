@@ -117,6 +117,10 @@ def build_incident_report(
         "geometry": row.get("geometry"),
         "model_version": row.get("model_version"),
     } for row in forecasts]
+    
+    # V1: score is already 0-100, no conversion needed
+    severity_score_value = _number(severity.get("score"))
+    severity_score_percent = int(round(severity_score_value)) if severity_score_value is not None else None
 
     return {
         "title": "OIL SPILL INCIDENT",
@@ -128,7 +132,7 @@ def build_incident_report(
         },
         "assessment": {
             "severity": severity.get("severity_level") or "UNASSESSED",
-            "severity_score_percent": _percent(severity.get("score")),
+            "severity_score_percent": severity_score_percent,  # Already 0-100
             "detection_confidence_percent": _percent(incident.get("confidence")),
             "spill_area_km2": _number(incident.get("area_km2")),
             "ecological_risk": {
