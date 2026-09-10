@@ -7,6 +7,11 @@ export default defineConfig({
   plugins: [react()],
   server: {
     proxy: {
+      "/fusion": {
+        target: "http://localhost:8017",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/fusion/, ""),
+      },
       "/api": {
         target: "http://localhost:8015",
         changeOrigin: true,

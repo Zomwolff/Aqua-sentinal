@@ -1058,24 +1058,22 @@ async def list_features(
 @app.get("/spill/candidates/{candidate_id}")
 async def get_spill_candidate(candidate_id: str):
     """
-    Full details for one spill incident by its ID (used by SpillCandidateLayer).
-    Falls back to spill_incidents table (spill_candidates table no longer used).
-    Returns GeoJSON geometry derived from the PostGIS centroid point.
+    Full model/heuristic evidence for a candidate. Accepts either the candidate
+    UUID or its downstream spill UUID.
     """
     pool = await _get_pool()
     row = await pool.fetchrow(
         """
-        SELECT
-            id AS candidate_id,
-            source_image_id AS scene_id,
-            detected_at AS acquisition_time,
-            status AS classification_label,
-            confidence,
-            area_km2 * 1000000.0 AS area_m2,
-            source AS raw_source,
-            ST_AsGeoJSON(geom) AS geometry
-        FROM spill_incidents
-        WHERE id = $1
+        SELECT c.candidate_id, i.id AS spill_id, c.scene_id, c.acquisition_time,
+               c.status, c.classification_label, c.confidence, c.area_m2,
+               c.area_m2 / 1000000.0 AS area_km2, c.pixel_count,
+               c.texture_features, c.is_synthetic,
+               ST_AsGeoJSON(c.geom) AS geometry
+        FROM spill_candidates c
+        LEFT JOIN spill_incidents i
+          ON i.candidate_id=c.candidate_id OR (i.candidate_id IS NULL AND i.id=c.candidate_id)
+        WHERE c.candidate_id=$1::uuid OR i.id=$1::uuid
+        LIMIT 1
         """,
         candidate_id,
     )
@@ -1091,6 +1089,16 @@ async def get_spill_candidate(candidate_id: str):
         result["confidence"] = float(result["confidence"])
     if result.get("area_m2") is not None:
         result["area_m2"] = float(result["area_m2"])
+        result["area_km2"] = float(result["area_km2"])
+    texture = result.get("texture_features") or {}
+    if isinstance(texture, str):
+        texture = json.loads(texture)
+    result["texture_features"] = texture
+    result["shape"] = texture.get("shape")
+    result["edge"] = texture.get("edge")
+    result["context"] = texture.get("context")
+    result["score_components"] = texture.get("score_components")
+    result["model_version"] = texture.get("model_version")
     return result
 
 
@@ -1142,7 +1150,7 @@ async def list_spill_incidents(
         ) ar_top ON TRUE
         LEFT JOIN vessels v_top ON v_top.id = ar_top.vessel_id
         WHERE {" AND ".join(conditions)}
-        ORDER BY si.detected_at DESC
+        ORDER BY si.detected_at DESC, si.id DESC
         LIMIT ${idx} OFFSET ${idx+1}
     """, *params)
 
@@ -1221,7 +1229,9 @@ async def get_spill_incident(spill_id: str):
                drift_distance_m, drift_velocity_ms, drift_bearing_deg,
                physical_area_m2, physical_radius_m, expansion_ratio, spread_rate_m2_per_hour,
                uncertainty_rms_m, uncertainty_std_east_m, uncertainty_std_north_m,
-               oil_properties, windage_range
+               oil_properties, windage_range,
+               ST_Area(geom::geography)/1000000.0 AS forecast_area_km2,
+               COALESCE(physical_radius_m, sqrt(ST_Area(geom::geography)/pi())) AS spread_radius_m
         FROM forecasts WHERE spill_id = $1 ORDER BY horizon_hours ASC
         """,
         spill_id,
@@ -1256,8 +1266,28 @@ async def get_spill_incident(spill_id: str):
         for r in rec_rows
     ]
 
+    candidate_row = await pool.fetchrow("""SELECT c.* FROM spill_candidates c
+        JOIN spill_incidents i ON c.candidate_id=COALESCE(i.candidate_id,i.id)
+        WHERE i.id=$1::uuid""", spill_id)
+    candidate = None
+    fusion_metadata = None
+    if candidate_row:
+        candidate = dict(candidate_row)
+        candidate.pop("geom", None)
+        texture = candidate.get("texture_features") or {}
+        if isinstance(texture, str):
+            texture = json.loads(texture)
+        candidate["texture_features"] = texture
+        candidate["score_components"] = texture.get("score_components")
+        candidate["shape"] = texture.get("shape")
+        candidate["edge"] = texture.get("edge")
+        candidate["context"] = texture.get("context")
+        candidate["model_version"] = texture.get("model_version")
+        fusion_metadata = texture.get("fusion_metadata")
     return {
         "incident": incident,
+        "candidate": candidate,
+        "fusion_metadata": fusion_metadata,
         "severity": severity,
         "attribution": attribution,
         "forecasts": forecasts,

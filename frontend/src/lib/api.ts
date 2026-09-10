@@ -41,15 +41,24 @@ export async function fetchVessels() {
 }
 
 export async function fetchIncidents() {
-  const res = await fetch(`${API_BASE}/spill/incidents?since_hours=168`);
-  if (!res.ok) throw new Error("Failed to fetch incidents");
-  return res.json();
+  const incidents: any[] = [];
+  const pageSize = 200;
+  for (let offset = 0; ; offset += pageSize) {
+    const res = await fetch(`${API_BASE}/spill/incidents?since_hours=168&limit=${pageSize}&offset=${offset}`);
+    if (!res.ok) throw new Error("Failed to fetch incidents");
+    const page = await res.json();
+    incidents.push(...page.incidents);
+    if (page.incidents.length < pageSize) break;
+  }
+  return { incidents, count: incidents.length, since_hours: 168 };
 }
 
 export async function fetchIncidentDetail(id: string) {
   const res = await fetch(`${API_BASE}/spill/incidents/${id}`);
   if (!res.ok) throw new Error("Failed to fetch incident detail");
-  return res.json();
+  const detail = await res.json();
+  const cost = await fetch(`${API_BASE}/cost-projection/${id}`);
+  return { ...detail, cost_projection: cost.ok ? await cost.json() : null };
 }
 
 export async function fetchVesselDetail(mmsi: string | number) {

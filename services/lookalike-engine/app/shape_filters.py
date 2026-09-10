@@ -145,6 +145,26 @@ def _edge_gradient(intensity: np.ndarray, dark_mask: np.ndarray) -> float:
     return mean_outer - mean_inner
 
 
+def compute_edge_descriptors(intensity, dark_mask, max_diffuse_gradient: float = 3.0) -> Dict[str, Any]:
+    """Return the measured boundary evidence used by the calm-water check."""
+    dark = _as_bool2d("dark_mask", dark_mask)
+    values = np.asarray(intensity, dtype=np.float64)
+    if values.shape != dark.shape:
+        raise ValueError("intensity and dark_mask must share the same shape.")
+    outer = dilation(dark, footprint=disk(3)) & ~dark
+    inside = values[dark & np.isfinite(values)]
+    outside = values[outer & np.isfinite(values)]
+    inside_mean = float(inside.mean()) if inside.size else None
+    outside_mean = float(outside.mean()) if outside.size else None
+    gradient = _edge_gradient(values, dark)
+    return {
+        "inside_backscatter_db": inside_mean,
+        "outside_backscatter_db": outside_mean,
+        "gradient": gradient,
+        "classification": "diffuse" if gradient <= float(max_diffuse_gradient) else "sharp",
+    }
+
+
 def is_likely_ship_shadow(
     candidate: Dict[str, Any],
     bright_target_mask,

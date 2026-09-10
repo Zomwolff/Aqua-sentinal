@@ -35,7 +35,7 @@ from shared.redis_client import (
     get_redis,
     publish_to_stream,
 )
-from app.shape_filters import classify_candidate
+from app.shape_filters import classify_candidate, compute_edge_descriptors, compute_shape_descriptors
 from app.scoring import (
     CONFIDENCE_THRESHOLD,
     PASS_THROUGH_LABELS,
@@ -59,7 +59,8 @@ PIXEL_PADDING = 7
 GLCM_LEVELS = 32
 TEXTURE_EVIDENCE_FIELDS = (
     "contrast", "homogeneity", "energy", "correlation",
-    "mean_backscatter", "std_backscatter",
+    "mean_backscatter", "std_backscatter", "score_components", "shape",
+    "edge", "context", "model_version",
 )
 
 STATE: Dict[str, Any] = {
@@ -89,7 +90,7 @@ def _candidate_ids(data: Dict[str, Any]) -> List[str]:
 
 
 _FETCH_CANDIDATE_SQL = """
-    SELECT candidate_id, scene_id, status, pixel_count, area_m2,
+    SELECT candidate_id, scene_id, acquisition_time, status, pixel_count, area_m2,
            classification_label, is_synthetic, ST_AsGeoJSON(geom) AS geojson,
            ST_X(ST_Centroid(geom)) AS centroid_lon,
            ST_Y(ST_Centroid(geom)) AS centroid_lat
@@ -125,6 +126,43 @@ async def _update_status(pool, candidate_id: str, label: str) -> bool:
     """Update a candidate's status unless it already left ``raw``."""
     row = await pool.execute(_UPDATE_STATUS_SQL, label, candidate_id)
     return "UPDATE 1" in row
+
+
+async def _context_evidence(conn, row: Dict[str, Any]) -> Dict[str, Any]:
+    """Measure nearby saved AIS evidence; absence means no contextual support."""
+    nearest = await conn.fetchrow(
+        """
+        SELECT v.mmsi, v.name AS vessel_name, vp.timestamp,
+               ST_Distance(vp.geom::geography, c.geom::geography) AS distance_m,
+               ABS(EXTRACT(EPOCH FROM (vp.timestamp - c.acquisition_time))) / 3600.0 AS time_gap_hours
+        FROM spill_candidates c
+        JOIN vessel_positions vp
+          ON vp.timestamp BETWEEN c.acquisition_time - INTERVAL '6 hours'
+                              AND c.acquisition_time + INTERVAL '6 hours'
+        JOIN vessels v ON v.id=vp.vessel_id
+        WHERE c.candidate_id=$1::uuid
+          AND ST_DWithin(vp.geom::geography, c.geom::geography, 20000.0)
+        ORDER BY vp.geom <-> ST_Centroid(c.geom), time_gap_hours
+        LIMIT 1
+        """,
+        str(row["candidate_id"]),
+    )
+    if not nearest:
+        return {"score": 0.0, "source": "saved_ais", "nearby_vessel_found": False}
+    distance_m = float(nearest["distance_m"])
+    gap_h = float(nearest["time_gap_hours"])
+    distance_support = max(0.0, 1.0 - distance_m / 20_000.0)
+    time_support = max(0.0, 1.0 - gap_h / 6.0)
+    return {
+        "score": 0.6 * distance_support + 0.4 * time_support,
+        "source": "saved_ais",
+        "nearby_vessel_found": True,
+        "nearby_vessel_mmsi": str(nearest["mmsi"]),
+        "nearby_vessel_name": nearest["vessel_name"],
+        "vessel_distance_m": distance_m,
+        "time_gap_hours": gap_h,
+        "position_timestamp": nearest["timestamp"].isoformat(),
+    }
 
 
 async def _resolve_candidate(
@@ -272,8 +310,17 @@ async def _process_candidates_message(data: Dict[str, Any], pool, redis) -> None
                             "area_m2": float(row["area_m2"]) if row["area_m2"] is not None else None,
                             "classification_label": row["status"],
                         }
+                        shape = compute_shape_descriptors(candidate, resolved["dark_mask"])
+                        edge = compute_edge_descriptors(resolved["raw_image"], resolved["dark_mask"])
+                        context = await _context_evidence(conn, row)
+                        candidate["shape_features"] = shape
                         texture = compute_glcm_features(resolved["raw_image"], resolved["dark_mask"], levels=GLCM_LEVELS)
-                        scored = score_candidate(candidate, texture, context_score=0.5)
+                        scored = score_candidate(candidate, texture, context_score=context["score"])
+                        texture["score_components"] = scored["score_components"]
+                        texture["shape"] = shape
+                        texture["edge"] = edge
+                        texture["context"] = context
+                        texture["model_version"] = "sar-lookalike-heuristic-v1"
                     except Exception as exc:
                         STATE["candidates_skipped"] += 1
                         log.exception(

@@ -12,7 +12,7 @@ def _require_models(*paths):
         raise FileNotFoundError(f"Missing production ONNX model file(s): {missing}")
 
 
-def detect_oil_result(sentinel1_path=None, sentinel2_path=None) -> dict:
+def _detect_oil_result(sentinel1_path=None, sentinel2_path=None) -> dict:
     """Return the mask plus a concise oil/no-oil decision and mode metadata."""
     if sentinel1_path is None and sentinel2_path is None:
         raise ValueError("Provide sentinel1_path, sentinel2_path, or both")
@@ -22,13 +22,13 @@ def detect_oil_result(sentinel1_path=None, sentinel2_path=None) -> dict:
         _require_models(SAR_ONNX)
         probability, valid = predict_sar_probability(sentinel1_path, SAR_ONNX)
         mask = ((probability >= SAR_THRESHOLD) & valid).astype(np.uint8)
-        return {"mask": mask, "oil_spill_detected": bool(mask.any()), "mode": "SAR_ONLY", "threshold": SAR_THRESHOLD, "weights": None}
+        return {"mask": mask, "probability": probability, "oil_spill_detected": bool(mask.any()), "mode": "SAR_ONLY", "threshold": SAR_THRESHOLD, "weights": None}
 
     if sentinel1_path is None and sentinel2_path is not None:
         _require_models(EO_ONNX)
         probability, valid = predict_eo_probability(sentinel2_path, EO_ONNX)
         mask = ((probability >= EO_THRESHOLD) & valid).astype(np.uint8)
-        return {"mask": mask, "oil_spill_detected": bool(mask.any()), "mode": "EO_ONLY", "threshold": EO_THRESHOLD, "weights": None}
+        return {"mask": mask, "probability": probability, "oil_spill_detected": bool(mask.any()), "mode": "EO_ONLY", "threshold": EO_THRESHOLD, "weights": None}
 
     _require_models(SAR_ONNX, EO_ONNX)
     sar_probability, sar_valid = predict_sar_probability(sentinel1_path, SAR_ONNX)
@@ -42,6 +42,7 @@ def detect_oil_result(sentinel1_path=None, sentinel2_path=None) -> dict:
     eo_mask = (eo_probability >= EO_THRESHOLD) & valid
     return {
         "mask": mask,
+        "probability": fused_probability,
         "oil_spill_detected": bool(mask.any()),
         "mode": "FUSED",
         "threshold": 0.50,
@@ -51,6 +52,12 @@ def detect_oil_result(sentinel1_path=None, sentinel2_path=None) -> dict:
         "eo_only_pixel_count": int((mask.astype(bool) & ~sar_mask).sum()),
         "sar_only_rejected_pixel_count": int((sar_mask & ~eo_mask).sum()),
     }
+
+
+def detect_oil_result(sentinel1_path=None, sentinel2_path=None) -> dict:
+    result = _detect_oil_result(sentinel1_path, sentinel2_path)
+    result.pop("probability")
+    return result
 
 
 def detect_oil(sentinel1_path=None, sentinel2_path=None) -> np.ndarray:

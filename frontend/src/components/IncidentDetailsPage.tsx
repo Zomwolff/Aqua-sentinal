@@ -1,3 +1,4 @@
+import { FusionResults } from "./FusionResults";
 import React, { useEffect, useState } from "react";
 import { SAR_ARTIFACT_FILENAMES, sarArtifactUrls, type SarArtifactKey } from "../lib/api";
 import { SARArtifactPreview } from "./SARArtifactPreview";
@@ -52,7 +53,7 @@ export function IncidentDetailsPage({ incidentDetail, onBack, onSpotVessel, fore
           </button>
           <div className="idp-title-group">
             <h1>{isSynthetic ? "Synthetic Slick" : "Surface Anomaly"}</h1>
-            <span className="idp-id-badge">{incident.id.substring(0, 8)}</span>
+            <span className="idp-id-badge" title={incident.id}>Spill ID: {incident.id}</span>
             <span className={`idp-severity-badge ${severity?.severity_level?.toLowerCase() || 'low'}`}>
               {severity?.severity_level || 'LOW'} SEVERITY
             </span>
@@ -117,6 +118,15 @@ export function IncidentDetailsPage({ incidentDetail, onBack, onSpotVessel, fore
           </section>
 
           <SARLookalikeAnalysis incidentDetail={incidentDetail} onShowCandidate={showCandidateImage} />
+          <section className="idp-card">
+            <h3>Response Cost Estimate</h3>
+            {incidentDetail.cost_projection ? <>
+              <p>{incidentDetail.cost_projection.nosdcp_tier} · USD {Number(incidentDetail.cost_projection.point_usd).toLocaleString()}</p>
+              <p>Range: USD {Number(incidentDetail.cost_projection.low_usd).toLocaleString()}–{Number(incidentDetail.cost_projection.high_usd).toLocaleString()}</p>
+              <small>{incidentDetail.cost_projection.volume_basis}</small>
+              <p>{incidentDetail.cost_projection.matched_vessels?.length || 0} certified response vessels matched.</p>
+            </> : <p>Cost estimate not yet available.</p>}
+          </section>
 
         </div>
 
@@ -130,7 +140,7 @@ export function IncidentDetailsPage({ incidentDetail, onBack, onSpotVessel, fore
               )}
             </div>
             
-            {Object.keys(images).length > 0 ? (
+            {incidentDetail.fusion_metadata ? <FusionResults result={incidentDetail.fusion_metadata} /> : Object.keys(images).length > 0 ? (
               <div className="idp-sar-grid">
                 <div className="sar-artifact">
                   <div className="sar-label">1. Raw Satellite Feed (Sentinel-1 VV)</div>

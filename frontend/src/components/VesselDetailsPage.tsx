@@ -1,3 +1,4 @@
+import { FusionResults } from "./FusionResults";
 import React, { useEffect, useState } from "react";
 import "./IncidentDetailsPage.css";
 import { fetchIncidentDetail, SAR_ARTIFACT_FILENAMES, sarArtifactUrls, type SarArtifactKey } from "../lib/api";
@@ -80,6 +81,8 @@ export function VesselDetailsPage({ vesselDetail, onBack, liveEvent, fusionResul
   }
 
   const { vessel, risk, sar_tasking, anomalies } = vesselDetail;
+  const taskReason = typeof sar_tasking?.reason === 'string' ? JSON.parse(sar_tasking.reason) : sar_tasking?.reason;
+  const visibleFusion = (fusionResult?.mmsi === String(vessel.mmsi) ? fusionResult : null) || taskReason?.fusion_metadata;
   const riskTier = risk?.tier?.toLowerCase() || 'low';
   const previewPendingLabel = sar_tasking?.status === "failed" ? "PROCESSING FAILED" : "PENDING";
 
@@ -320,19 +323,8 @@ export function VesselDetailsPage({ vesselDetail, onBack, liveEvent, fusionResul
         </div>
 
         <div className="idp-main-view">
-          {fusionResult?.artifacts ? (
-            <div className="idp-card full-height">
-              <h3>Fusion Results</h3>
-              <div className={fusionResult.oil_spill_detected ? "idp-verdict spill" : "idp-verdict clear"} style={{ marginBottom: "14px", fontWeight: 700 }}>
-                {fusionResult.oil_spill_detected ? "OIL SPILL DETECTED" : "NO OIL SPILL"}
-                {fusionResult.weights && <small style={{ marginLeft: "10px", opacity: 0.75 }}>SAR {Math.round(fusionResult.weights.sar * 100)}% · EO {Math.round(fusionResult.weights.eo * 100)}%</small>}
-              </div>
-              <div className="idp-sar-grid">
-                {[["1. SENTINEL-1", "s1"], ["2. SAR MASK · 0.50", "sar"], ["3. SENTINEL-2", "s2"], ["4. FINAL EO MASK · 0.15", "final"]].map(([label, key]) => (
-                  <div className="sar-artifact" key={key}><div className="sar-label">{label}</div><div className="sar-img-wrapper"><img src={fusionResult.artifacts[key]} alt={label} /></div></div>
-                ))}
-              </div>
-            </div>
+          {visibleFusion ? (
+              <FusionResults result={visibleFusion} />
           ) : sar_tasking ? (
             <div className="idp-card full-height">
               <div className="sar-header-flex">

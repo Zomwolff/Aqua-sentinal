@@ -53,6 +53,8 @@ function App() {
   const [fusionResult, setFusionResult] = useState<any>(null);
   const [sarUploading, setSarUploading] = useState(false);
   const [sarUploadError, setSarUploadError] = useState("");
+  const [acquisitionTime, setAcquisitionTime] = useState("");
+  const [sourceSceneId, setSourceSceneId] = useState("");
   const [protectedAreas, setProtectedAreas] = useState<any[]>([]);
   const [darkVessels, setDarkVessels] = useState<any[]>([]);
   const [intelSts, setIntelSts] = useState<any[]>([]);
@@ -579,18 +581,18 @@ function App() {
   const openSarUpload = () => {
     setSarUploadMmsi(selectedVessel?.mmsi || vessels[0]?.mmsi || "");
     setSarUploadFile(null);
-    setS2File(null); setS2Bands([]);
+    setS2File(null); setS2Bands([]); setAcquisitionTime(""); setSourceSceneId("");
     setSarUploadError("");
     setSarUploadOpen(true);
   };
 
   const handleSarUpload = async (event: FormEvent) => {
     event.preventDefault();
-    if (!sarUploadFile || (!s2File && !s2Bands.length) || sarUploading) return;
+    if ((!sarUploadFile && !s2File && !s2Bands.length) || sarUploading) return;
     setSarUploading(true);
     setSarUploadError("");
     try {
-      const form=new FormData(); form.append('sentinel1',sarUploadFile); if(s2File) form.append('sentinel2',s2File); s2Bands.forEach(f=>form.append('sentinel2_bands',f)); const res=await fetch('/fusion/upload',{method:'POST',body:form}); if(!res.ok) throw new Error((await res.json()).detail||'Fusion failed'); setFusionResult(await res.json());
+      const form=new FormData(); if(acquisitionTime) form.append('acquisition_time',new Date(acquisitionTime).toISOString()); if(sourceSceneId.trim()) form.append('scene_id',sourceSceneId.trim()); if(sarUploadFile) form.append('sentinel1',sarUploadFile); form.append('mmsi',sarUploadMmsi); if(s2File) form.append('sentinel2',s2File); s2Bands.forEach(f=>form.append('sentinel2_bands',f)); const res=await fetch('/fusion/upload',{method:'POST',body:form}); if(!res.ok) throw new Error((await res.json()).detail||'Fusion failed'); setFusionResult(await res.json());
       const target = vessels.find((v) => v.mmsi === sarUploadMmsi);
       setSarUploadOpen(false);
       if (target) {
@@ -620,7 +622,7 @@ function App() {
       <header className="topbar">
         <div className="brand"><div className="brand-mark"><span /></div><div><strong>AQUA SENTINEL</strong><small>MARITIME INTELLIGENCE NETWORK</small></div></div>
         <div className="header-center"><span className="live-dot" /> <span>LIVE OPERATIONS</span><i /> <span className="muted">{new Date().toUTCString()}</span></div>
-        <div className="header-meta"><div><small>ACTIVE INCIDENTS</small><b>{activeCount < 10 ? `0${activeCount}` : activeCount}</b></div><div><small>VESSELS TRACKED</small><b>{vessels.length}</b></div><button className={`ais-fetch-btn ${aisFetching ? "busy" : ""}`} onClick={handleFetchAis} disabled={aisFetching} title="Trigger an immediate live-AIS poll; results appear in the live signal feed">{aisFetching ? "FETCHING…" : "⟳ FETCH AIS"}</button><button className="add-sar-btn" onClick={openSarUpload}>+ ADD SAR</button></div>
+        <div className="header-meta"><div><small>ACTIVE INCIDENTS</small><b>{activeCount < 10 ? `0${activeCount}` : activeCount}</b></div><div><small>VESSELS TRACKED</small><b>{vessels.length}</b></div><button className={`ais-fetch-btn ${aisFetching ? "busy" : ""}`} onClick={handleFetchAis} disabled={aisFetching} title="Trigger an immediate live-AIS poll; results appear in the live signal feed">{aisFetching ? "FETCHING…" : "⟳ FETCH AIS"}</button><button className="add-sar-btn" onClick={openSarUpload}>+ ADD IMAGERY</button></div>
       </header>
       <main className="workspace">
         <section className="map-pane">
@@ -778,10 +780,10 @@ function App() {
         <div className="sar-upload-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !sarUploading) setSarUploadOpen(false); }}>
           <form className="sar-upload-dialog" onSubmit={handleSarUpload}>
             <div className="sar-upload-title">
-              <div><small>MANUAL INGESTION</small><h2>Add Sentinel Pair</h2></div>
+              <div><small>MANUAL INGESTION</small><h2>Add Satellite Imagery</h2></div>
               <button type="button" aria-label="Close SAR upload" onClick={() => setSarUploadOpen(false)} disabled={sarUploading}>×</button>
             </div>
-            <p>Sentinel-1 + Sentinel-2 ONNX fusion. SAR 0.50 · EO 0.15.</p>
+            <p>Upload Sentinel-1, Sentinel-2, or both. Only Sentinel-1 supplies spill map coordinates. Saved AIS time is used when the image has no acquisition time.</p>
             <label>
               <span>ASSOCIATE WITH VESSEL</span>
               <select value={sarUploadMmsi} onChange={(event) => setSarUploadMmsi(event.target.value)} required>
@@ -793,13 +795,15 @@ function App() {
             <label><span>OR INDIVIDUAL S2 BANDS</span><input type="file" accept=".tif,.tiff" multiple onChange={e=>{setS2Bands(Array.from(e.target.files||[]));setS2File(null)}} /></label>
             <label>
               <span>SAR RASTER</span>
-              <input type="file" accept=".tif,.tiff,.png,.jpg,.jpeg,image/tiff,image/png,image/jpeg" onChange={(event) => setSarUploadFile(event.target.files?.[0] || null)} required />
-              <small>GeoTIFF (EPSG:4326) preserves embedded coordinates. PNG/JPEG is centred on the selected vessel at 10 m/pixel. Maximum 50 MB.</small>
+              <input type="file" accept=".tif,.tiff" onChange={(event) => setSarUploadFile(event.target.files?.[0] || null)} />
+              <small>Sentinel-1 GeoTIFF preserves its embedded coordinates. Maximum 100 MB per file.</small>
             </label>
+            <label><span>ACQUISITION TIME (OPTIONAL · LOCAL TIME)</span><input type="datetime-local" value={acquisitionTime} onChange={e => setAcquisitionTime(e.target.value)} /></label>
+            <label><span>SCENE ID (OPTIONAL)</span><input type="text" maxLength={255} value={sourceSceneId} onChange={e => setSourceSceneId(e.target.value)} placeholder="Defaults to the source filename" /></label>
             {sarUploadError && <div className="sar-upload-error" role="alert">{sarUploadError}</div>}
             <div className="sar-upload-actions">
               <button type="button" onClick={() => setSarUploadOpen(false)} disabled={sarUploading}>CANCEL</button>
-              <button type="submit" disabled={!sarUploadFile || (!s2File&&!s2Bands.length) || sarUploading}>{sarUploading ? "RUNNING…" : "RUN FUSION"}</button>
+              <button type="submit" disabled={(!sarUploadFile && !s2File && !s2Bands.length) || sarUploading}>{sarUploading ? "RUNNING…" : "RUN FUSION"}</button>
             </div>
           </form>
         </div>

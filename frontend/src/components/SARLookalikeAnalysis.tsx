@@ -69,8 +69,17 @@ export function SARLookalikeAnalysis({ incidentDetail, onShowCandidate }: Props)
   }, [incidentDetail]);
 
   const { root, shape, texture, edge, context, scores, state } = analysis;
+  const modelVersion = first(root.model_version, texture.model_version, incidentDetail?.fusion_metadata?.model_version);
+  const isOnnx = String(modelVersion || "").toLowerCase().includes("onnx");
   const confidence = first(root.confidence, root.final_confidence, root.candidate_confidence);
-  const rejectionReason = first(root.rejection_reason, root.reason, root.explanation, stateCopy[state].summary);
+  const rejectionReason = first(
+    root.rejection_reason,
+    root.reason,
+    root.explanation,
+    isOnnx && state === "possible-slick"
+      ? "The segmentation probability exceeded the configured detection threshold."
+      : stateCopy[state].summary,
+  );
   const brightDistance = first(root.distance_to_bright_target_m, root.ship_shadow?.distance_to_bright_target_m, shape.distance_to_bright_target_m);
   const adjacentBright = first(root.adjacent_bright_target, root.ship_shadow?.adjacent_bright_target, brightDistance !== undefined ? Number(brightDistance) <= 150 : undefined);
   const boundaryLabel = first(edge.classification, edge.boundary_type, root.boundary_type);
@@ -90,14 +99,15 @@ export function SARLookalikeAnalysis({ incidentDetail, onShowCandidate }: Props)
 
     <div className={`sla-verdict ${state}`}>
       <div><span>Candidate status</span><strong>{stateCopy[state].label}</strong></div>
-      <div><span>Candidate confidence</span><strong>{percent(confidence)}</strong></div>
+      <div><span>{isOnnx ? "Model probability" : "Candidate confidence"}</span><strong>{percent(confidence)}</strong></div>
       <p>{String(rejectionReason)}</p>
+      <small>{modelVersion ? `Method: ${modelVersion}` : "Method version unavailable"}</small>
     </div>
 
     {state === "unavailable" && <div className="sla-data-notice"><b>Candidate evidence was not returned by the API.</b><span>This panel is integration-ready and will populate when the incident response includes lookalike analysis. Values are never estimated in the browser.</span></div>}
 
     <div className="sla-confidence">
-      <div className="sla-section-title"><div><b>Confidence breakdown</b><span>Backend score components; unavailable values are not treated as zero.</span></div><strong>{percent(confidence)}</strong></div>
+      <div className="sla-section-title"><div><b>Confidence breakdown</b><span>{isOnnx ? "The ONNX model returns one probability; legacy heuristic components are shown only when calculated." : "Backend score components; unavailable values are not treated as zero."}</span></div><strong>{percent(confidence)}</strong></div>
       {components.map(([label, value, weight]) => {
         const parsed = num(value);
         const width = parsed === null ? 0 : Math.max(0, Math.min(100, parsed <= 1 ? parsed * 100 : parsed));
@@ -132,13 +142,13 @@ export function SARLookalikeAnalysis({ incidentDetail, onShowCandidate }: Props)
       </EvidenceSection>
 
       <EvidenceSection title="Context analysis" subtitle="Vessel, spatial and environmental evidence">
-        <div className="sla-metric-grid"><Metric label="Context score" value={percent(first(context.score, scores.context, scores.context_score))} tip="Context contribution returned by the lookalike scorer."/><Metric label="Nearby vessel" value={String(first(context.nearby_vessel_name, context.nearby_vessel_mmsi, root.nearby_vessel) || "Unavailable")} tip="Vessel identified near the SAR candidate, when available."/><Metric label="Vessel distance" value={display(first(context.vessel_distance_m, root.nearby_vessel_distance_m), " m", 1)} tip="Spatial distance between the candidate and contextual vessel evidence."/><Metric label="Environmental signal" value={String(first(context.environmental_signal, context.environment, root.environmental_signal) || "Unavailable")} tip="Relevant wind, current or sea-state context returned by the backend."/></div>
+        <div className="sla-metric-grid"><Metric label="Context score" value={percent(first(context.score, scores.context, scores.context_score))} tip="Measured support from saved AIS positions within 20 km and six hours."/><Metric label="Nearby vessel" value={context.nearby_vessel_found === false ? "None within window" : String(first(context.nearby_vessel_name, context.nearby_vessel_mmsi, root.nearby_vessel) || "Unavailable")} tip="Vessel identified near the SAR candidate, when available."/><Metric label="Vessel distance" value={display(first(context.vessel_distance_m, root.nearby_vessel_distance_m), " m", 1)} tip="Spatial distance between the candidate and contextual vessel evidence."/><Metric label="Time gap" value={display(context.time_gap_hours, " h", 2)} tip="Time between the saved AIS position and satellite acquisition."/><Metric label="Context source" value={String(context.source || "Unavailable")} tip="Data source used by the backend context calculation."/></div>
       </EvidenceSection>
     </div>
 
     <button className="sla-flow-toggle" onClick={() => setShowFlow((visible) => !visible)}>{showFlow ? "Hide" : "Show"} lookalike decision flow <span>→</span></button>
     {showFlow && <div className="sla-flow" aria-label="SAR lookalike decision flow"><span>SAR dark region</span><i>↓</i><span>Shape analysis</span><i>↓</i><span className="filter">Lookalike rejection<small>Ship shadow? · Calm water?</small></span><i>↓</i><span>Survives filters</span><i>↓</i><span>Texture + context</span><i>↓</i><span>Confidence score</span><i>↓</i><span>Possible slick</span><i>↓</i><span>Downstream evidence fusion</span></div>}
 
-    <div className="sla-method"><b>Why was this classified this way?</b><p>{stateCopy[state].summary} The SAR stage uses heuristic evidence and lookalike rejection. “Possible slick” does not mean confirmed oil; final incident assessment requires downstream evidence fusion and operator review.</p><small>Methodology: shape filters → lookalike rejection → texture/context scoring. Technical values are displayed exactly as supplied and are not recalculated in the frontend.</small></div>
+    <div className="sla-method"><b>Why was this classified this way?</b><p>{isOnnx ? "The SAR ONNX segmentation probability crossed its configured threshold. Shape, texture, boundary, and AIS context are measured supporting evidence and do not overwrite that probability." : `${stateCopy[state].summary} The SAR stage uses heuristic evidence and lookalike rejection.`} “Possible slick” does not mean confirmed oil; final incident assessment requires downstream evidence fusion and operator review.</p><small>Technical values are displayed exactly as supplied by the backend and are not recalculated in the frontend.</small></div>
   </section>;
 }

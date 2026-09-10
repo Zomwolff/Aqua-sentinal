@@ -131,6 +131,7 @@ services:
 
   # ── eo: the real, ready-to-run model — Sentinel-2 10-band CNN ────────────
   eo:
+    profiles: ["legacy-eo"]
     build:
       context: .
       dockerfile: docker/eo/Dockerfile
@@ -160,8 +161,6 @@ services:
       ais:
         condition: service_started
       sar:
-        condition: service_started
-      eo:
         condition: service_started
     environment:
       <<: *common-env
@@ -208,6 +207,8 @@ services:
     depends_on:
       backend:
         condition: service_started
+      fusion:
+        condition: service_started
     ports:
       - "3000:80"
     networks:
@@ -217,6 +218,11 @@ services:
     build:
       context: .
       dockerfile: fusion/Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+    depends_on:
+      <<: *depends-defaults
     volumes:
       - sar-scene-artifacts:/data/artifacts
     ports: ["8017:8017"]

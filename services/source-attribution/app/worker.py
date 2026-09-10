@@ -9,6 +9,7 @@ import json
 import logging
 import sys
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -125,8 +126,9 @@ async def _get_or_create_spill_incident(
         # NOTE: asyncpg requires len(args) == highest referenced $n.
         # Branch A (GeoJSON): highest ref is $8 -> pass 8 args.
         # Branch B (buffer fallback): highest ref is $7 -> pass 7 args.
+        spill_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"aqua-sentinel:{scene_id}:{candidate_id}"))
         args: list = [
-            candidate_id, lat, lon, acquisition_time, area_km2, confidence, scene_id
+            spill_id, lat, lon, acquisition_time, area_km2, confidence, scene_id
         ]
         if geom_geojson:
             args.append(geom_geojson)
@@ -154,6 +156,7 @@ async def _get_or_create_spill_incident(
             *args
         )
         if row:
+            await pool.execute("UPDATE spill_incidents SET candidate_id=$2::uuid WHERE id=$1::uuid", str(row["id"]), candidate_id)
             log.info("Created/Found spill_incident id=%s", row['id'])
             return str(row["id"]), float(row["latitude"]), float(row["longitude"])
         return None

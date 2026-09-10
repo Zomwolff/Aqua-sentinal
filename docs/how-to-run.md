@@ -1,3 +1,5 @@
+> Current local integration (September 2026): Docker runs `frontend/` on http://localhost:3000, gateway on 8015 and ONNX fusion on 8017. The historical dashboard/service layout below is outdated. See `fusion/README.md` for satellite uploads. Live AIS remains disabled (`AIS_PROVIDER=none`).
+
 # Oil-Spill-SIH — Complete Local Run Guide
 
 > **Operational runbook** for the **Aqua Sentinel** maritime oil-spill detection and

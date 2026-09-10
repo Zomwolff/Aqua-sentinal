@@ -218,3 +218,23 @@ def test_score_wind_drift_uses_incoming_environment_without_query(worker_module,
         "elapsed_hours": 1.0,
     }]
     assert result["wind_score"] == 0.45
+
+def test_attribution_mints_stable_id_separate_from_candidate(worker_module):
+    import uuid
+    class Pool:
+        def __init__(self): self.ids=[]; self.links=[]
+        async def fetchrow(self,sql,*args):
+            self.ids.append(args[0])
+            return {'id':args[0],'latitude':19.1,'longitude':72.8}
+        async def execute(self,*args): self.links.append(args)
+    pool=Pool()
+    candidate=str(uuid.uuid4())
+    async def run():
+        for _ in range(2):
+            await worker_module._get_or_create_spill_incident(pool,candidate,'scene',.8,
+                datetime(2026,9,9,tzinfo=timezone.utc),False,19.1,72.8,.1)
+    asyncio.run(run())
+    assert len(pool.ids)==2
+    assert pool.ids[0]==pool.ids[1]
+    assert pool.ids[0]!=candidate
+    assert pool.links[0][-1]==candidate
