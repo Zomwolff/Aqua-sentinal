@@ -139,7 +139,30 @@ export function IncidentDetailPanel({ spillId, onClose }) {
                 </div>
                 <small className="cost-note">{costProjection.volume_basis}</small>
                 <Row label="Landfall estimate" value={costProjection.landfall_eta} />
-                <Row label="Certified vessels" value={String(costProjection.matched_vessels.length)} />
+                <Row label="Certified vessels" value={String(costProjection.matched_vessels?.length || 0)} />
+              </Section>
+            )}
+
+            {costProjection?.matched_vessels?.length > 0 && (
+              <Section title="Nearby Response Vessels">
+                <div className="response-vessel-list">
+                  {costProjection.matched_vessels.map((vessel, index) => (
+                    <div className="response-vessel-card" key={vessel.mmsi || `${vessel.vessel_name}-${index}`}>
+                      <div className="response-vessel-heading">
+                        <strong>{vessel.vessel_name || "Unnamed response vessel"}</strong>
+                        <span>{formatDistance(vessel.distance_m)}</span>
+                      </div>
+                      <Row label="Company" value={vessel.contractor_name || "Not provided"} />
+                      <Row label="MMSI" value={vessel.mmsi || "Not provided"} />
+                      <Row label="Certification" value={vessel.tier_rating || "Not provided"} />
+                      <Row label="Equipment" value={vessel.equipment_summary || "Not provided"} />
+                      <Row label="Location" value={formatCoordinates(vessel.latitude, vessel.longitude)} />
+                      <Row label="AIS last seen" value={formatTimestamp(vessel.last_seen)} />
+                      <ContactRow label="Phone" value={vessel.phone} href={vessel.phone ? `tel:${vessel.phone}` : null} />
+                      <ContactRow label="Email" value={vessel.email} href={vessel.email ? `mailto:${vessel.email}` : null} />
+                    </div>
+                  ))}
+                </div>
               </Section>
             )}
 
@@ -178,4 +201,32 @@ function Row({ label, value }) {
       <span className="detail-value">{value}</span>
     </div>
   );
+}
+
+function ContactRow({ label, value, href }) {
+  return (
+    <div className="detail-row">
+      <span className="detail-label">{label}:</span>
+      {href ? <a className="detail-contact" href={href}>{value}</a> : <span className="detail-value">Not provided</span>}
+    </div>
+  );
+}
+
+function formatDistance(distanceM) {
+  const distance = Number(distanceM);
+  if (!Number.isFinite(distance)) return "Distance unavailable";
+  return distance < 1000 ? `${Math.round(distance)} m away` : `${(distance / 1000).toFixed(1)} km away`;
+}
+
+function formatCoordinates(latitude, longitude) {
+  const lat = Number(latitude);
+  const lon = Number(longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return "Not provided";
+  return `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
+}
+
+function formatTimestamp(value) {
+  if (!value) return "Not provided";
+  const timestamp = new Date(value);
+  return Number.isNaN(timestamp.getTime()) ? String(value) : timestamp.toLocaleString();
 }

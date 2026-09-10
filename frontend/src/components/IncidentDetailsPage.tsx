@@ -16,6 +16,54 @@ interface Props {
   onForecastHorizonChange: (hours: number) => void;
 }
 
+function formatDistance(distanceM: unknown) {
+  const distance = Number(distanceM);
+  if (!Number.isFinite(distance)) return "Distance unavailable";
+  return distance < 1000 ? `${Math.round(distance)} m away` : `${(distance / 1000).toFixed(1)} km away`;
+}
+
+function formatCoordinates(latitude: unknown, longitude: unknown) {
+  const lat = Number(latitude);
+  const lon = Number(longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return "Not provided";
+  return `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
+}
+
+function formatTimestamp(value: unknown) {
+  if (!value) return "Not provided";
+  const timestamp = new Date(String(value));
+  return Number.isNaN(timestamp.getTime()) ? String(value) : timestamp.toLocaleString();
+}
+
+function ResponseVesselCard({ vessel }: { vessel: any }) {
+  return (
+    <article className="idp-response-vessel">
+      <div className="idp-response-vessel-head">
+        <div>
+          <strong>{vessel.vessel_name || "Unnamed response vessel"}</strong>
+          <small>MMSI {vessel.mmsi || "not provided"}</small>
+        </div>
+        <span>{formatDistance(vessel.distance_m)}</span>
+      </div>
+      <dl className="idp-response-vessel-details">
+        <div><dt>Company</dt><dd>{vessel.contractor_name || "Not provided"}</dd></div>
+        <div><dt>Certification</dt><dd>{vessel.tier_rating || "Not provided"}</dd></div>
+        <div><dt>Equipment</dt><dd>{vessel.equipment_summary || "Not provided"}</dd></div>
+        <div><dt>Location</dt><dd>{formatCoordinates(vessel.latitude, vessel.longitude)}</dd></div>
+        <div><dt>AIS last seen</dt><dd>{formatTimestamp(vessel.last_seen)}</dd></div>
+        <div>
+          <dt>Phone</dt>
+          <dd>{vessel.phone ? <a href={`tel:${vessel.phone}`}>{vessel.phone}</a> : "Not provided"}</dd>
+        </div>
+        <div>
+          <dt>Email</dt>
+          <dd>{vessel.email ? <a href={`mailto:${vessel.email}`}>{vessel.email}</a> : "Not provided"}</dd>
+        </div>
+      </dl>
+    </article>
+  );
+}
+
 export function IncidentDetailsPage({ incidentDetail, onBack, onSpotVessel, forecastHorizon, onForecastHorizonChange }: Props) {
   const [images, setImages] = useState<Partial<Record<SarArtifactKey, string>>>({});
 
@@ -124,7 +172,19 @@ export function IncidentDetailsPage({ incidentDetail, onBack, onSpotVessel, fore
               <p>{incidentDetail.cost_projection.nosdcp_tier} · USD {Number(incidentDetail.cost_projection.point_usd).toLocaleString()}</p>
               <p>Range: USD {Number(incidentDetail.cost_projection.low_usd).toLocaleString()}–{Number(incidentDetail.cost_projection.high_usd).toLocaleString()}</p>
               <small>{incidentDetail.cost_projection.volume_basis}</small>
-              <p>{incidentDetail.cost_projection.matched_vessels?.length || 0} certified response vessels matched.</p>
+              <div className="idp-response-summary">
+                <span>{incidentDetail.cost_projection.matched_vessels?.length || 0} certified response vessels matched</span>
+                <span>Landfall estimate: {incidentDetail.cost_projection.landfall_eta || "Unavailable"}</span>
+              </div>
+              {incidentDetail.cost_projection.matched_vessels?.length > 0 ? (
+                <div className="idp-response-vessels">
+                  {incidentDetail.cost_projection.matched_vessels.map((vessel: any, index: number) => (
+                    <ResponseVesselCard key={vessel.mmsi || `${vessel.vessel_name || "vessel"}-${index}`} vessel={vessel} />
+                  ))}
+                </div>
+              ) : (
+                <div className="idp-empty-state">No certified response vessels were matched within the configured search radius.</div>
+              )}
             </> : <p>Cost estimate not yet available.</p>}
           </section>
 
