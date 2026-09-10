@@ -83,14 +83,6 @@ export function SARLookalikeAnalysis({ incidentDetail, onShowCandidate }: Props)
   const brightDistance = first(root.distance_to_bright_target_m, root.ship_shadow?.distance_to_bright_target_m, shape.distance_to_bright_target_m);
   const adjacentBright = first(root.adjacent_bright_target, root.ship_shadow?.adjacent_bright_target, brightDistance !== undefined ? Number(brightDistance) <= 150 : undefined);
   const boundaryLabel = first(edge.classification, edge.boundary_type, root.boundary_type);
-  const components = [
-    ["Darkness", first(scores.darkness, scores.darkness_score), 30],
-    ["Texture", first(scores.texture, scores.texture_score, texture.texture_score), 20],
-    ["Shape", first(scores.shape, scores.shape_score), 20],
-    ["Area", first(scores.area, scores.area_score), 10],
-    ["Context", first(scores.context, scores.context_score, context.score), 20],
-  ] as const;
-
   return <section className="idp-card sla-card" aria-labelledby="sar-lookalike-heading">
     <div className="sla-heading">
       <div><small>SAR CANDIDATE EXPLAINABILITY</small><h3 id="sar-lookalike-heading">SAR Lookalike Analysis</h3></div>
@@ -105,15 +97,6 @@ export function SARLookalikeAnalysis({ incidentDetail, onShowCandidate }: Props)
     </div>
 
     {state === "unavailable" && <div className="sla-data-notice"><b>Candidate evidence was not returned by the API.</b><span>This panel is integration-ready and will populate when the incident response includes lookalike analysis. Values are never estimated in the browser.</span></div>}
-
-    <div className="sla-confidence">
-      <div className="sla-section-title"><div><b>Confidence breakdown</b><span>{isOnnx ? "The ONNX model returns one probability; legacy heuristic components are shown only when calculated." : "Backend score components; unavailable values are not treated as zero."}</span></div><strong>{percent(confidence)}</strong></div>
-      {components.map(([label, value, weight]) => {
-        const parsed = num(value);
-        const width = parsed === null ? 0 : Math.max(0, Math.min(100, parsed <= 1 ? parsed * 100 : parsed));
-        return <div className={`sla-score-row ${parsed === null ? "missing" : ""}`} key={label}><span>{label}<small>{weight}% model weight</small></span><div><i style={{ width: `${width}%` }}/></div><b>{percent(value)}</b></div>;
-      })}
-    </div>
 
     <div className="sla-sections">
       <EvidenceSection title="Ship shadow check" subtitle="Shape and proximity to a bright SAR vessel target" open={state === "ship-shadow"}>

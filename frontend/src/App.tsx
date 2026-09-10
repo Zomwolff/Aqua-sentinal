@@ -582,6 +582,7 @@ function App() {
     setSarUploadMmsi(selectedVessel?.mmsi || vessels[0]?.mmsi || "");
     setSarUploadFile(null);
     setS2File(null); setS2Bands([]); setAcquisitionTime(""); setSourceSceneId("");
+    setFusionResult(null);
     setSarUploadError("");
     setSarUploadOpen(true);
   };
@@ -615,6 +616,45 @@ function App() {
     ? Math.round(Number(activeForecast.confidence) * 100)
     : null;
 
+  const uploadedSurfaceAnomalyId = fusionResult?.oil_spill_detected && vesselDetail?.verdict?.status === "spill_detected"
+    ? String(vesselDetail.verdict.spill_id || "")
+    : "";
+
+  const openUploadedSurfaceAnomaly = async () => {
+    if (!uploadedSurfaceAnomalyId) return;
+    const listedIncident = incidents.find((item) => item.rawId === uploadedSurfaceAnomalyId);
+    if (listedIncident) {
+      await focusIncident(listedIncident);
+      return;
+    }
+    try {
+      const detail = await fetchIncidentDetail(uploadedSurfaceAnomalyId);
+      const row = detail.incident;
+      const severityName = String(detail.severity?.severity_level || "LOW").toLowerCase();
+      const incident: Incident = {
+        rawId: row.id,
+        id: row.id.substring(0, 8),
+        title: row.source === "synthetic" ? "Synthetic Slick" : "Surface Anomaly",
+        location: `${Number(row.latitude).toFixed(2)}N ${Number(row.longitude).toFixed(2)}E`,
+        age: new Date(row.detected_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        severity: (severityName === "moderate" ? "medium" : severityName) as Severity,
+        vessel: sarUploadMmsi ? `MMSI ${sarUploadMmsi}` : "Unknown",
+        area: `${Number(row.area_km2 || 0).toFixed(1)} km²`,
+        exposure: Number(detail.severity?.score || 0) > 0.5 ? "High" : "Low",
+        confidence: Math.round(Number(row.confidence || 0) * 100),
+        coordinates: [Number(row.longitude), Number(row.latitude)],
+      };
+      setSelectedIncident(incident);
+      setSelectedVessel(null);
+      setVesselDetail(null);
+      setIncidentDetail(detail);
+      setViewMode("incident");
+      mapRef.current?.flyTo({ center: incident.coordinates, zoom: 8.4, duration: 1000 });
+    } catch (error) {
+      console.error("Unable to open uploaded surface anomaly", error);
+    }
+  };
+
   const connectionLabel = { connected: "CONNECTED", connecting: "CONNECTING", reconnecting: "RECONNECTING", offline: "OFFLINE" }[connectionStatus];
 
   return (
@@ -622,7 +662,7 @@ function App() {
       <header className="topbar">
         <div className="brand"><div className="brand-mark"><span /></div><div><strong>AQUA SENTINEL</strong><small>MARITIME INTELLIGENCE NETWORK</small></div></div>
         <div className="header-center"><span className="live-dot" /> <span>LIVE OPERATIONS</span><i /> <span className="muted">{new Date().toUTCString()}</span></div>
-        <div className="header-meta"><div><small>ACTIVE INCIDENTS</small><b>{activeCount < 10 ? `0${activeCount}` : activeCount}</b></div><div><small>VESSELS TRACKED</small><b>{vessels.length}</b></div><button className={`ais-fetch-btn ${aisFetching ? "busy" : ""}`} onClick={handleFetchAis} disabled={aisFetching} title="Trigger an immediate live-AIS poll; results appear in the live signal feed">{aisFetching ? "FETCHING…" : "⟳ FETCH AIS"}</button><button className="add-sar-btn" onClick={openSarUpload}>+ ADD IMAGERY</button></div>
+        <div className="header-meta"><div><small>ACTIVE INCIDENTS</small><b>{activeCount < 10 ? `0${activeCount}` : activeCount}</b></div><div><small>VESSELS TRACKED</small><b>{vessels.length}</b></div>{uploadedSurfaceAnomalyId && <button className="surface-anomaly-btn" onClick={openUploadedSurfaceAnomaly}>VIEW SURFACE ANOMALY →</button>}<button className={`ais-fetch-btn ${aisFetching ? "busy" : ""}`} onClick={handleFetchAis} disabled={aisFetching} title="Trigger an immediate live-AIS poll; results appear in the live signal feed">{aisFetching ? "FETCHING…" : "⟳ FETCH AIS"}</button><button className="add-sar-btn" onClick={openSarUpload}>+ ADD IMAGERY</button></div>
       </header>
       <main className="workspace">
         <section className="map-pane">

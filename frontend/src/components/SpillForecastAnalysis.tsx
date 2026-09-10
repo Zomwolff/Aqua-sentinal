@@ -6,18 +6,14 @@ const num = (...values: any[]): number | null => { const v = first(...values); r
 const pct = (v: any) => { const n = num(v); return n === null ? "Unavailable" : `${(n <= 1 ? n * 100 : n).toFixed(0)}%`; };
 const distance = (meters: any) => { const n = num(meters); return n === null ? "Unavailable" : `${(n / 1000).toFixed(2)} km`; };
 const area = (v: any) => { const n = num(v); return n === null ? "Unavailable" : `${n.toFixed(2)} km²`; };
-const speed = (v: any, unit: string) => { const n = num(v); return n === null ? "Unavailable" : `${n.toFixed(2)} ${unit}`; };
-const compass = (degrees: any) => { const n = num(degrees); if (n === null) return "Unavailable"; const names = ["N","NE","E","SE","S","SW","W","NW"]; return `${names[Math.round((((n % 360) + 360) % 360) / 45) % 8]} · ${n.toFixed(0)}°`; };
 
 const forecastArea = (row: any) => first(row?.forecast_area_km2, row?.area_km2, row?.predicted_area_km2, row?.geometry_area_km2);
-const forcing = (detail: any, row: any) => first(row?.environmental_forcing, row?.forcing, detail?.environmental_forcing, detail?.environmental_conditions, detail?.forecast_forcing) || {};
 
 export function SpillForecastAnalysis({ incidentDetail, horizon, onHorizonChange }: Props) {
   const incident = incidentDetail?.incident || {};
   const forecasts = [...(incidentDetail?.forecasts || [])].sort((a: any, b: any) => Number(a.horizon_hours) - Number(b.horizon_hours));
   const horizons = Array.from(new Set([0, ...forecasts.map((row: any) => Number(row.horizon_hours)).filter(Number.isFinite)]));
   const selected = horizon === 0 ? null : forecasts.find((row: any) => Number(row.horizon_hours) === horizon) || null;
-  const env = forcing(incidentDetail, selected);
   const selectedArea = selected ? forecastArea(selected) : incident.area_km2;
   const model = first(selected?.model_type, selected?.model, selected?.model_version);
   const modelName = model ? String(model) : "Unavailable";
@@ -27,14 +23,7 @@ export function SpillForecastAnalysis({ incidentDetail, horizon, onHorizonChange
   const maxArea = validAreas.length ? Math.max(...validAreas.map((p) => p.value), .01) : 1;
   const maxHorizon = Math.max(...areas.map((p) => p.h), 1);
   const chartPoints = validAreas.map((p) => `${22 + (p.h / maxHorizon) * 256},${104 - (p.value / maxArea) * 82}`).join(" ");
-  const windSpeedMs = first(env.wind_speed_ms, selected?.wind_speed_ms);
-  const windSpeedKmh = first(env.wind_speed_kmh, selected?.wind_speed_kmh, num(windSpeedMs) === null ? undefined : Number(windSpeedMs) * 3.6);
-  const currentSpeed = first(env.current_speed_ms, selected?.current_speed_ms);
-  const windDirection = first(env.wind_direction_deg, env.wind_dir_deg, selected?.wind_direction_deg);
-  const currentDirection = first(env.current_direction_deg, env.current_dir_deg, selected?.current_direction_deg);
   const direction = first(selected?.direction, selected?.drift_direction);
-  const windLeeway = first(selected?.wind_leeway_percent, env.wind_leeway_percent);
-  const currentContribution = first(selected?.current_contribution_percent, env.current_contribution_percent);
 
   return <section className="idp-card sfa-card">
     <div className="sfa-heading"><div><small>MODEL OUTLOOK · NOT OBSERVED EXTENT</small><h3>Spill Forecast</h3></div><span>{horizon === 0 ? "OBSERVED NOW" : `+${horizon}H FORECAST`}</span></div>
@@ -51,8 +40,6 @@ export function SpillForecastAnalysis({ incidentDetail, horizon, onHorizonChange
     <div className="sfa-explanation"><b>How is the spill moving?</b><p>{horizon === 0 ? "This is the currently observed spill extent. Select a forecast horizon to inspect predicted movement and expansion." : <>The selected model forecasts movement using the returned wind/current forcing. At +{horizon}h, backend-reported drift is <strong>{distance(selected?.drift_distance_m)}</strong> and the predicted footprint is <strong>{area(selectedArea)}</strong>. Direction: <strong>{String(direction || "Unavailable")}</strong>.</>}</p></div>
 
     <div className="sfa-chart-card"><div className="sfa-subhead"><div><b>Predicted spill area</b><span>Observed extent and backend forecast areas</span></div></div>{validAreas.length > 1 ? <><svg className="sfa-chart" viewBox="0 0 300 125" role="img" aria-label="Forecast spill area growth"><line x1="22" y1="104" x2="282" y2="104"/><line x1="22" y1="18" x2="22" y2="104"/><polyline points={chartPoints}/>{validAreas.map((p) => <g key={p.h}><circle cx={22 + (p.h/maxHorizon)*256} cy={104-(p.value/maxArea)*82} r="4"/><text x={22+(p.h/maxHorizon)*256} y="119" textAnchor="middle">{p.h ? `${p.h}h` : "Now"}</text></g>)}</svg><p>Forecast footprint change is shown only where the backend supplies an area.</p></> : <div className="sfa-empty">Area-growth visualization unavailable until forecast area values are returned.</div>}</div>
-
-    <div className="sfa-drivers"><div className="sfa-subhead"><div><b>Environmental drivers</b><span>Forcing returned for the selected horizon</span></div></div><div><span><small>Wind</small><b>{speed(windSpeedKmh, "km/h")}</b><em>{compass(windDirection)}</em></span><span><small>Current</small><b>{speed(currentSpeed, "m/s")}</b><em>{compass(currentDirection)}</em></span><span><small>Wind leeway</small><b>{windLeeway === undefined ? "Unavailable" : pct(windLeeway)}</b><em>surface contribution</em></span><span><small>Current contribution</small><b>{currentContribution === undefined ? "Unavailable" : pct(currentContribution)}</b><em>advection forcing</em></span></div></div>
 
     <div className="sfa-model"><div><small>ACTIVE FORECAST MODEL</small><b>{modelName}</b></div><ul>{ensemble ? <><li>Time-varying wind/current forcing</li><li>Particle advection</li><li>Random-walk turbulent diffusion</li></> : <><li>Current and wind-driven drift</li><li>Diffusion-based footprint spread</li><li>Analytic fallback when forcing samples are sparse</li></>}<li>Model confidence decreases with horizon</li></ul></div>
 

@@ -64,7 +64,7 @@ def project_cost(
             "high_usd": round(point * 1.35, 2),
         })
     final = curve[-1]
-    usd_to_inr = 83.0
+    usd_to_inr = 95.0
     return {
         "nosdcp_tier": tier,
         "estimated_volume_tonnes": round(volume, 3),

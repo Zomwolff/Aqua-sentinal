@@ -35,6 +35,16 @@ function formatTimestamp(value: unknown) {
   return Number.isNaN(timestamp.getTime()) ? String(value) : timestamp.toLocaleString();
 }
 
+function rupeesFromUsd(value: unknown) {
+  const usd = Number(value);
+  if (!Number.isFinite(usd)) return "Unavailable";
+  return new Intl.NumberFormat("en-IN", {
+    style: "currency",
+    currency: "INR",
+    maximumFractionDigits: 0,
+  }).format(usd * 95);
+}
+
 function ResponseVesselCard({ vessel }: { vessel: any }) {
   return (
     <article className="idp-response-vessel">
@@ -169,8 +179,8 @@ export function IncidentDetailsPage({ incidentDetail, onBack, onSpotVessel, fore
           <section className="idp-card">
             <h3>Response Cost Estimate</h3>
             {incidentDetail.cost_projection ? <>
-              <p>{incidentDetail.cost_projection.nosdcp_tier} · USD {Number(incidentDetail.cost_projection.point_usd).toLocaleString()}</p>
-              <p>Range: USD {Number(incidentDetail.cost_projection.low_usd).toLocaleString()}–{Number(incidentDetail.cost_projection.high_usd).toLocaleString()}</p>
+              <p>{incidentDetail.cost_projection.nosdcp_tier} · {rupeesFromUsd(incidentDetail.cost_projection.point_usd)}</p>
+              <p>Range: {rupeesFromUsd(incidentDetail.cost_projection.low_usd)}–{rupeesFromUsd(incidentDetail.cost_projection.high_usd)}</p>
               <small>{incidentDetail.cost_projection.volume_basis}</small>
               <div className="idp-response-summary">
                 <span>{incidentDetail.cost_projection.matched_vessels?.length || 0} certified response vessels matched</span>
