@@ -5,6 +5,7 @@ redis[hiredis]
 asyncpg
 pydantic>=2.0
 numpy
+rasterio
 matplotlib
 earthengine-api
 google-api-python-client

@@ -1,3 +1,5 @@
+"""Manual upload/ONNX mask service; distinct from automated evidence-fusion."""
+
 from pathlib import Path
 import shutil, uuid
 import numpy as np
@@ -28,6 +30,7 @@ async def upload(sentinel1:UploadFile=File(...),sentinel2:UploadFile|None=File(N
   else:
    s2=inp/'s2_bands'; s2.mkdir()
    for f in sentinel2_bands or []: await save(f,s2/Path(f.filename or 'band.tif').name)
+   print("S2_BANDS_SAVED:", [(p.name, p.stat().st_size) for p in s2.iterdir()], flush=True)
   sar=_sar_probability(s1,SAR_ONNX); sp=out/'sar.tif'
   with rasterio.open(s1) as x:
    prof=x.profile.copy(); prof.update(count=1,dtype='float32',nodata=0)

@@ -107,7 +107,7 @@ Run inference on a ten-band GeoTIFF:
 ```powershell
 python "optical imagery/sentinel2_interface.py" `
    "D:/path/to/10_band.tif" `
-   --checkpoint "optical imagery/sentinel2_unet_seg_best.pth" `
+   --checkpoint "optical imagery/sentinel2_unet_binary_best.pth" `
    --output-dir "inference_output"
 ```
 

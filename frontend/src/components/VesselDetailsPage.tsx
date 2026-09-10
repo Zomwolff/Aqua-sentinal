@@ -49,7 +49,7 @@ export function VesselDetailsPage({ vesselDetail, onBack, liveEvent, fusionResul
   // Once this vessel is attributed to a spill, load the backend-computed
   // intelligence report for the independently scrollable left rail.
   useEffect(() => {
-    const spillId = vesselDetail?.verdict?.spill_id;
+    const spillId = vesselDetail?.linked_spill?.spill_id || vesselDetail?.verdict?.spill_id;
     let cancelled = false;
     setIncidentReport(null);
     setReportError(null);
@@ -68,7 +68,7 @@ export function VesselDetailsPage({ vesselDetail, onBack, liveEvent, fusionResul
       });
 
     return () => { cancelled = true; };
-  }, [vesselDetail?.verdict?.spill_id]);
+  }, [vesselDetail?.linked_spill?.spill_id, vesselDetail?.verdict?.spill_id]);
 
   if (!vesselDetail) {
     return (
@@ -80,6 +80,8 @@ export function VesselDetailsPage({ vesselDetail, onBack, liveEvent, fusionResul
   }
 
   const { vessel, risk, sar_tasking, anomalies } = vesselDetail;
+  const linkedSpill = vesselDetail.linked_spill;
+  const optical = linkedSpill?.candidate;
   const riskTier = risk?.tier?.toLowerCase() || 'low';
   const previewPendingLabel = sar_tasking?.status === "failed" ? "PROCESSING FAILED" : "PENDING";
 
@@ -193,6 +195,30 @@ export function VesselDetailsPage({ vesselDetail, onBack, liveEvent, fusionResul
           </div>
 
           <AnomalyDetectionCard anomalies={anomalies} risk={risk} />
+
+          {linkedSpill && (
+            <div className="idp-card">
+              <h3>Evidence Enrichment</h3>
+              <div className="idp-stats-grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
+                <div className="idp-stat">
+                  <label>Optical Verification</label>
+                  <div className="idp-val">{optical?.optical_cloud_free ? `${Math.round(Number(optical.optical_oil_probability || 0) * 100)}% oil probability` : optical?.optical_checked_at ? "No cloud-free scene" : "Pending Sentinel-2"}</div>
+                </div>
+                <div className="idp-stat">
+                  <label>Ecological Records</label>
+                  <div className="idp-val">{linkedSpill.ecological?.impact_count || 0}</div>
+                </div>
+                <div className="idp-stat">
+                  <label>Forecast Horizons</label>
+                  <div className="idp-val">{linkedSpill.incident?.forecasts?.length || 0}</div>
+                </div>
+                <div className="idp-stat">
+                  <label>Cost Projection</label>
+                  <div className="idp-val">{linkedSpill.cost ? `${linkedSpill.cost.nosdcp_tier} / INR ${Number(linkedSpill.cost.point_inr || 0).toLocaleString()}` : "Pending"}</div>
+                </div>
+              </div>
+            </div>
+          )}
 
           <div className="idp-card">
             <h3>Final Verdict</h3>

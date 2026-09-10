@@ -16,6 +16,11 @@ export default defineConfig({
         target: "http://localhost:8015",
         changeOrigin: true,
       },
+      "/fusion": {
+        target: "http://localhost:8017",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/fusion/, ""),
+      },
       "/live": {
         target: "ws://localhost:8015",
         ws: true,

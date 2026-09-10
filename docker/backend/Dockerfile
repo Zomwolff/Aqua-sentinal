@@ -21,6 +21,8 @@ WORKDIR /svc
 
 COPY docker/backend/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
+COPY infra/postgres/migrations /svc/migrations
+COPY docker/backend/migration_runner.py /svc/migration_runner.py
 
 # ── evidence-fusion :8010 ─────────────────────────────────────────────────────
 RUN mkdir -p /svc/evidence-fusion
@@ -68,6 +70,14 @@ COPY services/shared/redis_client.py /svc/drift-forecast/shared/redis_client.py
 COPY services/drift-forecast/app /svc/drift-forecast/app
 RUN sed -i 's#sys\.path\.insert(0, "/app")#sys.path.insert(0, "/svc/drift-forecast")#' /svc/drift-forecast/app/*.py
 
+# ── ecological-impact (Redis worker, no HTTP port) ───────────────────────────
+RUN mkdir -p /svc/ecological-impact
+COPY shared/db /svc/ecological-impact/shared/db
+COPY shared/__init__.py /svc/ecological-impact/shared/__init__.py
+COPY services/shared/redis_client.py /svc/ecological-impact/shared/redis_client.py
+COPY services/ecological-impact/app /svc/ecological-impact/app
+RUN sed -i 's#sys\.path\.insert(0, "/app")#sys.path.insert(0, "/svc/ecological-impact")#' /svc/ecological-impact/app/*.py
+
 # ── api-gateway :8015 (public entrypoint) ─────────────────────────────────────
 RUN mkdir -p /svc/api-gateway
 COPY services/shared /svc/api-gateway/shared
@@ -77,4 +87,4 @@ RUN sed -i 's#sys\.path\.insert(0, "/app")#sys.path.insert(0, "/svc/api-gateway"
 COPY docker/backend/supervisord.conf /etc/supervisor/supervisord.conf
 
 EXPOSE 8015
-CMD ["supervisord", "-n", "-c", "/etc/supervisor/supervisord.conf"]
+CMD ["python", "/svc/migration_runner.py", "supervisord", "-n", "-c", "/etc/supervisor/supervisord.conf"]

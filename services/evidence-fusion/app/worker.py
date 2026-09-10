@@ -1,4 +1,6 @@
-"""Evidence-fusion worker: fuse SAR candidates with nearby vessel-risk context.
+"""Automated Redis evidence pipeline; distinct from manual fusion-upload.
+
+Evidence-fusion worker: fuse SAR candidates with nearby vessel-risk context.
 
 Consumes:
 

@@ -69,6 +69,12 @@ OPTICAL_STREAM = "optical.confirmed"
 
 STATE: Dict[str, Any] = {
     "heartbeat": None,
+    "last_success": None,
+    "last_error": None,
+    "consecutive_errors": 0,
+    "fatal_error": None,
+    "gee_configured": False,
+    "reason": None,
     "candidates_seen": 0,
     "cloud_free_found": 0,
     "no_cloud_free_scene": 0,
@@ -155,6 +161,9 @@ async def _process_candidate(data: Dict[str, Any], pool, redis) -> None:
 
     await _store_result(pool, candidate_id, scene["id"], result)
     STATE["classifications_run"] += 1
+    STATE["last_success"] = datetime.now(timezone.utc).isoformat()
+    STATE["consecutive_errors"] = 0
+    STATE["last_error"] = None
     await publish_to_stream(redis, OPTICAL_STREAM, {
         "candidate_id": candidate_id,
         "scene_id": scene["id"],
@@ -170,26 +179,52 @@ async def _process_candidate(data: Dict[str, Any], pool, redis) -> None:
 
 async def _worker_loop() -> None:
     gee_configured = bool(os.getenv("GEE_SERVICE_ACCOUNT")) and bool(os.getenv("GEE_PRIVATE_KEY_PATH"))
+    STATE["gee_configured"] = gee_configured
     if not gee_configured:
+        STATE["reason"] = "gee_credentials_not_configured"
         log.warning("eo: GEE_SERVICE_ACCOUNT/GEE_PRIVATE_KEY_PATH not set — "
                     "worker will idle (manual /classify/upload still works)")
         while True:
             STATE["heartbeat"] = time.time()
             await asyncio.sleep(30)
 
-    gee_optical.init_gee()
-    pool = await create_pool()
-    redis = await get_redis()
-    await ensure_consumer_group(redis, FILTERED_STREAM, CONSUMER_GROUP)
+    try:
+        gee_optical.init_gee()
+        pool = await create_pool()
+        redis = await get_redis()
+        await ensure_consumer_group(redis, FILTERED_STREAM, CONSUMER_GROUP)
+    except Exception as exc:
+        STATE["fatal_error"] = str(exc)
+        STATE["last_error"] = str(exc)
+        log.exception("eo: worker startup failed")
+        return
+
+    STATE["reason"] = None
     log.info("eo worker started, consuming %s", FILTERED_STREAM)
 
     while True:
         STATE["heartbeat"] = time.time()
-        messages = await consume_stream(redis, FILTERED_STREAM, CONSUMER_GROUP, "eo-worker", count=10, block_ms=5000)
+        try:
+            messages = await consume_stream(
+                redis, FILTERED_STREAM, CONSUMER_GROUP, "eo-worker",
+                count=10, block_ms=5000, acknowledge=False,
+            )
+        except Exception as exc:
+            STATE["last_error"] = str(exc)
+            STATE["consecutive_errors"] += 1
+            if STATE["consecutive_errors"] >= 3:
+                STATE["fatal_error"] = str(exc)
+                log.exception("eo: consumer loop failed repeatedly")
+                return
+            log.exception("eo: consumer read failed")
+            continue
         for message in messages:
             try:
                 await _process_candidate(message["data"], pool, redis)
-            except Exception:
+                await redis.xack(FILTERED_STREAM, CONSUMER_GROUP, message["id"])
+            except Exception as exc:
+                STATE["last_error"] = str(exc)
+                STATE["consecutive_errors"] += 1
                 log.exception("eo: unhandled error processing message")
                 STATE["errors"] += 1
 
@@ -197,6 +232,7 @@ async def _worker_loop() -> None:
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     task = asyncio.create_task(_worker_loop())
+    app.state.worker_task = task
     yield
     task.cancel()
 
@@ -207,7 +243,27 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": SERVICE_NAME, **STATE}
+    task = getattr(app.state, "worker_task", None)
+    heartbeat = STATE["heartbeat"]
+    stale = heartbeat is None or (time.time() - heartbeat) > 90
+    if not STATE["gee_configured"]:
+        status = "degraded"
+        reason = "gee_credentials_not_configured"
+    elif STATE["fatal_error"] or (task is not None and task.done()) or stale:
+        status = "unhealthy"
+        reason = STATE["fatal_error"] or STATE["last_error"] or "worker_heartbeat_stale"
+    else:
+        status = "ok"
+        reason = STATE["reason"]
+    return {
+        "status": status,
+        "service": SERVICE_NAME,
+        "last_heartbeat": datetime.fromtimestamp(heartbeat, timezone.utc).isoformat() if heartbeat else None,
+        "last_error": STATE["last_error"],
+        "gee_configured": STATE["gee_configured"],
+        "reason": reason,
+        **STATE,
+    }
 
 
 @app.post("/classify/upload")

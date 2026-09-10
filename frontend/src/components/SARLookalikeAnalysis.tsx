@@ -63,7 +63,7 @@ export function SARLookalikeAnalysis({ incidentDetail, onShowCandidate }: Props)
     const edge = first(root.edge, root.boundary, root.edge_analysis) || {};
     const context = first(root.context, root.context_analysis) || {};
     const scores = first(root.score_components, root.confidence_breakdown, root.scores) || {};
-    const label = first(root.classification_label, root.classification, root.status);
+    const label = first(root.classification_label, root.classification);
     const state = candidateState(label);
     return { incident, root, shape, texture, edge, context, scores, label, state };
   }, [incidentDetail]);

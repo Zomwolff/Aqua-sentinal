@@ -1,4 +1,11 @@
-# Production Fusion API
+# Manual Fusion Upload API
+
+This package is the ad-hoc upload-triggered path exposed by the standalone
+`fusion` container on port 8017 (`/fusion/upload`). It is separate from
+`services/evidence-fusion`, the automated Redis-stream worker inside the
+`backend` container. The manual API fuses user-supplied rasters immediately;
+the worker correlates persisted SAR candidates with AIS risk and optical
+evidence.
 
 The integration entrypoint is:
 

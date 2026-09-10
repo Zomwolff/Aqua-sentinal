@@ -193,9 +193,9 @@ raw, likely_ship_shadow, likely_calm_water, possible_slick, possible_oil_spill, 
 
 | File | Change |
 |---|---|
-| `migrate_stage2.sql` | Create `spill_candidates` + enum `raw`. |
-| `migrate_stage3.sql` | Add `likely_ship_shadow`, `likely_calm_water`, `possible_slick`. |
-| `migrate_stage4.sql` | Add `possible_oil_spill`, `low_confidence`; add `confidence`, `classification_label`, `texture_features`. |
+| `005_stage2.sql` | Create `spill_candidates` + enum `raw`. |
+| `006_stage3.sql` | Add `likely_ship_shadow`, `likely_calm_water`, `possible_slick`. |
+| `007_stage4.sql` | Add `possible_oil_spill`, `low_confidence`; add `confidence`, `classification_label`, `texture_features`. |
 
 All were applied to the compose developer Postgres. Always show the migration +
 `init.sql` diff and obtain approval before executing against a database.
@@ -429,5 +429,5 @@ processed normally) is prepared but pending database migration approval.
    (`length_px=40`, `width_px=8`, `angle_deg=30`, `darkness_db=-6`) are fixtures,
    not validated oil-spill characteristics; `INJECT_SYNTHETIC` stays disabled
    unless explicitly enabled.
-5. **`migrate_stage5.sql`** — `is_synthetic` column prepared but not yet applied
+5. **`008_stage5.sql`** — `is_synthetic` column prepared but not yet applied
    to the database (pending approval).

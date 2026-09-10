@@ -16,6 +16,27 @@ _STD = np.asarray([0.229, 0.224, 0.225], dtype=np.float32)
 _BAND_PATTERN = re.compile(r"(?:^|[^A-Z0-9])B(8A|0?[2-8]|1[12])(?:[^A-Z0-9]|$)", re.IGNORECASE)
 
 
+_WAVELENGTH_TO_BAND = {
+    492: "B2", 560: "B3", 665: "B4", 704: "B5", 740: "B6",
+    783: "B7", 833: "B8", 865: "B8A", 1614: "B11", 2202: "B12",
+}
+_WAVELENGTH_TOLERANCE_NM = 15  # safe: closest real band centers are 32nm apart
+
+
+def _band_token(name):
+    match = _BAND_PATTERN.search(name.upper())
+    if match:
+        token = match.group(1).upper()
+        return "B8A" if token == "8A" else f"B{int(token)}"
+    # Fallback: ACOLITE-style L2R/rhorc outputs name bands by center
+    # wavelength (nm) instead of a Bxx code, e.g. "..._rhorc_492_11.tif".
+    for candidate in re.findall(r"\d+", name):
+        wavelength = int(candidate)
+        for center, band in _WAVELENGTH_TO_BAND.items():
+            if abs(wavelength - center) <= _WAVELENGTH_TOLERANCE_NM:
+                return band
+    return None
+
 def _session(path: Path):
     import onnxruntime as ort
     return ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])

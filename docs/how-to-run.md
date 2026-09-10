@@ -124,7 +124,7 @@ These are the tools the repository actually references (from `docker-compose.yml
 ├── docs/                      # api-contracts.md, spatial.md, SAR_DEMO.md, sar-spill-pipeline.md, architecture.md, context-files/
 ├── infra/
 │   ├── postgres/init.sql      # PostGIS schema (run once on first volume creation)
-│   ├── postgres/migrate_stage1..5.sql   # idempotent migration files (Section 7.4)
+│   ├── postgres/migrations/             # ordered idempotent migrations (Section 7.4)
 │   └── redis/redis.conf
 ├── shared/                    # canonical shared Python package
 │   ├── spatial/               #   constants.py, geo.py (geography-cast helpers)
@@ -337,7 +337,7 @@ the key contents in any log, ticket, screenshots, or this file.
   that directory **only on first creation of a fresh `pgdata` volume**. It creates the
   PostGIS + uuid-ossp extensions, all enums, and the full schema (§7.3). Re-running it on
   an existing volume does nothing.
-- **Migration files:** `infra/postgres/migrate_stage1.sql` … `migrate_stage5.sql` are
+- **Migration files:** `infra/postgres/migrations/004_stage1.sql` … `008_stage5.sql` are
   **SQL files you apply manually** (Section 7.2). They are **idempotent** (`IF NOT
   EXISTS`, `ADD VALUE IF NOT EXISTS`) and kept aligned with `init.sql` because init.sql
   only runs once. Stages 2–4 build the `spill_candidates` table + status enum; stage 5
@@ -359,10 +359,10 @@ docker compose exec postgres psql -U postgres -d maritime_oilspill
 docker compose exec postgres psql -U postgres -d maritime_oilspill -c "SELECT PostGIS_Version();"
 
 # Apply the SAR migrations (idempotent; run from the repo root)
-cat infra/postgres/migrate_stage2.sql | docker compose exec -T postgres psql -U postgres -d maritime_oilspill
-cat infra/postgres/migrate_stage3.sql | docker compose exec -T postgres psql -U postgres -d maritime_oilspill
-cat infra/postgres/migrate_stage4.sql | docker compose exec -T postgres psql -U postgres -d maritime_oilspill
-cat infra/postgres/migrate_stage5.sql | docker compose exec -T postgres psql -U postgres -d maritime_oilspill
+cat infra/postgres/migrations/005_stage2.sql | docker compose exec -T postgres psql -U postgres -d maritime_oilspill
+cat infra/postgres/migrations/006_stage3.sql | docker compose exec -T postgres psql -U postgres -d maritime_oilspill
+cat infra/postgres/migrations/007_stage4.sql | docker compose exec -T postgres psql -U postgres -d maritime_oilspill
+cat infra/postgres/migrations/008_stage5.sql | docker compose exec -T postgres psql -U postgres -d maritime_oilspill
 cat infra/postgres/migrate_research_fixes.sql | docker compose exec -T postgres psql -U postgres -d maritime_oilspill
 
 # Verify the full standard schema programmatically
@@ -1057,10 +1057,10 @@ docker compose build
 docker compose up -d postgres redis
 
 # 5. Apply the SAR migrations (idempotent)
-cat infra/postgres/migrate_stage2.sql | docker compose exec -T postgres psql -U postgres -d maritime_oilspill
-cat infra/postgres/migrate_stage3.sql | docker compose exec -T postgres psql -U postgres -d maritime_oilspill
-cat infra/postgres/migrate_stage4.sql | docker compose exec -T postgres psql -U postgres -d maritime_oilspill
-cat infra/postgres/migrate_stage5.sql | docker compose exec -T postgres psql -U postgres -d maritime_oilspill
+cat infra/postgres/migrations/005_stage2.sql | docker compose exec -T postgres psql -U postgres -d maritime_oilspill
+cat infra/postgres/migrations/006_stage3.sql | docker compose exec -T postgres psql -U postgres -d maritime_oilspill
+cat infra/postgres/migrations/007_stage4.sql | docker compose exec -T postgres psql -U postgres -d maritime_oilspill
+cat infra/postgres/migrations/008_stage5.sql | docker compose exec -T postgres psql -U postgres -d maritime_oilspill
 
 # 6. Start the application services
 docker compose up -d data-ingestion ais-reader ais-analytics anomaly-detection \

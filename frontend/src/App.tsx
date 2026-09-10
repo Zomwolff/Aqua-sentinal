@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import maplibregl, { Map as MapLibreMap } from "maplibre-gl";
 import {
   fetchVessels, fetchIncidents, fetchIncidentDetail, fetchVesselDetail,
+  fetchFlaggedVesselDetail,
   fetchVesselTrack, triggerLiveAisFetch, fetchProtectedAreas,
   fetchDarkVessels, fetchStsEvents, fetchSpoofingSuspects,
   uploadSarImage,
@@ -39,6 +40,7 @@ function App() {
   const [historicalFeed, setHistoricalFeed] = useState<FeedItem[]>([]);
   const { feed, liveEvent, connectionStatus } = useLiveFeeds(historicalFeed);
   const [vessels, setVessels] = useState<Vessel[]>([]);
+  const vesselsRef = useRef<Vessel[]>([]);
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [activeCount, setActiveCount] = useState(0);
   const [historicalSceneId, setHistoricalSceneId] = useState<string | null>(null);
@@ -70,7 +72,7 @@ function App() {
         let newFeed: FeedItem[] = [];
 
         if (mounted && vData.vessels) {
-          setVessels(vData.vessels.map((v: any) => ({
+          const mappedVessels = vData.vessels.map((v: any) => ({
              id: `v-${v.mmsi}`,
              name: v.vessel_name || `Vessel ${v.mmsi}`,
              mmsi: String(v.mmsi),
@@ -81,7 +83,9 @@ function App() {
              detail: v.risk_tier ? "Risk rules triggered" : "Normal tracking",
              sar_status: v.sar_status || null,
              detected_spill_id: v.detected_spill_id || null
-          })));
+          }));
+          vesselsRef.current = mappedVessels;
+          setVessels(mappedVessels);
 
           // Add risk-flagged vessels to the historical feed
           vData.vessels.forEach((v: any) => {
@@ -370,11 +374,8 @@ function App() {
       map.on("click", "vessel-points", (event) => {
         const feature = event.features?.[0];
         const mmsi = feature?.properties?.mmsi;
-        setVessels(curr => {
-            const v = curr.find((item) => item.mmsi === String(mmsi));
-            if (v) setSelectedVessel(v);
-            return curr;
-        });
+        const vessel = vesselsRef.current.find((item) => item.mmsi === String(mmsi));
+        if (vessel) focusFlaggedVessel(vessel);
       });
       map.on("mouseenter", "vessel-points", () => { map.getCanvas().style.cursor = "pointer"; });
       map.on("mouseleave", "vessel-points", () => { map.getCanvas().style.cursor = ""; });
@@ -512,7 +513,7 @@ function App() {
     mapRef.current?.flyTo({ center: vessel.coordinates, zoom: 8.4, duration: 1000 });
     loadVesselTrack(vessel.mmsi);
     try {
-       const data = await fetchVesselDetail(vessel.mmsi);
+      const data = await fetchFlaggedVesselDetail(vessel.mmsi);
        setVesselDetail(data);
     } catch (e) {
        console.error(e);
@@ -790,7 +791,7 @@ function App() {
               </select>
             </label>
             <label><span>SENTINEL-2 MULTIBAND TIFF</span><input type="file" accept=".tif,.tiff" onChange={e=>{setS2File(e.target.files?.[0]||null);setS2Bands([])}} /><small>Required bands are selected and reordered automatically.</small></label>
-            <label><span>OR INDIVIDUAL S2 BANDS</span><input type="file" accept=".tif,.tiff" multiple onChange={e=>{setS2Bands(Array.from(e.target.files||[]));setS2File(null)}} /></label>
+            <label><span>OR INDIVIDUAL S2 BANDS</span><input type="file" accept=".tif,.tiff" multiple onChange={e=>{const files=Array.from(e.target.files||[]); console.debug("Sentinel-2 band selection", JSON.stringify(files.map(file=>({filename:file.name, extractedCode:file.name.match(/(?:^|[^A-Z0-9])B(8A|0?[2-8]|1[12])(?:[^A-Z0-9]|$)/i)?.[1]||null})))); setS2Bands(files);setS2File(null)}} /></label>
             <label>
               <span>SAR RASTER</span>
               <input type="file" accept=".tif,.tiff,.png,.jpg,.jpeg,image/tiff,image/png,image/jpeg" onChange={(event) => setSarUploadFile(event.target.files?.[0] || null)} required />

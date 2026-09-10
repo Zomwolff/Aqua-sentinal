@@ -5,7 +5,7 @@ Phase 2: Load preprocessed ecological receptor GeoJSON files into the
 PostGIS ecological_receptors table.
 
 Prerequisites:
-  1. migrate_ecological.sql has been applied to the database.
+    1. migrations/010_ecological_receptors.sql has been applied to the database.
   2. acquire_ecological_data.py has been run and produced the processed
      GeoJSON files in data/ecological/processed/.
 

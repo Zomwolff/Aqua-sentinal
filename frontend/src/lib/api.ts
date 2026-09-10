@@ -52,9 +52,21 @@ export async function fetchIncidentDetail(id: string) {
   return res.json();
 }
 
+export async function fetchSpillCandidate(id: string) {
+  const res = await fetch(`${API_BASE}/spill/candidates/${encodeURIComponent(id)}`);
+  if (!res.ok) throw new Error("Failed to fetch spill candidate");
+  return res.json();
+}
+
 export async function fetchVesselDetail(mmsi: string | number) {
   const res = await fetch(`${API_BASE}/vessels/${mmsi}`);
   if (!res.ok) throw new Error("Failed to fetch vessel detail");
+  return res.json();
+}
+
+export async function fetchFlaggedVesselDetail(mmsi: string | number) {
+  const res = await fetch(`${API_BASE}/vessels/${encodeURIComponent(String(mmsi))}/detail`);
+  if (!res.ok) throw new Error("Failed to fetch flagged vessel detail");
   return res.json();
 }
 

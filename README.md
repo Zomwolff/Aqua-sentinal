@@ -1,5 +1,10 @@
 # Aqua Sentinel — Maritime Oil-Spill Detection & Attribution
 
+There are two intentional fusion paths: `evidence-fusion` in the `backend`
+container consumes Redis events for automation, while the standalone
+`fusion` container exposes `/fusion/upload` for manual SAR/optical raster
+testing through ONNX models.
+
 A real-time maritime intelligence system for the Smart India Hackathon that detects oil spills from SAR imagery and AIS vessel data, fuses the evidence, attributes spills to source vessels, and recommends response actions. A pipeline of Python/FastAPI microservices exchanges events over Redis Streams, persists spatio-temporal data in PostGIS, and serves a live Leaflet-based dashboard through an API gateway.
 
 ## Prerequisites

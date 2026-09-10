@@ -113,23 +113,34 @@ async def consume_stream(
     consumer: str,
     count: int = 100,
     block_ms: int = 2000,
+    acknowledge: bool = True,
 ) -> List[Dict[str, Any]]:
     """
     Read pending + new messages from a Redis Stream consumer group.
     Returns a list of {id, data} dicts.
-    Automatically acknowledges each message after returning it.
+    Acknowledges each message while reading by default. Set ``acknowledge``
+    false when the caller must acknowledge only after successful processing.
 
     The caller is responsible for processing before the next call so that
     unprocessed messages are re-delivered on the next block.
     """
     try:
+        stream_id = "0" if not acknowledge else ">"
         results = await client.xreadgroup(
             groupname=group,
             consumername=consumer,
-            streams={stream: ">"},
+            streams={stream: stream_id},
             count=count,
-            block=block_ms,
+            block=0 if not acknowledge else block_ms,
         )
+        if not acknowledge and not results:
+            results = await client.xreadgroup(
+                groupname=group,
+                consumername=consumer,
+                streams={stream: ">"},
+                count=count,
+                block=block_ms,
+            )
     except Exception as exc:
         log.error("xreadgroup failed on stream %s: %s", stream, exc)
         return []
@@ -141,11 +152,11 @@ async def consume_stream(
     for _stream_name, entries in results:
         for msg_id, data in entries:
             messages.append({"id": msg_id, "data": data})
-            # Acknowledge immediately — we process synchronously
-            try:
-                await client.xack(stream, group, msg_id)
-            except Exception as ack_exc:
-                log.warning("xack failed for %s on %s: %s", msg_id, stream, ack_exc)
+            if acknowledge:
+                try:
+                    await client.xack(stream, group, msg_id)
+                except Exception as ack_exc:
+                    log.warning("xack failed for %s on %s: %s", msg_id, stream, ack_exc)
 
     return messages
 

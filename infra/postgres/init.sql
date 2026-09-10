@@ -561,3 +561,20 @@ CREATE TABLE IF NOT EXISTS reference_layers (
 
 CREATE INDEX IF NOT EXISTS idx_reference_layers_geom      ON reference_layers USING GIST (geom);
 CREATE INDEX IF NOT EXISTS idx_reference_layers_type      ON reference_layers (layer_type);
+
+-- The official postgres image does not recurse into subdirectories under
+-- /docker-entrypoint-initdb.d. Include the ordered migration directory
+-- explicitly so a fresh volume receives the same schema as an existing one.
+\ir migrations/001_tasking_scene_id.sql
+\ir migrations/002_b2_features.sql
+\ir migrations/002_optical_confirmation.sql
+\ir migrations/003_response_decision.sql
+\ir migrations/004_stage1.sql
+\ir migrations/005_stage2.sql
+\ir migrations/006_stage3.sql
+\ir migrations/007_stage4.sql
+\ir migrations/008_stage5.sql
+\ir migrations/009_oil_spread_v2.sql
+\ir migrations/010_ecological_receptors.sql
+\ir migrations/011_ecological_impact.sql
+\ir migrations/012_response_decision_legacy.sql

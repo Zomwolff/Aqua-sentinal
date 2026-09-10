@@ -208,12 +208,14 @@ services:
     depends_on:
       backend:
         condition: service_started
+      fusion-upload:
+        condition: service_started
     ports:
       - "3000:80"
     networks:
       - aqua-net
 
-  fusion:
+  fusion-upload:
     build:
       context: .
       dockerfile: fusion/Dockerfile

@@ -30,7 +30,7 @@ data-ingestion (GEE/SAR)    ┐
 sar-spill-intelligence       ├──────→   sar
 lookalike-engine            ┘
 (nothing existed here)      ┐
-drift-forecast               ├──────→   eo   ← NEW
+drift-forecast               ├──────→   backend
                              ┘
 api-gateway                 ┐
 evidence-fusion              │
@@ -73,7 +73,7 @@ instead of owning `/app` outright.
 | sar-spill-intelligence       | `sar:8008`               |
 | lookalike-engine             | `sar:8009`               |
 | eo-ingest (**new**)          | `eo:8016`                |
-| drift-forecast               | `eo:8012`                |
+ | drift-forecast               | `backend:8012`          |
 | evidence-fusion              | `backend:8010`           |
 | source-attribution           | `backend:8011`           |
 | severity-impact              | `backend:8013`           |

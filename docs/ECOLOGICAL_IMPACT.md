@@ -576,8 +576,8 @@ GET /spill/incidents/{spill_id}/ecological
 
 ### Core Service
 
-**Docker Service:** `ecological-impact`  
-**Port:** 8016 (internal)  
+**Docker placement:** backend Supervisor worker (`ecological-impact`)
+**Port:** none (worker-only; EO owns port 8016)
 **Redis Consumer Group:** `ecological-impact`  
 **Input Stream:** `spill.forecast`  
 **Output Stream:** `spill.ecological`

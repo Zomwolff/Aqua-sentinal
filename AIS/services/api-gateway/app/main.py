@@ -62,6 +62,10 @@ sys.path.insert(0, "/app")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 log = logging.getLogger("api-gateway")
 
+
+def _is_schema_error(exc: Exception) -> bool:
+    return isinstance(exc, (asyncpg.UndefinedTableError, asyncpg.UndefinedColumnError))
+
 # ── Internal service URLs (Docker service names) ──────────────────────────────
 # NOTE: consolidated pipeline (see /docker-compose.yml + /docker/MIGRATION.md,
 # /docker/EO_CORRECTION.md). The original one-container-per-service processes
@@ -556,6 +560,116 @@ async def get_vessel_detail(mmsi: int):
         "trust": trust,
         "sar_tasking": sar_tasking,
         "verdict": verdict,
+    }
+
+
+@app.get("/vessels/{mmsi}/detail", tags=["Vessels"])
+async def get_flagged_vessel_detail(mmsi: int):
+    """Aggregate flagged-vessel evidence without requiring a linked spill."""
+    pool = await _get_pool()
+    detail = await get_vessel_detail(mmsi)
+
+    try:
+        linked = await pool.fetchrow(
+            """
+            SELECT ar.spill_id
+            FROM attribution_results ar
+            JOIN vessels v ON v.id = ar.vessel_id
+            WHERE v.mmsi = $1
+            ORDER BY ar.final_score DESC, ar.computed_at DESC
+            LIMIT 1
+            """,
+            str(mmsi),
+        )
+    except (asyncpg.UndefinedTableError, asyncpg.UndefinedColumnError) as exc:
+        log.warning("Vessel attribution enrichment unavailable: %s", exc)
+        linked = None
+    spill = None
+    if linked:
+        spill_id = str(linked["spill_id"])
+        try:
+            incident = await get_spill_incident(spill_id)
+        except HTTPException:
+            incident = None
+        except (asyncpg.UndefinedTableError, asyncpg.UndefinedColumnError) as exc:
+            log.warning("Vessel incident enrichment unavailable: %s", exc)
+            incident = None
+
+        try:
+            candidate_row = await pool.fetchrow(
+                """
+                SELECT candidate_id, scene_id, confidence,
+                       classification_label::text AS classification_label,
+                       optical_oil_probability, optical_predicted_class,
+                       optical_cloud_free, optical_scene_id, optical_checked_at
+                FROM spill_candidates WHERE candidate_id = $1::uuid
+                """,
+                spill_id,
+            )
+        except (asyncpg.UndefinedTableError, asyncpg.UndefinedColumnError) as exc:
+            log.warning("Vessel optical enrichment unavailable: %s", exc)
+            candidate_row = None
+
+        try:
+            ecological_rows = await pool.fetch(
+                """
+                SELECT receptor_type, horizon_hours, footprint_type, exposure_pct,
+                       category, time_to_first_exposure_hours, computed_at
+                FROM ecological_impact WHERE spill_id = $1
+                ORDER BY horizon_hours ASC, receptor_type ASC
+                """,
+                spill_id,
+            )
+        except (asyncpg.UndefinedTableError, asyncpg.UndefinedColumnError) as exc:
+            log.warning("Vessel ecological enrichment unavailable: %s", exc)
+            ecological_rows = []
+
+        try:
+            cost_row = await pool.fetchrow(
+                """
+                SELECT nosdcp_tier, estimated_volume_tonnes, point_usd, low_usd,
+                       high_usd, point_inr, low_inr, high_inr, cost_curve,
+                       matched_vessels, landfall_eta, created_at
+                FROM cost_projections WHERE spill_id = $1
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                spill_id,
+            )
+        except (asyncpg.UndefinedTableError, asyncpg.UndefinedColumnError) as exc:
+            log.warning("Vessel cost enrichment unavailable: %s", exc)
+            cost_row = None
+        cost = None
+        if cost_row:
+            cost = {k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in dict(cost_row).items()}
+            for key in ("cost_curve", "matched_vessels"):
+                if isinstance(cost.get(key), str):
+                    cost[key] = json.loads(cost[key])
+        ecological = [
+            {k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in dict(row).items()}
+            for row in ecological_rows
+        ]
+        spill = {
+            "spill_id": spill_id,
+            "incident": incident,
+            "candidate": ({k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in dict(candidate_row).items()}
+                           if candidate_row else None),
+            "ecological": {"impact_count": len(ecological), "impacts": ecological},
+            "cost": cost,
+        }
+
+    reasons = []
+    risk = detail.get("risk") or {}
+    if risk.get("contributing_factors"):
+        reasons.extend(risk["contributing_factors"])
+    reasons.extend({"anomaly_type": row.get("anomaly_type"), "severity": row.get("severity")} for row in detail["anomalies"])
+    trust = detail.get("trust") or {}
+    if trust.get("flag"):
+        reasons.append({"flag": trust["flag"]})
+
+    return {
+        **detail,
+        "flag_reasons": reasons,
+        "linked_spill": spill,
     }
 
 
@@ -1058,39 +1172,77 @@ async def list_features(
 @app.get("/spill/candidates/{candidate_id}")
 async def get_spill_candidate(candidate_id: str):
     """
-    Full details for one spill incident by its ID (used by SpillCandidateLayer).
-    Falls back to spill_incidents table (spill_candidates table no longer used).
-    Returns GeoJSON geometry derived from the PostGIS centroid point.
+    Candidate -> incident promotion contract: raw SAR candidates are stored in
+    spill_candidates first; source attribution promotes one by creating a
+    spill_incidents row with the same UUID. Return the candidate at both stages
+    and merge the full incident report when promotion has happened.
     """
     pool = await _get_pool()
-    row = await pool.fetchrow(
-        """
-        SELECT
-            id AS candidate_id,
-            source_image_id AS scene_id,
-            detected_at AS acquisition_time,
-            status AS classification_label,
-            confidence,
-            area_km2 * 1000000.0 AS area_m2,
-            source AS raw_source,
-            ST_AsGeoJSON(geom) AS geometry
-        FROM spill_incidents
-        WHERE id = $1
-        """,
-        candidate_id,
-    )
-    if row is None:
+    try:
+        candidate_row = await pool.fetchrow(
+            """
+            SELECT candidate_id, scene_id, acquisition_time,
+                   status::text AS lifecycle_status,
+                   classification_label::text AS classification_label,
+                   confidence, area_m2, is_synthetic,
+                   optical_oil_probability, optical_predicted_class,
+                   optical_cloud_free, optical_checked_at,
+                   ST_AsGeoJSON(geom) AS geometry
+            FROM spill_candidates WHERE candidate_id = $1::uuid
+            """,
+            candidate_id,
+        )
+    except (asyncpg.UndefinedTableError, asyncpg.UndefinedColumnError) as exc:
+        log.warning("Candidate optional schema unavailable: %s", exc)
+        candidate_row = await pool.fetchrow(
+            """
+            SELECT candidate_id, scene_id, acquisition_time,
+                   status::text AS lifecycle_status,
+                   classification_label::text AS classification_label,
+                   confidence, area_m2, FALSE AS is_synthetic,
+                   NULL::double precision AS optical_oil_probability,
+                   NULL::text AS optical_predicted_class,
+                   NULL::boolean AS optical_cloud_free,
+                   NULL::timestamptz AS optical_checked_at,
+                   ST_AsGeoJSON(geom) AS geometry
+            FROM spill_candidates WHERE candidate_id = $1::uuid
+            """,
+            candidate_id,
+        )
+    if candidate_row is None:
         raise HTTPException(status_code=404, detail="candidate not found")
 
-    result = {k: v for k, v in dict(row).items()}
+    result = {k: v for k, v in dict(candidate_row).items()}
+    result["status"] = "candidate"
+    result["lifecycle_status"] = result.pop("lifecycle_status", None)
     if isinstance(result.get("geometry"), str):
         result["geometry"] = json.loads(result["geometry"])
     if isinstance(result.get("acquisition_time"), datetime):
         result["acquisition_time"] = result["acquisition_time"].isoformat()
+    if isinstance(result.get("optical_checked_at"), datetime):
+        result["optical_checked_at"] = result["optical_checked_at"].isoformat()
     if result.get("confidence") is not None:
         result["confidence"] = float(result["confidence"])
     if result.get("area_m2") is not None:
         result["area_m2"] = float(result["area_m2"])
+
+    # Promotion currently reuses candidate_id as spill_incidents.id. Keep the
+    # raw candidate response useful even when downstream workers are pending.
+    try:
+        incident = await get_spill_incident(candidate_id)
+    except HTTPException as exc:
+        if exc.status_code != 404:
+            raise
+    except (asyncpg.UndefinedTableError, asyncpg.UndefinedColumnError) as exc:
+        log.warning("Candidate incident enrichment unavailable: %s", exc)
+    else:
+        result["status"] = "incident"
+        result["incident"] = incident.get("incident")
+        result["attribution"] = incident.get("attribution")
+        result["forecasts"] = incident.get("forecasts")
+        result["severity"] = incident.get("severity")
+        result["recommendations"] = incident.get("recommendations")
+        result["ecological"] = incident.get("ecological")
     return result
 
 

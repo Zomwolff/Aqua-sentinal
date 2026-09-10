@@ -14,6 +14,10 @@ data
 dashboard
 docs
 infra
+!infra/
+!infra/postgres/
+!infra/postgres/migrations/
+!infra/postgres/migrations/*.sql
 scripts
 simulator
 tests
