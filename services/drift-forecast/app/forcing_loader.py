@@ -502,7 +502,21 @@ def load_historical_forcing(
     wind_rows = _fetch_wind_archive(lat, lon, date_start, date_end)
 
     # Step 4: Fetch ocean current (marine archive).
-    current_rows = _fetch_marine_archive(lat, lon, date_start, date_end)
+    # The Open-Meteo marine API has incomplete historical coverage — for
+    # example, the Indian Ocean before 2022 returns all-null values.
+    # When no current data is available, fall back to zero current so that
+    # origin inference can still run wind-driven backward propagation rather
+    # than failing entirely.  Zero current is conservative and explicitly
+    # documented in the forcing provenance via current_speed_ms=0.0.
+    try:
+        current_rows = _fetch_marine_archive(lat, lon, date_start, date_end)
+    except CurrentDataUnavailableError:
+        # Build zero-current rows aligned to the wind timestamps so the
+        # inner-join in _merge_and_convert produces a full series.
+        current_rows = [
+            {"t": r["t"], "current_speed_ms": 0.0, "raw_dir_deg": 0.0}
+            for r in wind_rows
+        ]
 
     # Step 5: Inner-join, convert units, align direction conventions.
     series = _merge_and_convert(wind_rows, current_rows, CURRENT_DIR_CONVENTION)

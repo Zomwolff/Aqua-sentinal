@@ -21,7 +21,6 @@ from shared.redis_client import (
     hget_json,
     hset_json,
 )
-from shared.db.connection import get_pool
 from app.origin_api import INFER_STREAM, _job_key, _JOB_TTL_S, serialize_origin_result
 
 log = logging.getLogger(__name__)
@@ -64,12 +63,13 @@ async def _process_infer_job(job_id: str, redis) -> None:
             raise ValueError(f"Unsupported geometry type: {geom_type!r}")
 
         # Delegate entirely to the production service layer.
+        # Forcing is fetched from Open-Meteo archive inside run_origin_inference;
+        # no DB pool or external dependencies are needed here.
         from app.origin_service import run_origin_inference
         t0 = time.time()
-        origin_result = await run_origin_inference(
+        origin_result = run_origin_inference(
             detection_time=detection_time,
             observed_footprint=footprint,
-            forcing_pool=get_pool(),
         )
         elapsed = time.time() - t0
 
