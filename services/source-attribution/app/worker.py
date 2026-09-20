@@ -24,8 +24,9 @@ from app.attribution import (
     MODEL_VERSION,
     attribution_label, compute_attribution_score,
     score_behavior, score_distance, score_time,
-    score_trajectory, score_wind_drift,
+    score_trajectory, score_wind_drift, score_origin_proximity
 )
+from app.culprit_finder import find_origin_probability
 
 log = logging.getLogger(__name__)
 
@@ -214,6 +215,7 @@ async def _score_and_persist_vessel(
     vessel: Dict[str, Any],
     acquisition_time: datetime,
     weather: Dict[str, float],
+    origin_prob: Optional[Any] = None,
 ) -> Optional[Dict[str, Any]]:
     """Compute full 5-factor score for one vessel and upsert into attribution_results."""
     vessel_id  = vessel["vessel_id"]
@@ -225,7 +227,7 @@ async def _score_and_persist_vessel(
         pos_ts = pos_ts.replace(tzinfo=timezone.utc)
 
     # Factor 1: distance from position to spill at acquisition time
-    dist_m = float(vessel["distance_m"])
+    dist_m = float(vessel["distance_m"]) if "distance_m" in vessel else 0.0
     d_score = score_distance(dist_m)
 
     # Factor 2: trajectory evidence was calculated by Evidence Fusion.
@@ -242,17 +244,26 @@ async def _score_and_persist_vessel(
         int(vessel.get("medium_anomaly_count", 0)),
     )
 
-    # Factor 5: wind/current backward drift
-    elapsed_h = (acquisition_time - pos_ts).total_seconds() / 3600.0 if pos_ts else 0.0
-    w_score = score_wind_drift(
-        vessel_lat=pos_lat, vessel_lon=pos_lon,
-        spill_lat=spill_lat, spill_lon=spill_lon,
-        wind_speed_ms=weather["wind_speed_ms"],
-        wind_dir_deg=weather["wind_dir_deg"],
-        current_speed_ms=weather["current_speed_ms"],
-        current_dir_deg=weather["current_dir_deg"],
-        elapsed_hours=max(0.0, elapsed_h),
-    )
+    # Factor 5: backward propagation origin proximity
+    if origin_prob and origin_prob.spatial_posterior:
+        sp = origin_prob.spatial_posterior
+        tp = origin_prob.temporal_posterior
+        w_score = score_origin_proximity(
+            vessel_lat=pos_lat, vessel_lon=pos_lon, vessel_time=pos_ts,
+            origin_lat=sp.map_lat, origin_lon=sp.map_lon, origin_time=tp.map_release_time
+        )
+    else:
+        # Fallback to simple wind drift
+        elapsed_h = (acquisition_time - pos_ts).total_seconds() / 3600.0 if pos_ts else 0.0
+        w_score = score_wind_drift(
+            vessel_lat=pos_lat, vessel_lon=pos_lon,
+            spill_lat=spill_lat, spill_lon=spill_lon,
+            wind_speed_ms=weather.get("wind_speed_ms", 0.0),
+            wind_dir_deg=weather.get("wind_dir_deg", 0.0),
+            current_speed_ms=weather.get("current_speed_ms", 0.0),
+            current_dir_deg=weather.get("current_dir_deg", 0.0),
+            elapsed_hours=max(0.0, elapsed_h),
+        )
 
     final = compute_attribution_score(d_score, t_score, ti_score, b_score, w_score)
 
@@ -439,10 +450,21 @@ async def _process_incident_fused(
     if isinstance(environment, str):
         environment = json.loads(environment)
 
+    origin_prob = await find_origin_probability(spill_lat, spill_lon, payload_area, acq)
+    if origin_prob and origin_prob.spatial_posterior:
+        sp = origin_prob.spatial_posterior
+        tp = origin_prob.temporal_posterior
+        origin_vessels = await _fetch_candidate_vessels(pool, sp.map_lat, sp.map_lon, tp.map_release_time)
+        for v in origin_vessels:
+            vid = v["vessel_id"]
+            if vid not in seen:
+                seen[vid] = v
+        unique_vessels = list(seen.values())
+
     scored = []
     for vessel in unique_vessels[:20]:  # cap at 20 candidates
         result_v = await _score_and_persist_vessel(
-            pool, spill_id, spill_lat, spill_lon, vessel, acq, environment,
+            pool, spill_id, spill_lat, spill_lon, vessel, acq, environment, origin_prob
         )
         if result_v:
             scored.append(result_v)

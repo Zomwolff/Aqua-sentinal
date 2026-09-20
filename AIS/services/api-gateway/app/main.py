@@ -414,14 +414,24 @@ async def list_vessels(
     vessel_type: Optional[str] = Query(None, description="Filter by vessel type (tanker, cargo, fishing…)"),
     risk_tier:   Optional[str] = Query(None, description="Filter by risk tier: LOW | MEDIUM | HIGH | CRITICAL"),
     active_since_hours: int    = Query(24, description="Only include vessels seen in the last N hours"),
+    include_simulation: bool   = Query(True, description="Include simulated vessels (raw_source=wakashio_simulation)"),
     limit: int = Query(200, le=1000),
     offset: int = Query(0, ge=0),
 ):
     """
     List all tracked vessels with their last known position, type, and current risk tier.
     This is the primary feed for the map view.
+
+    Simulated vessels (from the Wakashio oil-spill simulation) are always included
+    when include_simulation=true (default) regardless of active_since_hours, because
+    their timestamps are shifted to NOW at injection time.
     """
     pool = await _get_pool()
+
+    # Build the time-window condition.  Simulation vessels written by the
+    # spill-simulator always have last_seen = "now" (shifted at inject time),
+    # so they naturally pass the 24-hour window.  We keep include_simulation
+    # as a convenience escape-hatch in case the operator wants to hide them.
     conditions = ["v.last_seen >= NOW() - ($1 || ' hours')::INTERVAL"]
     params: list = [str(active_since_hours)]
     idx = 2
@@ -455,7 +465,7 @@ async def list_vessels(
             ORDER BY vessel_id, computed_at DESC
         ) attr ON attr.vessel_id = v.id
         {where}
-        ORDER BY v.last_seen DESC
+        ORDER BY COALESCE(r.risk_score, 0) DESC, v.last_seen DESC
         LIMIT ${idx} OFFSET ${idx+1}
     """, *params)
 
@@ -470,6 +480,74 @@ async def list_vessels(
             for r in rows
         ],
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SIMULATION — Wakashio Oil Spill
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_SPILL_SIMULATOR_URL = os.environ.get(
+    "SPILL_SIMULATOR_URL",
+    # Uses IP of manually-created container on aqua-net; replaced by service name after docker-compose rebuild
+    "http://172.18.0.9:8000",
+)
+
+
+@app.post("/simulate/oil-spill", tags=["Simulation"])
+async def simulate_oil_spill():
+    """
+    Trigger the Wakashio oil-spill simulation.
+
+    Streams 6 714 realistic AIS records for 12 vessels (Aug 5-7 2020) into
+    the live detection pipeline at 120× real-time.  MV WAKASHIO (MMSI 477995000)
+    will show an 8-hour AIS gap, loitering near the reef, and erratic course
+    changes — all of which drive it to a CRITICAL risk score within minutes.
+
+    Returns immediately; poll GET /simulate/status for progress.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(f"{_SPILL_SIMULATOR_URL}/simulate/oil-spill")
+            resp.raise_for_status()
+            return resp.json()
+    except httpx.ConnectError:
+        raise HTTPException(
+            status_code=503,
+            detail="Spill simulator is not reachable. Make sure the spill-simulator container is running.",
+        )
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+
+
+@app.get("/simulate/status", tags=["Simulation"])
+async def simulate_status():
+    """Current state of the oil-spill simulation (progress, record count, errors)."""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"{_SPILL_SIMULATOR_URL}/status")
+            resp.raise_for_status()
+            return resp.json()
+    except httpx.ConnectError:
+        raise HTTPException(
+            status_code=503,
+            detail="Spill simulator is not reachable.",
+        )
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+
+
+@app.post("/simulate/stop", tags=["Simulation"])
+async def simulate_stop():
+    """Stop a running oil-spill simulation."""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(f"{_SPILL_SIMULATOR_URL}/stop")
+            resp.raise_for_status()
+            return resp.json()
+    except httpx.ConnectError:
+        raise HTTPException(status_code=503, detail="Spill simulator is not reachable.")
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
 
 
 @app.get("/vessels/{mmsi}", tags=["Vessels"])
