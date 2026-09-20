@@ -53,6 +53,7 @@ import asyncpg
 import httpx
 import redis.asyncio as aioredis
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.incident_report import build_incident_report
@@ -253,6 +254,41 @@ app.mount(
     StaticFiles(directory=_artifact_root, check_dir=False),
     name="artifacts",
 )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ORIGIN INFERENCE
+# ═══════════════════════════════════════════════════════════════════════════════
+# The public API stays on the gateway. The drift worker is an internal program
+# in this same backend container and owns the Redis job lifecycle.
+
+@app.post("/api/v1/origin/infer", status_code=202, tags=["Origin Inference"])
+async def submit_origin_inference(payload: Dict[str, Any]):
+    """Queue origin inference from a detected GeoJSON spill footprint."""
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(
+                f"{_SERVICES['drift-forecast']}/api/v1/origin/infer",
+                json=payload,
+            )
+    except httpx.RequestError as exc:
+        log.error("Origin inference service unavailable: %s", exc)
+        raise HTTPException(status_code=503, detail="Origin inference is unavailable.") from exc
+    return JSONResponse(content=response.json(), status_code=response.status_code)
+
+
+@app.get("/api/v1/origin/jobs/{job_id}", tags=["Origin Inference"])
+async def get_origin_inference_job(job_id: str):
+    """Retrieve an origin-inference job and its result when complete."""
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(
+                f"{_SERVICES['drift-forecast']}/api/v1/origin/jobs/{job_id}",
+            )
+    except httpx.RequestError as exc:
+        log.error("Origin inference service unavailable: %s", exc)
+        raise HTTPException(status_code=503, detail="Origin inference is unavailable.") from exc
+    return JSONResponse(content=response.json(), status_code=response.status_code)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
