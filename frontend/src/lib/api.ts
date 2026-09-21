@@ -34,8 +34,12 @@ export function sarArtifactUrls(sceneId: string): Record<SarArtifactKey, string>
   ) as Record<SarArtifactKey, string>;
 }
 
-export async function fetchVessels() {
-  const res = await fetch(`${API_BASE}/vessels?active_since_hours=168`);
+// Keep enough history for locally replayed/demo AIS data while still bounding
+// the response. Live positions continue to replace these records as they arrive.
+export const VESSEL_HISTORY_HOURS = 24 * 30;
+
+export async function fetchVessels(activeSinceHours = VESSEL_HISTORY_HOURS) {
+  const res = await fetch(`${API_BASE}/vessels?active_since_hours=${activeSinceHours}`);
   if (!res.ok) throw new Error("Failed to fetch vessels");
   return res.json();
 }

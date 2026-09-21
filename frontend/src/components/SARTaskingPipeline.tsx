@@ -71,7 +71,11 @@ export function SARTaskingPipeline({ liveEvent, historicalSceneId, tasking, fusi
     }
   }, [liveEvent]);
 
-  if (fusionResult?.artifacts) return <div className="sar-pipeline-panel"><div className="panel-header"><h3>{fusionResult.oil_spill_detected ? "OIL SPILL DETECTED" : "NO OIL SPILL"}</h3></div><div className="panel-content"><div className="artifacts-grid">{[["Sentinel-1", "s1"], ["SAR mask · 0.50", "sar"], ["Sentinel-2", "s2"], ["Final EO mask · 0.15", "final"]].map(([label,key]) => <div className="artifact-item" key={key}><div className="artifact-label">{label}</div><img src={fusionResult.artifacts[key]} alt={label} /></div>)}</div></div></div>;
+  if (fusionResult?.artifacts) {
+    const fusionArtifacts = [["Sentinel-1", "s1"], ["Sentinel-2", "s2"], ["Final detection mask", "final"], ["Interpreted oil-slick view", "visualization"]]
+      .filter(([, key]) => fusionResult.artifacts[key]);
+    return <div className="sar-pipeline-panel"><div className="panel-header"><h3>{fusionResult.oil_spill_detected ? "OIL SPILL DETECTED" : "NO OIL SPILL"}</h3></div><div className="panel-content"><div className="artifacts-grid">{fusionArtifacts.map(([label,key]) => <div className={`artifact-item ${key === "visualization" ? "interpretation" : ""}`} key={key}><div className="artifact-label">{label}</div><img src={fusionResult.artifacts[key]} alt={label} />{key === "visualization" && <small>Illustrative colourisation · mask-guided</small>}</div>)}</div></div></div>;
+  }
   if (!isOpen) return null;
 
   const currentIndex = currentStep ? steps.indexOf(currentStep) : -1;

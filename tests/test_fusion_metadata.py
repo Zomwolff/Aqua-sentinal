@@ -6,7 +6,7 @@ from unittest.mock import patch
 import numpy as np
 import rasterio
 from rasterio.transform import from_origin
-from fusion.metadata import acquisition, run_fusion
+from fusion.metadata import acquisition, oil_spill_visualization, run_fusion
 
 class FusionMetadataTests(unittest.TestCase):
     def setUp(self):
@@ -49,6 +49,20 @@ class FusionMetadataTests(unittest.TestCase):
         with rasterio.open(self.root/'out/final_mask.tif') as dst, rasterio.open(self.s1) as src:
             self.assertEqual(dst.crs,src.crs); self.assertEqual(dst.transform,src.transform)
         self.assertEqual(json.loads((self.root/'out/fusion_metadata.json').read_text())['scene_id'],'S1_product')
+        self.assertEqual(result['artifacts']['visualization'], 'oil_spill_visualization.png')
+        self.assertTrue((self.root/'out/oil_spill_visualization.png').is_file())
+
+    def test_visualization_keeps_ocean_blue_and_darkens_only_mask(self):
+        values = np.arange(16, dtype=np.float32).reshape(4, 4)
+        mask = np.zeros((4, 4), dtype=np.uint8)
+        mask[1:3, 1:3] = 1
+        path = self.root / 'visualization.png'
+        oil_spill_visualization(values, mask, path)
+        from PIL import Image
+        pixels = np.asarray(Image.open(path))
+        self.assertEqual(pixels.shape, (4, 4, 3))
+        self.assertGreater(int(pixels[0, 3, 2]), int(pixels[0, 3, 0]))
+        self.assertLess(int(pixels[2, 2].mean()), int(pixels[0, 3].mean()))
     def test_eo_only_does_not_export_georeferencing(self):
         with patch('fusion.metadata._detect_oil_result',return_value={**self.prediction(),'mode':'EO_ONLY'}), patch('fusion.metadata._prepare_eo',return_value=self.s1):
             result=run_fusion(sentinel2_path=self.s1,output_dir=self.root/'eo',acquisition_time='2026-09-09T10:00:00Z')

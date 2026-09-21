@@ -55,6 +55,8 @@ docker run --rm -v "D:\data:/data" aqua-sentinel-fusion /data/S1.tif /data/S2.ti
 
 `run_fusion(..., output_dir=..., acquisition_time=None, scene_id=None, ais_time=None)` writes `fusion_metadata.json`. Acquisition time is explicit first, then TIFF `ACQUISITION_TIME`/`TIFFTAG_DATETIME`, then saved AIS time (labelled `ais_fallback`). Missing time requires explicit input; processing time is never presented as satellite acquisition time.
 
+Each run also writes `oil_spill_visualization.png`. It preserves the source raster's measured luminance and texture, applies a restrained ocean palette, and darkens only the final-mask footprint for operator review. The dashboard labels this artifact as an illustrative, mask-guided colourisation; it is not presented as measured true-colour imagery or as additional model evidence.
+
 Scene ID comes from the source filename or explicit parameter. Candidate outputs include measured `area_m2`, `area_km2`, and mean model probability. Only Sentinel-1 supplies exported georeferencing. Fused masks are exported on its grid; EO-only results remain optical evidence with no mapped polygons or invented area. Existing EO coordinates may be read for alignment, but no coordinates are assigned to the EO input.
 
 Each mapped Sentinel-1 candidate also stores measured shape descriptors, GLCM

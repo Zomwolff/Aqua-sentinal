@@ -10,7 +10,7 @@ from rasterio.features import shapes, geometry_mask, geometry_window
 from rasterio.warp import transform_geom, reproject
 from rasterio.enums import Resampling
 from pyproj import Geod
-from PIL import Image
+from PIL import Image, ImageFilter
 from skimage.feature import graycomatrix, graycoprops
 from skimage.measure import label, regionprops
 from skimage.morphology import dilation, erosion, disk
@@ -61,6 +61,41 @@ def preview(values, path):
     low, high = np.percentile(finite, [2, 98]) if finite.size else (0, 1)
     values = np.nan_to_num((values - low) / max(high - low, 1e-8))
     Image.fromarray((np.clip(values, 0, 1) * 255).astype("uint8")).save(path)
+
+
+def oil_spill_visualization(values, mask, path):
+    """Create an operator-friendly ocean view without changing model evidence.
+
+    The source raster supplies texture and luminance.  The model mask only
+    darkens/smooths detected pixels, so waves outside detections remain visible.
+    This is deliberately exported as an interpretation rather than true colour.
+    """
+    values = np.asarray(values, dtype=np.float32)
+    mask = np.asarray(mask, dtype=bool)
+    finite = values[np.isfinite(values)]
+    low, high = np.percentile(finite, [2, 98]) if finite.size else (0.0, 1.0)
+    luminance = np.nan_to_num((values - low) / max(float(high - low), 1e-8))
+    luminance = np.clip(luminance, 0.0, 1.0)
+
+    # A restrained deep-ocean palette preserves the raster's measured texture.
+    rgb = np.stack((
+        5.0 + 35.0 * luminance,
+        38.0 + 92.0 * luminance,
+        58.0 + 116.0 * luminance,
+    ), axis=-1)
+
+    # Feather only the visual treatment. The stored final mask remains binary.
+    alpha_image = Image.fromarray(mask.astype("uint8") * 255).filter(
+        ImageFilter.GaussianBlur(radius=1.2)
+    )
+    alpha = np.asarray(alpha_image, dtype=np.float32) / 255.0
+    slick = np.stack((
+        10.0 + 12.0 * luminance,
+        18.0 + 14.0 * luminance,
+        22.0 + 17.0 * luminance,
+    ), axis=-1)
+    rgb = rgb * (1.0 - alpha[..., None]) + slick * alpha[..., None]
+    Image.fromarray(np.clip(rgb, 0, 255).astype("uint8"), mode="RGB").save(path)
 
 
 def candidate_diagnostics(raw, region_mask):
@@ -124,6 +159,7 @@ def run_fusion(sentinel1_path=None, sentinel2_path=None, *, output_dir,
     prep.mkdir(exist_ok=True)
     reference = _prepare_eo(Path(sentinel2_path), prep) if sentinel2_path else sentinel1_path
     # Only Sentinel-1 supplies the georeference of exported spill geometry.
+    visualization_values = None
     if sentinel1_path and sentinel2_path:
         with rasterio.open(reference) as eo, rasterio.open(sentinel1_path) as sar:
             aligned_mask = np.zeros((sar.height, sar.width), dtype="uint8")
@@ -132,11 +168,19 @@ def run_fusion(sentinel1_path=None, sentinel2_path=None, *, output_dir,
                                                  (probability, aligned_probability, Resampling.bilinear)):
                 reproject(source, destination, src_transform=eo.transform, src_crs=eo.crs,
                           dst_transform=sar.transform, dst_crs=sar.crs, resampling=method)
+            visualization_values = np.zeros(aligned_mask.shape, dtype="float32")
+            reproject(eo.read(1), visualization_values, src_transform=eo.transform, src_crs=eo.crs,
+                      dst_transform=sar.transform, dst_crs=sar.crs, resampling=Resampling.bilinear)
             mask, probability = aligned_mask, aligned_probability
     if sentinel1_path:
         save_mask(mask, sentinel1_path, out / "final_mask.tif")
     Image.fromarray(mask * 255).save(out / "final_mask.png")
-    artifacts = {"final": "final_mask.png", "metadata": "fusion_metadata.json"}
+    if visualization_values is None:
+        with rasterio.open(reference) as visual_source:
+            visualization_values = visual_source.read(1)
+    oil_spill_visualization(visualization_values, mask, out / "oil_spill_visualization.png")
+    artifacts = {"final": "final_mask.png", "visualization": "oil_spill_visualization.png",
+                 "metadata": "fusion_metadata.json"}
     if sentinel1_path:
         artifacts["mask"] = "final_mask.tif"
     for key, path in (("s1", sentinel1_path), ("s2", reference if sentinel2_path else None)):
