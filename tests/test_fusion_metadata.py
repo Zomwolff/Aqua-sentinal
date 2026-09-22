@@ -62,7 +62,10 @@ class FusionMetadataTests(unittest.TestCase):
         pixels = np.asarray(Image.open(path))
         self.assertEqual(pixels.shape, (4, 4, 3))
         self.assertGreater(int(pixels[0, 3, 2]), int(pixels[0, 3, 0]))
-        self.assertLess(int(pixels[2, 2].mean()), int(pixels[0, 3].mean()))
+        baseline_path = self.root / 'baseline.png'
+        oil_spill_visualization(values, np.zeros_like(mask), baseline_path)
+        baseline = np.asarray(Image.open(baseline_path))
+        self.assertLess(int(pixels[2, 2].mean()), int(baseline[2, 2].mean()))
     def test_eo_only_does_not_export_georeferencing(self):
         with patch('fusion.metadata._detect_oil_result',return_value={**self.prediction(),'mode':'EO_ONLY'}), patch('fusion.metadata._prepare_eo',return_value=self.s1):
             result=run_fusion(sentinel2_path=self.s1,output_dir=self.root/'eo',acquisition_time='2026-09-09T10:00:00Z')

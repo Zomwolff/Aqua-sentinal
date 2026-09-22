@@ -836,7 +836,7 @@ function App() {
             <label>
               <span>SAR RASTER</span>
               <input type="file" accept=".tif,.tiff" onChange={(event) => setSarUploadFile(event.target.files?.[0] || null)} />
-              <small>Sentinel-1 GeoTIFF preserves its embedded coordinates. Maximum 100 MB per file.</small>
+              <small>Use a two-band calibrated Sigma0-dB Sentinel-1 GeoTIFF in the model's original band order. Single-band images are unsupported. Embedded coordinates are preserved. Maximum 100 MB per file.</small>
             </label>
             <label><span>ACQUISITION TIME (OPTIONAL · LOCAL TIME)</span><input type="datetime-local" value={acquisitionTime} onChange={e => setAcquisitionTime(e.target.value)} /></label>
             <label><span>SCENE ID (OPTIONAL)</span><input type="text" maxLength={255} value={sourceSceneId} onChange={e => setSourceSceneId(e.target.value)} placeholder="Defaults to the source filename" /></label>

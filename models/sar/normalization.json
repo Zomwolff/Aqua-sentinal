@@ -1,0 +1,17 @@
+{
+  "bands": [
+    [
+      -41.22778857146995,
+      0.0
+    ],
+    [
+      -34.39919176014351,
+      0.0
+    ]
+  ],
+  "band_order": "Preserve source file order; training polarization order unresolved",
+  "source_units": "sigma0_dB",
+  "lee_window": 5,
+  "tile_size": 512,
+  "stride": 384
+}

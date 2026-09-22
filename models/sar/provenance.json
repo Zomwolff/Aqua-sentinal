@@ -1,0 +1,29 @@
+{
+  "architecture": "UNetResNet34",
+  "source_repository": "https://github.com/aditya-mensinkai/sar-UNET-RESNET34",
+  "source_commit": "e4bda07ccc8517b4c47fd2d60dfc137d7e653ca8",
+  "checkpoint_sha256": "840a90186ac3ea3795e6ed5a3f028e58c5057be752ac44ecb60883e8029243fa",
+  "onnx_sha256": "fc134f536a9783cfd08d2acf517322c5bc6014e7b760e64546386366721dbd4c",
+  "input_shape": [
+    1,
+    2,
+    512,
+    512
+  ],
+  "output": "raw logits; apply sigmoid once",
+  "opset": 17,
+  "validation": {
+    "inputs": "random [0,1], zeros, ones",
+    "max_absolute_logit_errors": [
+      9.5367431640625e-06,
+      0.00010061264038085938,
+      1.1444091796875e-05
+    ],
+    "rtol": 0.0001,
+    "atol": 0.0001,
+    "seed": 42,
+    "pytorch_reference": "CPU float32; MKLDNN disabled to avoid reduced-precision backend differences",
+    "preprocessing": "Exact array equality against upstream process_scene on synthetic two-band Sigma0-dB input",
+    "integration": "SAR and EO ONNX models executed on a 520x600 synthetic georeferenced scene; finite fused probabilities in [0,1] and original output dimensions verified"
+  }
+}
