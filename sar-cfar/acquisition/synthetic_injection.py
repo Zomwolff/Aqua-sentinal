@@ -141,12 +141,12 @@ def inject_geotiff_if_enabled(
         return raster_path, metadata
 
     with rasterio.open(raster_path) as ds:
-        image = ds.read(1)
+        image = ds.read()
         profile = ds.profile.copy()
 
-    centre = (image.shape[0] // 2, image.shape[1] // 2)
-    modified, inject_meta = inject_synthetic_slick(
-        image,
+    centre = (image.shape[1] // 2, image.shape[2] // 2)
+    modified_band, inject_meta = inject_synthetic_slick(
+        image[0],
         centre,
         length_px=length_px,
         width_px=width_px,
@@ -157,7 +157,8 @@ def inject_geotiff_if_enabled(
     stem, ext = os.path.splitext(raster_path)
     out_path = f"{stem}_synthetic{ext}"
     with rasterio.open(out_path, "w", **profile) as ds_out:
-        ds_out.write(modified, 1)
+        image[0] = modified_band
+        ds_out.write(image)
 
     metadata = {"is_synthetic": True}
     metadata.update(inject_meta)

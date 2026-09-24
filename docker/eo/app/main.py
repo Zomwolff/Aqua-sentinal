@@ -5,9 +5,8 @@ This is the genuinely-trained model of the three "ML" containers (ais / sar /
 eo). It wraps `optical imagery/sentinel2_interface.py` and the included
 checkpoint (`sentinel2_cnn_10band_best.pth`) — a CNN trained on the MADOS
 Sentinel-2 dataset, 10 spectral bands in, 15-class softmax out (class 6 =
-"Oil Spill"). Unlike the SAR LinkNet model (architecture present, no
-checkpoint committed yet) and unlike AIS (mostly rule engines), this model is
-ready to run today.
+"Oil Spill"). This legacy EO service is optional; the active fusion service
+uses the binary EO ONNX model alongside the SAR UNet-ResNet34 ONNX model.
 
 Positioning in the pipeline (per the project's own docs/context-files/
 oil-context.md): SAR is the primary detector; optical is SECONDARY,

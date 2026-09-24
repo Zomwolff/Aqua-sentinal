@@ -92,8 +92,4 @@ event-driven off the candidate stream plus its own direct `/classify/upload`.
   silently uses hardcoded wind/current defaults) but it isn't EO — happy to
   wire it up as its own small addition if useful, but it doesn't belong in
   the `eo` container.
-- **`sar-LinkNet-ResNet34`** is not wired in — no checkpoint is committed.
-  Train one via `oil_spill_training.ipynb`, drop it at a path the `sar`
-  container's `sar-spill-intelligence` process can mount, and it can run
-  alongside CFAR as a 4th sar process (I can add that whenever you have a
-  checkpoint).
+- SAR now uses the UNet-ResNet34 ONNX model documented in `fusion/README.md`.

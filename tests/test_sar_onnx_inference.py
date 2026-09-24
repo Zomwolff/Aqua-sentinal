@@ -33,20 +33,22 @@ def test_frozen_normalization_preserves_band_positions(tmp_path):
     assert normalized.dtype == np.float32
 
 
-def test_nonfinite_sar_is_rejected(tmp_path):
+def test_nonfinite_sar_is_excluded(tmp_path):
     path = tmp_path / "sar.tif"
     values = np.full((2, 8, 8), -20.0)
     values[1, 0, 0] = np.nan
     write_sar(path, values)
-    with pytest.raises(ValueError, match="NaN/Inf"):
-        runtime._load_sar_image(path)
+    normalized, valid = runtime._load_sar_image(path)
+    assert not valid[0, 0]
+    assert np.isfinite(normalized).all()
 
 
 @pytest.mark.parametrize("shape", [(1, 1), (32, 48), (520, 600)])
 def test_stitches_probabilities_and_crops_padding(monkeypatch, tmp_path, shape):
     path = tmp_path / "sar.tif"
     values = np.full((2, *shape), -20.0)
-    values[:, 0, 0] = -9999
+    if shape != (1, 1):
+        values[:, 0, 0] = -9999
     write_sar(path, values, nodata=-9999)
 
     class Session:
@@ -62,6 +64,30 @@ def test_stitches_probabilities_and_crops_padding(monkeypatch, tmp_path, shape):
     monkeypatch.setattr(runtime, "_session", lambda _: Session())
     probability, valid = runtime.predict_sar_probability(path, "unused.onnx")
     assert probability.shape == shape
-    assert not valid[0, 0]
-    assert probability[0, 0] == 0
+    if shape != (1, 1):
+        assert not valid[0, 0]
+        assert probability[0, 0] == 0
     np.testing.assert_allclose(probability[valid], .75)
+
+
+def test_tile_edge_bias_does_not_make_a_grid(monkeypatch, tmp_path):
+    path = tmp_path / "sar.tif"
+    write_sar(path, np.full((2, 1024, 1024), -20.0))
+
+    class EdgeBiasedSession:
+        def get_inputs(self):
+            return [type("Input", (), {"name": "sar"})()]
+
+        def run(self, _, inputs):
+            assert inputs["sar"].shape == (1, 2, 512, 512)
+            logits = np.full((1, 1, 512, 512), np.log(9), np.float32)
+            logits[:, :, :64, :] = -np.log(9)
+            logits[:, :, -64:, :] = -np.log(9)
+            logits[:, :, :, :64] = -np.log(9)
+            logits[:, :, :, -64:] = -np.log(9)
+            return [logits]
+
+    monkeypatch.setattr(runtime, "_session", lambda _: EdgeBiasedSession())
+    probability, valid = runtime.predict_sar_probability(path, "unused.onnx")
+    assert valid.all()
+    np.testing.assert_allclose(probability, .9, atol=1e-6)

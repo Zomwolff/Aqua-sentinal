@@ -36,8 +36,12 @@ def _load_sar_image(path: Path):
             raise ValueError("SAR UNet requires two Sigma0-dB bands in training file order; single-band and RGB images are unsupported")
         raw = source.read().astype(np.float64)
         valid = np.all(source.read_masks() > 0, axis=0) & np.all(np.isfinite(raw), axis=0)
-    if not np.all(np.isfinite(raw)):
-        raise ValueError("SAR input contains NaN/Inf; supply finite calibrated Sigma0-dB data")
+    if not valid.any():
+        raise ValueError("SAR input contains no valid calibrated Sigma0-dB pixels")
+    # Fill invalid pixels for the Lee neighborhood; they remain excluded from
+    # the output probability and cannot become detected oil.
+    for band in raw:
+        band[~valid] = np.median(band[valid])
     config = json.loads((Path(__file__).resolve().parents[1] / "models/sar/normalization.json").read_text())
     filtered = linear_to_db(lee_filter(db_to_linear(raw), window_size=config["lee_window"]))
     normalized = np.stack([np.clip((filtered[c] - lo) / (hi - lo), 0, 1)
@@ -45,33 +49,33 @@ def _load_sar_image(path: Path):
     return normalized, valid
 
 
-def _sar_tiles(image, tile=512, overlap=128):
+def _sar_tiles(image, tile=512, halo=128):
+    """Reflect-pad so every exported pixel is away from a model tile edge."""
     height, width = image.shape[1:]
-    stride = tile - overlap
-    rows = [0] if height <= tile else list(range(0, height - tile + 1, stride))
-    cols = [0] if width <= tile else list(range(0, width - tile + 1, stride))
-    if rows[-1] != max(height - tile, 0): rows.append(max(height - tile, 0))
-    if cols[-1] != max(width - tile, 0): cols.append(max(width - tile, 0))
-    padded_height, padded_width = max(height, tile), max(width, tile)
-    padded = np.pad(image, ((0, 0), (0, padded_height - height), (0, padded_width - width)), mode="reflect")
-    return padded, [(y, x) for y in rows for x in cols], (height, width), (padded_height, padded_width)
+    core = tile - 2 * halo
+    if core <= 0:
+        raise ValueError("SAR tile halo must be smaller than half the tile")
+    rows = range(0, ((height + core - 1) // core) * core, core)
+    cols = range(0, ((width + core - 1) // core) * core, core)
+    padded = np.pad(image, ((0, 0), (halo, len(rows) * core + halo - height),
+                            (halo, len(cols) * core + halo - width)), mode="reflect")
+    return padded, [(y, x) for y in rows for x in cols], (height, width), core, halo
 
 
 def predict_sar_probability(path, model_path):
-    """Return stitched oil probability and validity, without thresholding tiles."""
+    """Return oil probability from tile centers, without thresholding tiles."""
     image, valid = _load_sar_image(Path(path).resolve())
-    padded, origins, (height, width), shape = _sar_tiles(image)
+    padded, origins, (height, width), core, halo = _sar_tiles(image)
     session = _session(model_path)
     input_name = session.get_inputs()[0].name
-    accumulated = np.zeros(shape, dtype=np.float64)
-    counts = np.zeros(shape, dtype=np.float64)
+    result = np.zeros((len(range(0, height, core)) * core,
+                       len(range(0, width, core)) * core), dtype=np.float32)
     for y, x in origins:
         tile = np.ascontiguousarray(padded[:, y:y + 512, x:x + 512][None])
         logits = session.run(None, {input_name: tile})[0]
         probability = _sigmoid(logits)[0, 0]
-        accumulated[y:y + 512, x:x + 512] += probability
-        counts[y:y + 512, x:x + 512] += 1
-    result = (accumulated / np.maximum(counts, 1))[:height, :width].astype(np.float32)
+        result[y:y + core, x:x + core] = probability[halo:halo + core, halo:halo + core]
+    result = result[:height, :width]
     result[~valid] = 0
     return result, valid
 

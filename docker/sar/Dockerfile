@@ -1,22 +1,8 @@
 # ── sar container ────────────────────────────────────────────────────────────
-# Consolidates: data-ingestion (Earth-Engine SAR scene acquisition — fetches
-# Sentinel-1 GeoTIFFs, publishes `sar.clean`; its AIS-batch-ingest HTTP path
-# is unused in this deployment, kept dormant), sar-spill-intelligence (Lee
-# despeckle -> CFAR -> morphology -> polygonize — classical signal
-# processing, not a trained model), and lookalike-engine (oil vs.
-# biogenic-slick vs. low-wind classifier — engineered features, not deep
-# learning).
+# Consolidates SAR acquisition, UNet-ResNet34 inference and candidate
+# extraction, and lookalike analysis.
 #
-# NOTE: this repo's `sar/` folder was renamed to `sar-cfar/` (to make room
-# for the new `sar-LinkNet-ResNet34/` deep-learning folder alongside it) —
-# every COPY path below reflects that rename. Per your call, the LinkNet
-# model is NOT wired in yet (no trained checkpoint is committed — see
-# sar-LinkNet-ResNet34/README.md, train via oil_spill_training.ipynb first).
-# CFAR is the only detector running in this container for now.
-#
-# Each original service keeps its own untouched app/ + shared/ tree under
-# /svc/<name>, copied exactly as its original Dockerfile did — no source
-# edits. supervisord runs all three, each still bound to its ORIGINAL port.
+# supervisord runs all three services on their existing ports.
 FROM python:3.11-slim
 WORKDIR /svc
 
@@ -27,6 +13,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY docker/sar/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
+
+# Inference-only ONNX assets; PyTorch and training code are not installed.
+COPY fusion /svc/sar-spill-intelligence/fusion
+COPY models/sar /svc/sar-spill-intelligence/models/sar
 
 # ── data-ingestion :8001 (SAR/GEE acquisition) ───────────────────────────────
 RUN mkdir -p /svc/data-ingestion
@@ -43,7 +33,7 @@ COPY sar-cfar/acquisition/synthetic_injection.py /svc/data-ingestion/app/synthet
 COPY sar-cfar/acquisition/dynamic_sar_worker.py /svc/data-ingestion/app/dynamic_sar_worker.py
 RUN sed -i 's#sys\.path\.insert(0, "/app")#sys.path.insert(0, "/svc/data-ingestion")#' /svc/data-ingestion/app/*.py
 
-# ── sar-spill-intelligence :8008 (CFAR pipeline) ─────────────────────────────
+# ── sar-spill-intelligence :8008 (UNet-ResNet34 ONNX pipeline) ───────────────
 RUN mkdir -p /svc/sar-spill-intelligence
 COPY shared /svc/sar-spill-intelligence/shared
 COPY services/shared/redis_client.py /svc/sar-spill-intelligence/shared/redis_client.py

@@ -13,5 +13,6 @@
   "source_units": "sigma0_dB",
   "lee_window": 5,
   "tile_size": 512,
-  "stride": 384
+  "stride": 256,
+  "halo": 128
 }

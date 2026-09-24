@@ -1,4 +1,4 @@
-"""SAR worker: GeoTIFF -> Lee filter -> dark segmentation + CFAR -> morphology -> polygonize."""
+"""SAR worker: two-band GeoTIFF -> UNet oil probability -> polygonize."""
 from __future__ import annotations
 
 import asyncio
@@ -23,11 +23,10 @@ from shared.redis_client import (
 )
 from shared.spatial.constants import SENTINEL1_PIXEL_SIZE_M
 from shared.spatial.geo import area_m2_from_geometry
-from app.cfar import cfar_detect
-from app.despeckle import lee_filter
-from app.morphology import clean_mask
 from app.polygonize import extract_candidates
-from app.segmentation import dark_region_mask
+from fusion.config import SAR_ONNX, SAR_THRESHOLD
+from fusion.onnx_runtime import predict_sar_probability
+from fusion.sar_filter import db_to_linear, lee_filter, linear_to_db
 
 
 log = logging.getLogger(__name__)
@@ -152,65 +151,6 @@ async def _persist_candidates(
                 )
 
 
-def _min_area_m2_config() -> float:
-    """Return the explicit minimum spill area (m²) from configuration.
-
-    Read from the ``SAR_MIN_AREA_M2`` environment variable at the worker/config
-    layer. There is no hardcoded default: the threshold must come from
-    validation data. Raises ``ValueError`` (a configuration error) when the
-    variable is missing, empty, or not a positive finite number, which fails the
-    Step 3 processing path rather than hiding it.
-    """
-    raw = os.environ.get("SAR_MIN_AREA_M2")
-    if not raw or raw.strip() == "":
-        raise ValueError(
-            "SAR_MIN_AREA_M2 is not configured. Set it from validation data "
-            "before spill-candidate persistence; no default noise-area "
-            "threshold may be invented."
-        )
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        raise ValueError(
-            f"SAR_MIN_AREA_M2 is invalid: {raw!r}. It must be configured as a "
-            "positive number of square metres (float)."
-        )
-    if not np.isfinite(value) or value <= 0:
-        raise ValueError(
-            f"SAR_MIN_AREA_M2 must be a positive finite number, got {value!r}."
-        )
-    return value
-
-
-def _bright_target_threshold_config() -> float:
-    """Return the explicit high-backscatter threshold for bright-target masks.
-
-    Read from ``SAR_BRIGHT_TARGET_THRESHOLD`` at the worker/config layer. There
-    is no hardcoded scientific value: the threshold must come from
-    validation/configuration. Missing/invalid configuration raises a clear
-    error that fails the Step 3 path.
-    """
-    raw = os.environ.get("SAR_BRIGHT_TARGET_THRESHOLD")
-    if not raw or raw.strip() == "":
-        raise ValueError(
-            "SAR_BRIGHT_TARGET_THRESHOLD is not configured. Set it from "
-            "validation data before generating scene artifacts; no bright-target "
-            "threshold may be invented."
-        )
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        raise ValueError(
-            f"SAR_BRIGHT_TARGET_THRESHOLD is invalid: {raw!r}. It must be "
-            "configured as a positive finite number (float)."
-        )
-    if not np.isfinite(value) or value <= 0:
-        raise ValueError(
-            f"SAR_BRIGHT_TARGET_THRESHOLD must be a positive finite number, got {value!r}."
-        )
-    return value
-
-
 def _artifact_root() -> str:
     return os.environ.get("SAR_ARTIFACT_ROOT", "/data/artifacts")
 
@@ -254,13 +194,10 @@ async def _process_sar_message(
         scene_metadata = _parse_scene_metadata(data.get("scene_metadata"))
         scene_id = scene_metadata.get("scene_id")
 
-        # Step 3 gates: the physical minimum spill area and the bright-target
-        # backscatter threshold must be explicitly configured from validation
-        # data. Missing/invalid configuration raises and fails the Step 3 path
-        # below (scenes_failed), never silently processing without persistence
-        # or artifact generation.
-        min_area_m2 = _min_area_m2_config()
-        bright_threshold = _bright_target_threshold_config()
+        # A one-pixel floor retains every region produced by the model. The
+        # optional bright-target threshold is for vessel context only.
+        min_area_m2 = SENTINEL1_PIXEL_SIZE_M ** 2
+        bright_threshold = os.environ.get("SAR_BRIGHT_TARGET_THRESHOLD")
 
         await publish_to_stream(redis, "sar.tasking.events", {"scene_id": scene_id, "step": "sar_tasking"})
         await asyncio.sleep(0.5)
@@ -270,13 +207,13 @@ async def _process_sar_message(
         
         def _read_raster():
             with rasterio.open(raster_path) as dataset:
-                if dataset.count < 1:
-                    raise ValueError("GeoTIFF has no raster bands.")
+                if dataset.count != 2:
+                    raise ValueError("SAR UNet requires exactly two calibrated Sigma0-dB bands.")
                 masked = dataset.read(1, masked=True)
                 values = np.asarray(masked.filled(np.nan), dtype=np.float64)
                 finite = np.isfinite(values)
                 if not finite.any():
-                    raise ValueError("GeoTIFF contains no finite VV pixels.")
+                    raise ValueError("GeoTIFF contains no finite SAR pixels.")
                 fill_value = float(np.median(values[finite]))
                 working_image = np.where(finite, values, fill_value)
                 raster_metadata = {
@@ -293,32 +230,28 @@ async def _process_sar_message(
         raw_image = working_image
         await asyncio.sleep(0.5)
 
-        # STEP 2: Despeckling — intensity (linear-power) domain Lee filter;
-        # speckle is multiplicative in power, so the Lee MMSE model is applied
-        # there and the result converted back to dB.
+        # STEP 2: The reference model's scene-level Lee filter, frozen
+        # normalization, 512-pixel tiling and probability stitching run here.
         await publish_to_stream(redis, "sar.tasking.events", {"scene_id": scene_id, "step": "sar_despeckling"})
-        filtered_image = await asyncio.to_thread(lee_filter, working_image, 5, "linear")
-        await asyncio.sleep(0.5)
-
-        # STEP 3: CFAR / Dark Region
-        # CFAR threshold multiplier k is env-tunable (SAR_CFAR_K, default 2.5)
-        # so it can be calibrated against real Mumbai Sentinel-1 scenes without
-        # a code change.
-        cfar_k = float(os.environ.get("SAR_CFAR_K", 2.5))
-        await publish_to_stream(redis, "sar.tasking.events", {"scene_id": scene_id, "step": "sar_cfar"})
-        dark_mask = await asyncio.to_thread(dark_region_mask, filtered_image)
-        anomaly_mask = await asyncio.to_thread(cfar_detect, filtered_image, 3, 15, cfar_k)
-        binary_mask = (dark_mask | anomaly_mask) & finite
-        await asyncio.sleep(0.5)
-
-        # STEP 3 Step A — morphological cleaning
-        await publish_to_stream(redis, "sar.tasking.events", {"scene_id": scene_id, "step": "sar_morphology"})
-        cleaned_mask = await asyncio.to_thread(
-            clean_mask,
-            binary_mask,
-            open_size=3,
-            close_size=5,
+        probability, model_valid = await asyncio.to_thread(
+            predict_sar_probability, raster_path, SAR_ONNX
         )
+        # Downstream vessel and texture context still consumes a filtered
+        # backscatter image; this is the same Lee filter used for model input.
+        filtered_image = await asyncio.to_thread(
+            lambda: linear_to_db(lee_filter(db_to_linear(raw_image), window_size=5))
+        )
+        await asyncio.sleep(0.5)
+
+        # Threshold the stitched oil probability exactly once. CFAR and dark
+        # image segmentation do not contribute to spill detection.
+        await publish_to_stream(redis, "sar.tasking.events", {"scene_id": scene_id, "step": "sar_model_inference"})
+        binary_mask = (probability >= SAR_THRESHOLD) & model_valid
+        await asyncio.sleep(0.5)
+
+        # The reference inference does not morphologically alter its mask.
+        await publish_to_stream(redis, "sar.tasking.events", {"scene_id": scene_id, "step": "sar_morphology"})
+        cleaned_mask = binary_mask
         await asyncio.sleep(0.5)
 
         # STEP 3 Step B — connected-component polygonization
@@ -339,7 +272,10 @@ async def _process_sar_message(
         affine = tuple(raster_metadata["transform"])
         if len(affine) == 9:
             affine = affine[:6]
-        bright_target_mask = filtered_image > bright_threshold
+        bright_target_mask = (
+            (filtered_image > float(bright_threshold)) & finite
+            if bright_threshold else np.zeros_like(binary_mask, dtype=bool)
+        )
         artifact_path = await asyncio.to_thread(
             save_scene_artifact,
             _artifact_root(),
@@ -423,7 +359,7 @@ async def _process_sar_message(
         STATE["last_raster_metadata"] = raster_metadata
         STATE["last_artifact_path"] = artifact_path
         log.info(
-            "Processed SAR scene id=%s path=%s shape=%s dark_candidates=%d spill_candidates=%d artifact=%s",
+            "Processed SAR UNet scene id=%s path=%s shape=%s oil_pixels=%d spill_candidates=%d artifact=%s",
             scene_id,
             raster_path,
             binary_mask.shape,

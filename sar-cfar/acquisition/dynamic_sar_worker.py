@@ -85,16 +85,19 @@ async def process_task(task_id: int, mmsi: str, lat: float, lon: float, pool):
             raster_path = f"/data/artifacts/sar/mock_scene_{task_id}.tif"
             
             # Generate random backscatter noise
-            data = np.random.normal(loc=-15.0, scale=3.0, size=(1000, 1000)).astype(np.float64)
+            data = np.stack([
+                np.random.normal(loc=-15.0, scale=3.0, size=(1000, 1000)),
+                np.random.normal(loc=-19.0, scale=3.0, size=(1000, 1000)),
+            ]).astype(np.float32)
             transform = from_origin(lon - 0.1, lat + 0.1, 0.0002, 0.0002)
             
             with rasterio.open(
                 raster_path, 'w', driver='GTiff',
-                height=data.shape[0], width=data.shape[1],
-                count=1, dtype=data.dtype,
+                height=data.shape[1], width=data.shape[2],
+                count=2, dtype=data.dtype,
                 crs='EPSG:4326', transform=transform
             ) as dst:
-                dst.write(data, 1)
+                dst.write(data)
                 
             raster_path, synthetic_meta = inject_geotiff_if_enabled(
                 raster_path,
@@ -110,7 +113,7 @@ async def process_task(task_id: int, mmsi: str, lat: float, lon: float, pool):
                 "scene_id": f"mock_scene_{task_id}",
                 "acquisition_time": datetime.utcnow().isoformat() + "Z",
                 "orbit": "mock",
-                "polarization": "VV",
+                "polarization": "synthetic two-band source order",
                 "resolution": 10.0,
                 "is_synthetic": True,
             }
