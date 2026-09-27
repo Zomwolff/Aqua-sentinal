@@ -6,11 +6,11 @@ All SAR-related code lives here (refactored from repo root / `services/`).
 
 | Path | Origin | Purpose |
 |---|---|---|
-| `sar-spill-intelligence/` | `services/sar-spill-intelligence/` | Lee despeckle → Otsu + CFAR → morphology → polygonize worker (`sar.clean` → `spill.candidates.raw`) |
+| `sar-spill-intelligence/` | `services/sar-spill-intelligence/` | Two-band UNet-ResNet34 ONNX probability → threshold → polygonize worker (`sar.clean` → `spill.candidates.raw`) |
 | `acquisition/` | `services/data-ingestion/app/sar_acquisition.py`, `synthetic_injection.py`, `dynamic_sar_worker.py` | Sentinel-1 GEE acquisition, synthetic slick injection, dynamic tasking worker |
 | `fetch/` | `fetch_*.py`, `gee_test.py` | Ad-hoc GEE Sentinel-1 fetch probes |
 | `scripts/` | `scripts/demo_sar_spill.py`, `generate_synthetic_sar_fixture.py`, `test_demo_sar_spill.py` | E2E demo + deterministic fixture |
-| `tests/` | root `test_cfar.py`, `test_pipeline.py`, `test_segmentation*.py`, `test_sar_ui.py`, `test_redis.py`, `tests/test_sar_acquisition.py`, `test_synthetic_injection.py`, `test_sar_fusion.py` | Loose + service SAR tests |
+| `tests/` | `test_provenance.py`, `test_polygonize.py`, and root SAR tests | SAR worker and geometry checks |
 | `tools/` | `create_synthetic_spill_tiff.py`, `strip_crs.py` | Raster utilities |
 | `docs/` | `docs/SAR_DEMO.md`, `docs/sar-spill-pipeline.md` | SAR run-book + pipeline spec |
 | `data/sample_sar/` | `data/sample_sar/` | Sample SAR rasters (fixture default: `sar/data/sample_sar/synthetic_e2e.tif`) |

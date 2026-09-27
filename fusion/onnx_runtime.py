@@ -8,11 +8,8 @@ import rasterio
 from rasterio.enums import Resampling
 from rasterio.warp import reproject
 
-from .alignment import align_sar_probability
-from .config import CANONICAL_BANDS, EO_NORMALIZATION, EO_THRESHOLD, SAR_THRESHOLD
+from .config import CANONICAL_BANDS, EO_NORMALIZATION, FUSION_THRESHOLD, SAR_FUSION_WEIGHT
 
-_MEAN = np.asarray([0.485, 0.456, 0.406], dtype=np.float32)
-_STD = np.asarray([0.229, 0.224, 0.225], dtype=np.float32)
 _BAND_PATTERN = re.compile(r"(?:^|[^A-Z0-9])B(8A|0?[2-8]|1[12])(?:[^A-Z0-9]|$)", re.IGNORECASE)
 
 
@@ -32,65 +29,55 @@ def _sigmoid(values):
 
 
 def _load_sar_image(path: Path):
+    """Match UNet-ResNet34 preprocessing; preserve the two training band positions."""
+    from .sar_filter import db_to_linear, lee_filter, linear_to_db
     with rasterio.open(path) as source:
-        raw = source.read()
-    channels = raw.shape[0]
-    values = raw.astype(np.float64)
-    low = float(np.nanmin(values))
-    high = float(np.nanmax(values))
-    values = ((values - low) / (high - low + 1e-12) * 255.0).clip(0, 255)
-    if channels == 4:
-        values = values[:3]
-        channels = 3
-    if channels == 1:
-        gray = values[0]
-        return np.repeat(gray[..., None], 3, axis=2).astype(np.uint8)
-    if channels != 3:
-        gray = np.mean(values, axis=0, dtype=np.float64)
-        return np.repeat(gray[..., None], 3, axis=2).astype(np.uint8)
-    image = np.transpose(values, (1, 2, 0)).astype(np.uint8)
-    if np.array_equal(image[..., 0], image[..., 1]) and np.array_equal(image[..., 1], image[..., 2]):
-        return image
-    gray = np.mean(image.astype(np.float32), axis=2)
-    return np.repeat(gray[..., None], 3, axis=2).clip(0, 255).astype(np.uint8)
+        if source.count != 2:
+            raise ValueError("SAR UNet requires two Sigma0-dB bands in training file order; single-band and RGB images are unsupported")
+        raw = source.read().astype(np.float64)
+        valid = np.all(source.read_masks() > 0, axis=0) & np.all(np.isfinite(raw), axis=0)
+    if not valid.any():
+        raise ValueError("SAR input contains no valid calibrated Sigma0-dB pixels")
+    # Fill invalid pixels for the Lee neighborhood; they remain excluded from
+    # the output probability and cannot become detected oil.
+    for band in raw:
+        band[~valid] = np.median(band[valid])
+    config = json.loads((Path(__file__).resolve().parents[1] / "models/sar/normalization.json").read_text())
+    filtered = linear_to_db(lee_filter(db_to_linear(raw), window_size=config["lee_window"]))
+    normalized = np.stack([np.clip((filtered[c] - lo) / (hi - lo), 0, 1)
+                           for c, (lo, hi) in enumerate(config["bands"])]).astype(np.float32)
+    return normalized, valid
 
 
-def _sar_tiles(image, tile=256, overlap=32):
-    height, width = image.shape[:2]
-    stride = tile - overlap
-    rows = [0] if height <= tile else list(range(0, height - tile + 1, stride))
-    cols = [0] if width <= tile else list(range(0, width - tile + 1, stride))
-    if rows[-1] != max(height - tile, 0): rows.append(max(height - tile, 0))
-    if cols[-1] != max(width - tile, 0): cols.append(max(width - tile, 0))
-    padded_height = max(height, rows[-1] + tile)
-    padded_width = max(width, cols[-1] + tile)
-    padded = np.pad(image, ((0, padded_height - height), (0, padded_width - width), (0, 0)), mode="reflect")
-    return padded, [(padded[y:y + tile, x:x + tile], y, x) for y in rows for x in cols], (height, width), (padded_height, padded_width)
-
-
-def _sar_probability(path: Path, model_path: Path):
-    image = _load_sar_image(path)
-    padded, patches, (height, width), (padded_height, padded_width) = _sar_tiles(image)
-    session = _session(model_path)
-    input_name = session.get_inputs()[0].name
-    accumulated = np.zeros((padded_height, padded_width), dtype=np.float64)
-    counts = np.zeros_like(accumulated)
-    for patch, y, x in patches:
-        array = patch.astype(np.float32) / 255.0
-        array = ((array - _MEAN) / _STD).transpose(2, 0, 1)[None]
-        logits = session.run(None, {input_name: array.astype(np.float32)})[0][:, 0]
-        probability = _sigmoid(logits)[0]
-        accumulated[y:y + 256, x:x + 256] += probability
-        counts[y:y + 256, x:x + 256] += 1
-    return (accumulated / np.maximum(counts, 1))[:height, :width].astype(np.float32)
+def _sar_tiles(image, tile=512, halo=128):
+    """Reflect-pad so every exported pixel is away from a model tile edge."""
+    height, width = image.shape[1:]
+    core = tile - 2 * halo
+    if core <= 0:
+        raise ValueError("SAR tile halo must be smaller than half the tile")
+    rows = range(0, ((height + core - 1) // core) * core, core)
+    cols = range(0, ((width + core - 1) // core) * core, core)
+    padded = np.pad(image, ((0, 0), (halo, len(rows) * core + halo - height),
+                            (halo, len(cols) * core + halo - width)), mode="reflect")
+    return padded, [(y, x) for y in rows for x in cols], (height, width), core, halo
 
 
 def predict_sar_probability(path, model_path):
-    """Return SAR probability and its source validity mask."""
-    path = Path(path).resolve()
-    with rasterio.open(path) as source:
-        valid = source.read_masks(1) > 0
-    return _sar_probability(path, model_path), valid
+    """Return oil probability from tile centers, without thresholding tiles."""
+    image, valid = _load_sar_image(Path(path).resolve())
+    padded, origins, (height, width), core, halo = _sar_tiles(image)
+    session = _session(model_path)
+    input_name = session.get_inputs()[0].name
+    result = np.zeros((len(range(0, height, core)) * core,
+                       len(range(0, width, core)) * core), dtype=np.float32)
+    for y, x in origins:
+        tile = np.ascontiguousarray(padded[:, y:y + 512, x:x + 512][None])
+        logits = session.run(None, {input_name: tile})[0]
+        probability = _sigmoid(logits)[0, 0]
+        result[y:y + core, x:x + core] = probability[halo:halo + core, halo:halo + core]
+    result = result[:height, :width]
+    result[~valid] = 0
+    return result, valid
 
 
 def _band_token(name):
@@ -110,7 +97,7 @@ def _band_files(directory: Path):
                 found[band] = path
     missing = [band for band in CANONICAL_BANDS if band not in found]
     if missing: raise ValueError(f"Missing required Sentinel-2 bands: {missing}")
-    return found
+    return {band: found[band] for band in CANONICAL_BANDS}
 
 
 def _prepare_eo(path: Path, temporary: Path):
@@ -217,4 +204,5 @@ def detect_oil_onnx(sentinel1_path, sentinel2_path, sar_onnx: Path, eo_onnx: Pat
     sar_values, sar_valid = predict_sar_probability(sentinel1_path, sar_onnx)
     eo_values, eo_valid = predict_eo_probability(sentinel2_path, eo_onnx)
     aligned, valid = align_probability_pair(sentinel1_path, sar_values, sar_valid, sentinel2_path, eo_valid)
-    return ((eo_values >= EO_THRESHOLD) & valid).astype(np.uint8), aligned, eo_values
+    fused = SAR_FUSION_WEIGHT * aligned + (1 - SAR_FUSION_WEIGHT) * eo_values
+    return ((fused >= FUSION_THRESHOLD) & valid).astype(np.uint8), aligned, eo_values

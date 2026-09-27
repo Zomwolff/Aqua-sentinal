@@ -11,6 +11,7 @@ earthengine-api
 numpy
 scipy
 rasterio
+onnxruntime
 scikit-image
 affine
 google-api-python-client

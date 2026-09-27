@@ -1,4 +1,4 @@
-# Aqua Sentinel — Maritime Oil-Spill Detection & Attribution
+|-- models/sar/model.onnx     # Active SAR UNet-ResNet34 model\n|-- fusion/                   # Shared ONNX inference for SAR, EO and fusion\n# Aqua Sentinel — Maritime Oil-Spill Detection & Attribution
 
 A real-time maritime intelligence system for the Smart India Hackathon that detects oil spills from SAR imagery and AIS vessel data, fuses the evidence, attributes spills to source vessels, and recommends response actions. A pipeline of Python/FastAPI microservices exchanges events over Redis Streams, persists spatio-temporal data in PostGIS, and serves a live Leaflet-based dashboard through an API gateway.
 
@@ -98,18 +98,13 @@ Each service runs uvicorn on port 8000 inside its container and is exposed on a 
 | 8014 | response-decision | Recommends priority response actions |
 | 8015 | api-gateway | Public REST API + live WebSocket relay to the dashboard |
 
-## SAR oil-spill pipeline — B1 segmentation + B2 look-alike classifier
+## SAR oil-spill inference
 
-Deep-learning SAR spill detection lives in `sar-LinkNet-ResNet34/` (LinkNet + ResNet34, **separate from** the `sar-spill-intelligence` CFAR microservice on port 8008):
+The active SAR model is the [UNet-ResNet34](https://github.com/aditya-mensinkai/sar-UNET-RESNET34) ONNX export at `models/sar/model.onnx`. Both the fusion upload and the SAR worker use the same inference code in `fusion/onnx_runtime.py`: two calibrated Sigma0-dB bands in file order, 5x5 Lee filtering, frozen normalization, 512-pixel tiles, probability stitching, then a 0.50 oil threshold. The SAR worker polygonizes this mask and continues publishing candidates to the existing AIS and incident services. The old LinkNet checkpoint and standalone pipeline have been removed.
 
-```powershell
-cd sar-LinkNet-ResNet34
-.\.venv\Scripts\python.exe infer_pipeline.py --checkpoint checkpoints/best_model.pth --input path\to\scene.tif --output-dir outputs/demo --rescale
-.\.venv\Scripts\python.exe geo_postprocess.py --mask outputs/demo/scene_mask.png --source-image path\to\scene.tif --output-dir outputs/demo --glcm-band 1
-.\.venv\Scripts\python.exe b2_lookalike.py --input outputs/demo/scene_spill_meta.json --output outputs/b2_predictions.json
-```
+The reference training set does not identify which band position corresponds to VV or VH. Automatic Sentinel-1 acquisition exports VV then VH, and this order is recorded as unverified. If confirmed training order differs, change the acquisition order before interpreting automatic detections. User uploads must preserve the original training band order.
 
-That chain produces the mask → GIS polygons + 14 per-candidate B2 features (GLCM/shape/edge/context) → OIL/LOOK_ALIKE predictions from `models/b2_random_forest.joblib`. Batch training data via `at.py`, classifier training via `train_b2.py`. **Full teammate guide (setup, flags, outputs, troubleshooting, honest model limitations): [`sar-LinkNet-ResNet34/README.md`](sar-LinkNet-ResNet34/README.md).**
+See [fusion/README.md](fusion/README.md) for input and fusion details.
 
 ## Project structure
 
@@ -127,8 +122,8 @@ That chain produces the mask → GIS polygons + 14 per-candidate B2 features (GL
 │   └── geo_layers/           # Coastlines, EEZ, protected areas
 ├── services/                 # 15 FastAPI microservices, one container each
 │   └── <service>/            # Dockerfile, requirements.txt, app/main.py
-├── sar-LinkNet-ResNet34/     # SAR DL pipeline: B1 inference, GIS postprocess,
-│                             # B2 features/training/inference (own README + venv)
+├── models/sar/model.onnx     # Active SAR UNet-ResNet34 model
+├── fusion/                   # Shared SAR, EO, and fusion inference
 ├── dashboard/                # React + Vite + Leaflet frontend
 ├── simulator/                # Data replay simulator (script, not a server)
 ├── shared/                   # Shared Python modules (mounted into all services)

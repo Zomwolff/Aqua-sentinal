@@ -119,10 +119,8 @@ services:
       AIS_PROVIDER: none
       INJECT_SYNTHETIC: ${INJECT_SYNTHETIC:-false}
       SAR_ALLOW_MOCK_FALLBACK: ${SAR_ALLOW_MOCK_FALLBACK:-false}
-      SAR_MIN_AREA_M2: ${SAR_MIN_AREA_M2:-}
       SAR_BRIGHT_TARGET_THRESHOLD: ${SAR_BRIGHT_TARGET_THRESHOLD:-}
       SAR_ARTIFACT_ROOT: ${SAR_ARTIFACT_ROOT:-/data/artifacts}
-      SAR_CFAR_K: ${SAR_CFAR_K:-2.5}
     volumes:
       - ./secret/gee-key.json:/run/secrets/gee-key.json:ro
       - sar-scene-artifacts:/data/artifacts
@@ -191,6 +189,7 @@ services:
       WINDAGE_RESAMPLE_INTERVAL_S: ${WINDAGE_RESAMPLE_INTERVAL_S:-900}
       WIND_DEFLECTION_ENABLED: ${WIND_DEFLECTION_ENABLED:-false}
       WIND_DEFLECTION_DEG: ${WIND_DEFLECTION_DEG:-20.0}
+      SPILL_SIMULATOR_URL: http://spill-simulator:8000
     volumes:
       - sar-scene-artifacts:/data/artifacts:ro
     ports:
@@ -228,7 +227,8 @@ services:
     ports: ["8017:8017"]
     networks: [aqua-net]
 
-  simulator:
+  # ── Legacy generic simulator (kept but not started by default) ──────────────
+  legacy-simulator:
     build: ./simulator
     restart: unless-stopped
     profiles: ["tools"]
@@ -237,6 +237,23 @@ services:
         condition: service_started
     volumes:
       - ./data:/data:ro
+    networks:
+      - aqua-net
+
+  # ── Wakashio Oil Spill Simulator ─────────────────────────────────────────────
+  spill-simulator:
+    build:
+      context: .
+      dockerfile: AIS/services/spill-simulator/Dockerfile
+    container_name: aqua-sentinal-spill-simulator-1
+    restart: unless-stopped
+    depends_on:
+      <<: *depends-defaults
+    environment:
+      <<: *common-env
+      SIMULATION_SPEED_MULTIPLIER: ${SIMULATION_SPEED_MULTIPLIER:-120}
+    ports:
+      - "8018:8000"
     networks:
       - aqua-net
 

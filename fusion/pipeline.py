@@ -1,9 +1,7 @@
-from pathlib import Path
-
 import numpy as np
 import rasterio
 
-from .config import EO_ONNX, EO_THRESHOLD, SAR_ONNX, SAR_THRESHOLD
+from .config import EO_ONNX, EO_THRESHOLD, SAR_ONNX, SAR_THRESHOLD, FUSION_THRESHOLD, SAR_FUSION_WEIGHT
 
 
 def _require_models(*paths):
@@ -34,10 +32,11 @@ def _detect_oil_result(sentinel1_path=None, sentinel2_path=None) -> dict:
     sar_probability, sar_valid = predict_sar_probability(sentinel1_path, SAR_ONNX)
     eo_probability, eo_valid = predict_eo_probability(sentinel2_path, EO_ONNX)
     sar_aligned, valid = align_probability_pair(sentinel1_path, sar_probability, sar_valid, sentinel2_path, eo_valid)
-    sar_weight = 0.75 if Path(sentinel2_path).is_file() else 0.50
+    sar_weight = SAR_FUSION_WEIGHT
     eo_weight = 1.0 - sar_weight
     fused_probability = sar_weight * sar_aligned + eo_weight * eo_probability
-    mask = ((fused_probability >= 0.50) & valid).astype(np.uint8)
+    fused_probability = np.where(valid, fused_probability, 0).astype(np.float32)
+    mask = ((fused_probability >= FUSION_THRESHOLD) & valid).astype(np.uint8)
     sar_mask = (sar_aligned >= SAR_THRESHOLD) & valid
     eo_mask = (eo_probability >= EO_THRESHOLD) & valid
     return {
@@ -45,12 +44,12 @@ def _detect_oil_result(sentinel1_path=None, sentinel2_path=None) -> dict:
         "probability": fused_probability,
         "oil_spill_detected": bool(mask.any()),
         "mode": "FUSED",
-        "threshold": 0.50,
+        "threshold": FUSION_THRESHOLD,
         "weights": {"sar": sar_weight, "eo": eo_weight},
         "fused_pixel_count": int(mask.sum()),
         "sar_supported_pixel_count": int((mask.astype(bool) & sar_mask).sum()),
         "eo_only_pixel_count": int((mask.astype(bool) & ~sar_mask).sum()),
-        "sar_only_rejected_pixel_count": int((sar_mask & ~eo_mask).sum()),
+        "sar_only_rejected_pixel_count": int((sar_mask & ~eo_mask & ~mask.astype(bool)).sum()),
     }
 
 

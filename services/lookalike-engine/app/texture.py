@@ -60,10 +60,9 @@ def compute_glcm_features(
         mean_backscatter, std_backscatter           (raw dB values in the mask)
 
     B2 GLCM SOURCE NOTE: this service uses per-candidate min/max normalization
-    and a single distance. The authoritative B2 GLCM source is
-    ``sar-LinkNet-ResNet34/geo_postprocess.py`` (fixed [-30, 0] dB range,
-    distances [1, 2], mean+std aggregation). Do not mix the two sources in
-    one classifier column without accounting for the different normalizations.
+    and a single distance. Older B2 reports used a fixed [-30, 0] dB range,
+    distances [1, 2], and mean+std aggregation. Do not mix those features
+    with this service's features without accounting for the normalization.
 
     Empty or fully-invalid regions return the documented zero/neutral features;
     a uniform region (no gray-level variation) returns a homogeneous-feature

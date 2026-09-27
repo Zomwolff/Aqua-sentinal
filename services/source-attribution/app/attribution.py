@@ -120,3 +120,20 @@ def attribution_label(final_score: float) -> str:
     elif final_score >= 0.50: return "possible_source"
     elif final_score >= 0.25: return "correlated"
     return "insufficient_evidence"
+
+def score_origin_proximity(
+    vessel_lat: float, vessel_lon: float, vessel_time,
+    origin_lat: float, origin_lon: float, origin_time,
+    window_m: float = ATTRIBUTION_SPATIAL_WINDOW_M,
+    window_h: float = ATTRIBUTION_TEMPORAL_WINDOW_H
+) -> float:
+    """Score a vessel based on its proximity to the Bayesian MAP origin."""
+    if not vessel_time or not origin_time: return 0.0
+    
+    dist_m = _haversine(origin_lat, origin_lon, vessel_lat, vessel_lon)
+    s_dist = score_distance(dist_m, window_m)
+    
+    time_diff_h = abs((vessel_time - origin_time).total_seconds()) / 3600.0
+    s_time = score_time(time_diff_h, window_h)
+    
+    return float(s_dist * s_time)

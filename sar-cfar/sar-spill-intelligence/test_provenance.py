@@ -13,10 +13,9 @@ def _load_worker():
     async def _noop(*_a, **_k):
         return None
 
-    stub_keys = ["rasterio", "shared.redis_client", "shared.db.connection", "shared.artifacts"]
+    stub_keys = ["shared.redis_client", "shared.db.connection", "shared.artifacts"]
     previous = {key: sys.modules.get(key) for key in stub_keys}
 
-    sys.modules.setdefault("rasterio", types.ModuleType("rasterio"))
     rstub = types.ModuleType("shared.redis_client")
     rstub.consume_stream = _noop
     rstub.ensure_consumer_group = _noop
@@ -83,3 +82,48 @@ def test_candidates_raw_event_carries_synthetic():
 def test_insert_sql_sets_is_synthetic():
     assert "is_synthetic" in _WORKER._INSERT_CANDIDATE_SQL
     assert "$8" in _WORKER._INSERT_CANDIDATE_SQL
+
+
+def test_worker_uses_unet_probability_for_candidates(tmp_path, monkeypatch):
+    import asyncio
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+
+    path = tmp_path / "sar.tif"
+    with rasterio.open(path, "w", driver="GTiff", width=8, height=8,
+                       count=2, dtype="float32", crs="EPSG:4326",
+                       transform=from_origin(75, 15, .001, .001)) as dst:
+        dst.write(np.full((2, 8, 8), -20, np.float32))
+
+    probabilities = np.full((8, 8), .49, np.float32)
+    probabilities[2:4, 2:4] = .51
+    observed = {}
+
+    def predict(source, model):
+        assert source == str(path)
+        assert model == _WORKER.SAR_ONNX
+        return probabilities, np.ones((8, 8), bool)
+
+    def extract(**kwargs):
+        observed["mask"] = kwargs["mask"].copy()
+        return []
+
+    async def publish(*args, **kwargs):
+        return None
+
+    async def execute(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(_WORKER, "predict_sar_probability", predict)
+    monkeypatch.setattr(_WORKER, "extract_candidates", extract)
+    monkeypatch.setattr(_WORKER, "publish_to_stream", publish)
+    monkeypatch.setattr(_WORKER, "save_scene_artifact", lambda *a, **k: str(tmp_path / "artifact"))
+    monkeypatch.setattr(_WORKER.asyncio, "sleep", publish)
+    monkeypatch.delenv("SAR_BRIGHT_TARGET_THRESHOLD", raising=False)
+    pool = types.SimpleNamespace(execute=execute)
+    data = {"raster_path": str(path), "scene_metadata": _meta(False)}
+    asyncio.run(_WORKER._process_sar_message(data, pool, object()))
+    expected = np.zeros((8, 8), bool)
+    expected[2:4, 2:4] = True
+    np.testing.assert_array_equal(observed["mask"], expected)

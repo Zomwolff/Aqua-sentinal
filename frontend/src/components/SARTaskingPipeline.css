@@ -132,6 +132,21 @@
   background: #000;
 }
 
+.artifact-item.interpretation {
+  grid-column: 1 / -1;
+}
+
+.artifact-item.interpretation img {
+  max-height: 230px;
+  object-fit: contain;
+}
+
+.artifact-item.interpretation small {
+  margin-top: 5px;
+  color: #6faebe;
+  font-size: .62rem;
+}
+
 /* ── Step copy: label + explanation ───────────────────────────────────────── */
 .step-copy {
   display: flex;

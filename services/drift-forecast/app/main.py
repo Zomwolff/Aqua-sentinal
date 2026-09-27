@@ -17,6 +17,8 @@ sys.path.insert(0, "/app")
 from shared.db.connection import close_pool, create_pool, get_pool
 from shared.redis_client import close_redis, get_redis
 from app.worker import STATE, run_drift_worker
+from app.origin_api import router as origin_router
+from app.origin_worker import run_origin_worker
 
 SERVICE_NAME = "drift-forecast"
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -28,10 +30,17 @@ async def _lifespan(app: FastAPI):
     await create_pool()
     await get_redis()
     task = asyncio.create_task(run_drift_worker())
+    origin_task = asyncio.create_task(run_origin_worker())
+    app.state.origin_worker_task = origin_task
     app.state.worker_task = task
     log.info("%s started.", SERVICE_NAME)
     yield
     task.cancel()
+    origin_task.cancel()
+    try:
+        await origin_task
+    except asyncio.CancelledError:
+        pass
     try:
         await task
     except asyncio.CancelledError:
@@ -43,6 +52,8 @@ async def _lifespan(app: FastAPI):
 app = FastAPI(title=SERVICE_NAME, version="1.0.0", lifespan=_lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
                    allow_methods=["*"], allow_headers=["*"])
+
+app.include_router(origin_router)
 
 
 @app.get("/health")

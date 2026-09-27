@@ -21,7 +21,7 @@ For a clear scene-level decision, use `detect_oil_result(...)`. It reports `oil_
 
 `sentinel2_path` may be a 10-band GeoTIFF with canonical band descriptions or a directory containing separate files whose names contain `B02`, `B03`, `B04`, `B05`, `B06`, `B07`, `B08`, `B8A`, `B11`, and `B12`. Separate bands are detected by filename, ordered canonically, and resampled to the B2 grid when required.
 
-The package uses ONNX exports of the existing SAR and EO networks. It preserves the reference preprocessing, tiling, stitching, band order, and normalization constants. It aligns SAR probability to the EO grid. Standalone SAR uses threshold `0.50`; standalone EO uses threshold `0.15`. For fused inputs, the continuous probabilities are compared on the common EO grid and thresholded at `0.50` after weighted fusion. A single multiband EO GeoTIFF uses 75% SAR / 25% EO; a separate-band EO directory uses 50% / 50%.
+The package uses the supplied SAR UNet-ResNet34 checkpoint exported to ONNX and the existing binary EO ONNX network. It preserves the reference preprocessing, band order, and normalization constants. It aligns SAR probability to the EO grid. Standalone SAR uses threshold `0.50`; standalone EO uses threshold `0.40`. For fused inputs, the continuous probabilities are compared on the common EO grid and thresholded at `0.50` after weighted fusion. Both EO upload formats use 50% SAR / 50% EO. Fusion combines continuous oil probabilities before thresholding; rendered images and per-model binary masks are never fusion inputs. Only pixels valid in both aligned sources participate.
 
 ```text
 FUSED_PROBABILITY = SAR_WEIGHT * SAR_probability + EO_WEIGHT * EO_probability
@@ -40,7 +40,7 @@ python -c "from fusion import detect_oil; import numpy as np; m=detect_oil('S1.t
 
 ## ONNX
 
-The production image contains only `models/sar/model.onnx`, `models/eo/model.onnx`, and `models/eo/normalization.json`. Existing Python preprocessing, tiling, overlap stitching, sigmoid, thresholds, and raster alignment remain outside the graphs. Model export and PyTorch-vs-ONNX validation are development tasks and are not dependencies of the production package.
+The production image contains only `models/sar/model.onnx`, `models/eo/model.onnx`, `models/sar/normalization.json`, SAR provenance, and `models/eo/normalization.json`. Existing Python preprocessing, tiling, overlap stitching, sigmoid, thresholds, and raster alignment remain outside the graphs. Model export and PyTorch-vs-ONNX validation are development tasks and are not dependencies of the production package.
 
 ## Docker
 
@@ -54,6 +54,8 @@ docker run --rm -v "D:\data:/data" aqua-sentinel-fusion /data/S1.tif /data/S2.ti
 ## Integrated upload output
 
 `run_fusion(..., output_dir=..., acquisition_time=None, scene_id=None, ais_time=None)` writes `fusion_metadata.json`. Acquisition time is explicit first, then TIFF `ACQUISITION_TIME`/`TIFFTAG_DATETIME`, then saved AIS time (labelled `ais_fallback`). Missing time requires explicit input; processing time is never presented as satellite acquisition time.
+
+Each run also writes `oil_spill_visualization.png`. It preserves the source raster's measured luminance and texture, applies a restrained ocean palette, and darkens only the final-mask footprint for operator review. The dashboard labels this artifact as an illustrative, mask-guided colourisation; it is not presented as measured true-colour imagery or as additional model evidence.
 
 Scene ID comes from the source filename or explicit parameter. Candidate outputs include measured `area_m2`, `area_km2`, and mean model probability. Only Sentinel-1 supplies exported georeferencing. Fused masks are exported on its grid; EO-only results remain optical evidence with no mapped polygons or invented area. Existing EO coordinates may be read for alignment, but no coordinates are assigned to the EO input.
 
@@ -76,3 +78,13 @@ The active UI is `frontend/`, served by Docker at http://localhost:3000. The `da
 - Ten metadata/attribution regressions passed, including area conversion and S1-only exported georeferencing. Both ONNX sessions load. A real S2 image was not supplied for end-to-end EO validation.
 - Existing volumes also need `infra/postgres/migrations/003_response_decision.sql`. `scripts/backfill_response_costs.py` repairs only missing costs in the backend container, preserving existing recommendations.
 - The old standalone `eo` service is opt-in under the `legacy-eo` Compose profile. Local S2 uploads use `fusion`.
+
+## SAR input contract
+
+The SAR checkpoint is from [sar-UNET-RESNET34](https://github.com/aditya-mensinkai/sar-UNET-RESNET34), commit `e4bda07ccc8517b4c47fd2d60dfc137d7e653ca8`. The supplied `best_model.pth.zip` is itself a PyTorch checkpoint archive. Its SHA-256 and ONNX parity results are recorded in `models/sar/provenance.json`.
+
+Supply exactly two calibrated Sigma0-dB bands in the original training file order. The upstream project explicitly leaves the VV/VH assignment unresolved. We preserve file order, do not guess the polarization mapping, and reject single-band/RGB inputs. Automatic acquisition now supplies VV then VH. The reference does not identify the trained polarization order, so automatic detections require that order to be confirmed before they are treated as calibrated evidence.
+
+Inference applies dB-to-linear conversion, a 5x5 Lee filter, linear-to-dB conversion, and frozen per-band normalization. It uses 512x512 windows with a 128-pixel reflected halo, exports each tile's central 256x256 probabilities, and thresholds only after assembling the full probability map. This avoids the strong tile-edge bias observed when the reference's overlap averaging was applied to an uploaded scene. The numerical Lee implementation in `fusion/sar_filter.py` comes from the pinned reference repository. No training, augmentation, optimizer, or dataset code is included in production. PyTorch and ONNX export tools were used only in a temporary environment outside this repository.
+
+The attached `unetBinary.py` is a training reference, not an EO checkpoint. The existing EO ONNX weights and normalization are retained; the EO decision threshold is fixed at 0.40.

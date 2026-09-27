@@ -85,7 +85,7 @@ def get_sentinel1_scenes(start_date: str, end_date: str, aoi_geom: Optional[ee.G
     Filters applied:
     * platform: ``COPERNICUS/S1_GRD``
     * instrument mode: ``IW``
-    * polarisation: ``VV``
+    * dual polarisation: ``VV`` and ``VH`` in that source order
     * acquisition time between *start_date* and *end_date* (ISO‑8601).
     """
     aoi = aoi_geom if aoi_geom else mumbai_aoi_geometry()
@@ -95,6 +95,7 @@ def get_sentinel1_scenes(start_date: str, end_date: str, aoi_geom: Optional[ee.G
         .filterDate(start_date, end_date)
         .filter(ee.Filter.eq("instrumentMode", "IW"))
         .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VV"))
+        .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VH"))
     )
 
     size = collection.size().getInfo()
@@ -104,7 +105,7 @@ def get_sentinel1_scenes(start_date: str, end_date: str, aoi_geom: Optional[ee.G
 
     scenes: List[Dict[str, Any]] = []
     for img in collection.toList(size).getInfo():
-        img_obj = ee.Image(img["id"]).select(["VV"])  # keep only VV band
+        img_obj = ee.Image(img["id"]).select(["VV", "VH"])
         scenes.append({
             "id": img["id"],
             "properties": img["properties"],
@@ -168,12 +169,12 @@ def _validate_geotiff(path: str) -> None:
     with rasterio.open(path) as ds:
         if ds.width == 0 or ds.height == 0:
             raise ValueError(f"GeoTIFF has zero dimensions: {ds.width}x{ds.height}")
-        if ds.count == 0:
-            raise ValueError("GeoTIFF has no bands")
+        if ds.count != 2:
+            raise ValueError(f"SAR UNet requires exactly two bands; received {ds.count}")
         log.info("GeoTIFF validation passed: %dx%d, %d band(s), CRS=%s",
                  ds.width, ds.height, ds.count, ds.crs)
         # Read a small sample to verify data integrity
-        _ = ds.read(1, window=rasterio.windows.Window(0, 0, min(10, ds.width), min(10, ds.height)))
+        _ = ds.read((1, 2), window=rasterio.windows.Window(0, 0, min(10, ds.width), min(10, ds.height)))
 
 
 # ---------------------------------------------------------------------------
@@ -272,7 +273,7 @@ def export_scene_metadata(
 ) -> Tuple[str, Dict[str, Any]]:
     """Export the scene via getDownloadURL and return local raster path."""
     scene_id = scene["id"].replace("/", "_")
-    image = scene["image"].select("VV")
+    image = scene["image"].select(["VV", "VH"])
 
     file_prefix = scene_id
     dest_dir = "/data/artifacts/sar"
@@ -317,7 +318,7 @@ def export_scene_metadata(
         ).isoformat()
         + "Z",
         "orbit": scene["properties"].get("orbit"),
-        "polarization": scene["properties"].get("polarization"),
+        "polarization": "VV,VH (training order unverified)",
         "resolution": scene["properties"].get("resolution"),
     }
     metadata.update(synthetic_meta)
